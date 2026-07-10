@@ -1,0 +1,233 @@
+package canaryapi
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+)
+
+type Client struct {
+	httpClient    *http.Client
+	baseURL       string
+	apiKey        string
+	previewDomain string
+}
+
+func NewClient(httpClient *http.Client, baseURL, apiKey, previewDomain string) *Client {
+	return &Client{
+		httpClient:    httpClient,
+		baseURL:       strings.TrimRight(baseURL, "/"),
+		apiKey:        apiKey,
+		previewDomain: previewDomain,
+	}
+}
+
+type Sandbox struct {
+	ID               string            `json:"id"`
+	Name             string            `json:"name"`
+	Status           string            `json:"status"`
+	AccessToken      string            `json:"access_token"`
+	Metadata         map[string]string `json:"metadata"`
+	AutoDeleteAt     *time.Time        `json:"auto_delete_at"`
+	TimeoutSeconds   *int              `json:"timeout_seconds,omitempty"`
+	AutoDeleteSecond *int              `json:"auto_delete_seconds,omitempty"`
+}
+
+type CreateSandboxRequest struct {
+	Name              string            `json:"name"`
+	TimeoutSeconds    int               `json:"timeout_seconds,omitempty"`
+	AutoDeleteSeconds int               `json:"auto_delete_seconds,omitempty"`
+	Metadata          map[string]string `json:"metadata,omitempty"`
+}
+
+type ExecRequest struct {
+	Command    string `json:"command"`
+	WorkingDir string `json:"working_dir,omitempty"`
+	TimeoutS   int    `json:"timeout_s,omitempty"`
+}
+
+type ExecResult struct {
+	Stdout   string `json:"stdout"`
+	Stderr   string `json:"stderr"`
+	ExitCode int    `json:"exit_code"`
+}
+
+type ResumeResponse struct {
+	ID          string `json:"id"`
+	Status      string `json:"status"`
+	AccessToken string `json:"access_token"`
+}
+
+type ErrorResponse struct {
+	Error struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+func (c *Client) CreateSandbox(ctx context.Context, req CreateSandboxRequest) (Sandbox, error) {
+	var out Sandbox
+	err := c.doJSON(ctx, http.MethodPost, "/sandboxes", req, &out)
+	return out, err
+}
+
+func (c *Client) GetSandbox(ctx context.Context, id string) (Sandbox, error) {
+	var out Sandbox
+	err := c.doJSON(ctx, http.MethodGet, "/sandboxes/"+url.PathEscape(id), nil, &out)
+	return out, err
+}
+
+func (c *Client) ListSandboxes(ctx context.Context, query map[string]string) ([]Sandbox, error) {
+	u, _ := url.Parse(c.baseURL + "/sandboxes")
+	values := u.Query()
+	for key, value := range query {
+		values.Set(key, value)
+	}
+	u.RawQuery = values.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("X-API-Key", c.apiKey)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if err := requireStatus(resp, http.StatusOK); err != nil {
+		return nil, err
+	}
+	var out []Sandbox
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *Client) PauseSandbox(ctx context.Context, id string) error {
+	return c.doNoContent(ctx, http.MethodPost, "/sandboxes/"+url.PathEscape(id)+"/pause")
+}
+
+func (c *Client) DeleteSandbox(ctx context.Context, id string) error {
+	return c.doNoContent(ctx, http.MethodDelete, "/sandboxes/"+url.PathEscape(id))
+}
+
+func (c *Client) ResumeSandbox(ctx context.Context, id string) (ResumeResponse, error) {
+	var out ResumeResponse
+	err := c.doJSON(ctx, http.MethodPost, "/sandboxes/"+url.PathEscape(id)+"/resume", map[string]any{}, &out)
+	return out, err
+}
+
+func (c *Client) Exec(ctx context.Context, sandboxID, accessToken string, req ExecRequest) (ExecResult, error) {
+	var out ExecResult
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return out, err
+	}
+	target := "https://" + c.previewDomain + "/exec"
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(payload))
+	if err != nil {
+		return out, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-Access-Token", accessToken)
+	httpReq.Header.Set("X-Superserve-Sandbox-Id", sandboxID)
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return out, err
+	}
+	defer resp.Body.Close()
+	if err := requireStatus(resp, http.StatusOK); err != nil {
+		return out, err
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return out, err
+	}
+	return out, nil
+}
+
+func (c *Client) PreviewURL(sandboxID string, port int) string {
+	return fmt.Sprintf("https://%d-%s.%s", port, sandboxID, c.previewDomain)
+}
+
+func (c *Client) doJSON(ctx context.Context, method, path string, in, out any) error {
+	var body io.Reader
+	if in != nil {
+		payload, err := json.Marshal(in)
+		if err != nil {
+			return err
+		}
+		body = bytes.NewReader(payload)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("X-API-Key", c.apiKey)
+	if in != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if out == nil {
+		return requireStatus(resp, http.StatusNoContent)
+	}
+	switch method {
+	case http.MethodPost:
+		if strings.HasSuffix(path, "/resume") {
+			if err := requireStatus(resp, http.StatusOK); err != nil {
+				return err
+			}
+		} else if path == "/sandboxes" {
+			if err := requireStatus(resp, http.StatusCreated); err != nil {
+				return err
+			}
+		} else if err := requireStatus(resp, http.StatusOK, http.StatusCreated); err != nil {
+			return err
+		}
+	default:
+		if err := requireStatus(resp, http.StatusOK); err != nil {
+			return err
+		}
+	}
+	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+func (c *Client) doNoContent(ctx context.Context, method, path string) error {
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("X-API-Key", c.apiKey)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return requireStatus(resp, http.StatusNoContent)
+}
+
+func requireStatus(resp *http.Response, allowed ...int) error {
+	for _, status := range allowed {
+		if resp.StatusCode == status {
+			return nil
+		}
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+	if resp.StatusCode == http.StatusNotFound {
+		return ErrNotFound
+	}
+	return fmt.Errorf("unexpected status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+}
+
+var ErrNotFound = errors.New("resource not found")

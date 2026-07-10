@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Go test
+        run: |
+          set -euo pipefail
+          go test ./...
+
+      - name: Go fmt check
+        run: |
+          set -euo pipefail
+          test -z "$(gofmt -l ./cmd ./internal)"
+
+      - name: Go vet
+        run: |
+          set -euo pipefail
+          go vet ./...
+
+      - name: Docker build
+        run: |
+          set -euo pipefail
+          docker build -t api-canary:ci .
+
+      - name: Terraform fmt
+        run: terraform fmt -check -recursive
+
+      - name: Terraform init and validate staging
+        run: |
+          set -euo pipefail
+          cd infra/envs/staging/us-central1
+          terraform init -backend=false
+          terraform validate
+
+      - name: Terraform init and validate production
+        run: |
+          set -euo pipefail
+          cd infra/envs/production
+          terraform init -backend=false
+          terraform validate
+
+      - name: Secret scan
+        uses: zricethezav/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
