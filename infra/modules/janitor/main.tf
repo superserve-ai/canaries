@@ -44,6 +44,18 @@ resource "google_cloud_run_v2_job" "janitor" {
           value = "janitor"
         }
         env {
+          name  = "CANARY_RUNTIME"
+          value = "cloud-run"
+        }
+        env {
+          name  = "CANARY_METRICS_EXPORTER"
+          value = "otlp"
+        }
+        env {
+          name  = "CANARY_LOCK_BACKEND"
+          value = "gcs"
+        }
+        env {
           name  = "CANARY_TARGET"
           value = var.target_name
         }
@@ -68,12 +80,20 @@ resource "google_cloud_run_v2_job" "janitor" {
           value = var.preview_domain
         }
         env {
+          name  = "LOCK_BUCKET"
+          value = var.lock_bucket_name
+        }
+        env {
           name  = "OTEL_SERVICE_NAME"
           value = "superserve-api-canary"
         }
         env {
           name  = "OTEL_ENVIRONMENT"
           value = var.environment
+        }
+        env {
+          name  = "OTEL_EXPORTER_OTLP_ENDPOINT"
+          value = var.otlp_metrics_endpoint
         }
         env {
           name = "CANARY_API_KEY"

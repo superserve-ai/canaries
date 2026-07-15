@@ -6,15 +6,26 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"sync"
 	"time"
 
 	"cloud.google.com/go/storage"
 	"github.com/google/uuid"
+	"google.golang.org/api/googleapi"
 )
 
-type GCSLocker struct {
+type GCSLock struct {
+	mu     sync.Mutex
 	client *storage.Client
 	bucket string
+}
+
+type gcsLease struct {
+	client *storage.Client
+	bucket string
+	key    string
+	token  string
 }
 
 type lockFile struct {
@@ -25,11 +36,14 @@ type lockFile struct {
 	Holder     string    `json:"holder"`
 }
 
-func NewGCSLocker(client *storage.Client, bucket string) *GCSLocker {
-	return &GCSLocker{client: client, bucket: bucket}
+func NewGCSLock(bucket string) *GCSLock {
+	return &GCSLock{bucket: bucket}
 }
 
-func (l *GCSLocker) Acquire(ctx context.Context, key string, ttl time.Duration) (Result, error) {
+func (l *GCSLock) Acquire(ctx context.Context, key string, ttl time.Duration) (Outcome, Lease, error) {
+	if err := l.ensureClient(ctx); err != nil {
+		return "", nil, err
+	}
 	token := uuid.NewString()
 	object := l.client.Bucket(l.bucket).Object("locks/" + key + ".json")
 	now := time.Now().UTC()
@@ -46,33 +60,103 @@ func (l *GCSLocker) Acquire(ctx context.Context, key string, ttl time.Duration) 
 	case err == nil:
 		current, generation, err := l.readExisting(ctx, object, attrs.Generation)
 		if err != nil {
-			return Result{}, err
+			return "", nil, err
 		}
 		if current.ExpiresAt.After(now) {
-			return Result{Skipped: true, ExpiresAt: current.ExpiresAt}, nil
+			return OutcomeAlreadyRunning, nil, nil
 		}
 		if err := l.write(ctx, object.If(storage.Conditions{GenerationMatch: generation}), payload); err != nil {
-			if errors.Is(err, storage.ErrObjectNotExist) {
-				return Result{Skipped: true}, nil
+			if isAlreadyRunningWriteError(err) {
+				return OutcomeAlreadyRunning, nil, nil
 			}
-			return Result{Skipped: true}, nil
+			return "", nil, err
 		}
 	case errors.Is(err, storage.ErrObjectNotExist):
 		if err := l.write(ctx, object.If(storage.Conditions{DoesNotExist: true}), payload); err != nil {
-			return Result{Skipped: true}, nil
+			if isAlreadyRunningWriteError(err) {
+				return OutcomeAlreadyRunning, nil, nil
+			}
+			return "", nil, err
 		}
 	default:
-		return Result{}, err
+		return "", nil, err
 	}
 
-	return Result{
-		Acquired:   true,
-		LeaseToken: token,
-		ExpiresAt:  payload.ExpiresAt,
+	return OutcomeAcquired, gcsLease{
+		client: l.client,
+		bucket: l.bucket,
+		key:    key,
+		token:  token,
 	}, nil
 }
 
-func (l *GCSLocker) Release(ctx context.Context, key, token string) error {
+func isAlreadyRunningWriteError(err error) bool {
+	if errors.Is(err, storage.ErrObjectNotExist) {
+		return true
+	}
+	var apiErr *googleapi.Error
+	if errors.As(err, &apiErr) && apiErr.Code == http.StatusPreconditionFailed {
+		return true
+	}
+	return false
+}
+
+func (l *GCSLock) ensureClient(ctx context.Context) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.client != nil {
+		return nil
+	}
+	client, err := storage.NewClient(ctx)
+	if err != nil {
+		return fmt.Errorf("create storage client: %w", err)
+	}
+	l.client = client
+	return nil
+}
+
+func (l *GCSLock) Close() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.client == nil {
+		return nil
+	}
+	err := l.client.Close()
+	l.client = nil
+	return err
+}
+
+func (l *GCSLock) readExisting(ctx context.Context, object *storage.ObjectHandle, generation int64) (lockFile, int64, error) {
+	reader, err := object.Generation(generation).NewReader(ctx)
+	if err != nil {
+		return lockFile{}, 0, err
+	}
+	defer reader.Close()
+	body, err := io.ReadAll(reader)
+	if err != nil {
+		return lockFile{}, 0, err
+	}
+	var current lockFile
+	if err := json.Unmarshal(body, &current); err != nil {
+		return lockFile{}, 0, fmt.Errorf("decode lock: %w", err)
+	}
+	return current, generation, nil
+}
+
+func (l *GCSLock) write(ctx context.Context, object *storage.ObjectHandle, payload lockFile) error {
+	writer := object.NewWriter(ctx)
+	writer.ContentType = "application/json"
+	if err := json.NewEncoder(writer).Encode(payload); err != nil {
+		_ = writer.Close()
+		return err
+	}
+	return writer.Close()
+}
+
+func (l *GCSLock) Release(ctx context.Context, key, token string) error {
+	if l.client == nil {
+		return nil
+	}
 	object := l.client.Bucket(l.bucket).Object("locks/" + key + ".json")
 	reader, err := object.NewReader(ctx)
 	if err != nil {
@@ -92,29 +176,25 @@ func (l *GCSLocker) Release(ctx context.Context, key, token string) error {
 	return object.Delete(ctx)
 }
 
-func (l *GCSLocker) readExisting(ctx context.Context, object *storage.ObjectHandle, generation int64) (lockFile, int64, error) {
-	reader, err := object.Generation(generation).NewReader(ctx)
+func (l gcsLease) Release(ctx context.Context) error {
+	if l.client == nil {
+		return nil
+	}
+	object := l.client.Bucket(l.bucket).Object("locks/" + l.key + ".json")
+	reader, err := object.NewReader(ctx)
 	if err != nil {
-		return lockFile{}, 0, err
-	}
-	defer reader.Close()
-	body, err := io.ReadAll(reader)
-	if err != nil {
-		return lockFile{}, 0, err
-	}
-	var current lockFile
-	if err := json.Unmarshal(body, &current); err != nil {
-		return lockFile{}, 0, fmt.Errorf("decode lock: %w", err)
-	}
-	return current, generation, nil
-}
-
-func (l *GCSLocker) write(ctx context.Context, object *storage.ObjectHandle, payload lockFile) error {
-	writer := object.NewWriter(ctx)
-	writer.ContentType = "application/json"
-	if err := json.NewEncoder(writer).Encode(payload); err != nil {
-		_ = writer.Close()
+		if errors.Is(err, storage.ErrObjectNotExist) {
+			return nil
+		}
 		return err
 	}
-	return writer.Close()
+	defer reader.Close()
+	var current lockFile
+	if err := json.NewDecoder(reader).Decode(&current); err != nil {
+		return err
+	}
+	if current.Token != l.token {
+		return nil
+	}
+	return object.Delete(ctx)
 }

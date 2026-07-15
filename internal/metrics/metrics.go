@@ -2,21 +2,40 @@ package metrics
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
-	otlpmetrichttp "go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
+	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
+	"go.opentelemetry.io/otel/exporters/stdout/stdoutmetric"
 	"go.opentelemetry.io/otel/metric"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+
+	"github.com/superserve-ai/canaries/internal/config"
 )
 
-type Config struct {
-	ServiceName string
-	Environment string
+type Provider interface {
+	RecordRun(context.Context, string, string, string, string, string, time.Duration)
+	RecordStep(context.Context, string, string, string, string, string, string, time.Duration)
+	RecordCleanup(context.Context, string, string, string, string)
+	RecordOverlapSkip(context.Context, string, string, string)
+	RecordOrphans(context.Context, string, string, string, int64)
 }
 
-type Provider struct {
+type NoopProvider struct{}
+
+func (NoopProvider) RecordRun(context.Context, string, string, string, string, string, time.Duration) {
+}
+func (NoopProvider) RecordStep(context.Context, string, string, string, string, string, string, time.Duration) {
+}
+func (NoopProvider) RecordCleanup(context.Context, string, string, string, string) {}
+func (NoopProvider) RecordOverlapSkip(context.Context, string, string, string)     {}
+func (NoopProvider) RecordOrphans(context.Context, string, string, string, int64)  {}
+
+type recorder struct {
 	meter           metric.Meter
 	runTotal        metric.Int64Counter
 	stepTotal       metric.Int64Counter
@@ -26,13 +45,38 @@ type Provider struct {
 	runDuration     metric.Float64Histogram
 	stepDuration    metric.Float64Histogram
 	lastSuccess     metric.Float64Gauge
+	lastSuccessUnix atomic.Int64
 }
 
-func NewProvider(ctx context.Context, cfg any) (Provider, func(context.Context) error, error) {
-	exporter, err := otlpmetrichttp.New(ctx)
-	if err != nil {
-		return Provider{}, nil, err
+func NewProvider(ctx context.Context, cfg config.Config) (Provider, func(context.Context) error, error) {
+	switch cfg.MetricsExporter {
+	case config.MetricsExporterNone:
+		return NoopProvider{}, func(context.Context) error { return nil }, nil
+	case config.MetricsExporterStdout:
+		exporter, err := stdoutmetric.New()
+		if err != nil {
+			return nil, nil, err
+		}
+		return newSDKProvider(ctx, exporter)
+	case config.MetricsExporterOTLP:
+		if cfg.OTELExporterOTLPMetricsEndpoint == "" {
+			return nil, nil, errors.New("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT is required when CANARY_METRICS_EXPORTER=otlp")
+		}
+		exporter, err := otlpmetrichttp.New(
+			ctx,
+			otlpmetrichttp.WithEndpointURL(cfg.OTELExporterOTLPMetricsEndpoint),
+			otlpmetrichttp.WithURLPath("/v1/metrics"),
+		)
+		if err != nil {
+			return nil, nil, err
+		}
+		return newSDKProvider(ctx, exporter)
+	default:
+		return nil, nil, fmt.Errorf("unsupported metrics exporter %q", cfg.MetricsExporter)
 	}
+}
+
+func newSDKProvider(_ context.Context, exporter sdkmetric.Exporter) (Provider, func(context.Context) error, error) {
 	reader := sdkmetric.NewPeriodicReader(exporter, sdkmetric.WithInterval(15*time.Second))
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 	otel.SetMeterProvider(mp)
@@ -47,7 +91,7 @@ func NewProvider(ctx context.Context, cfg any) (Provider, func(context.Context) 
 	stepDuration, _ := meter.Float64Histogram("superserve_canary_step_duration_seconds")
 	lastSuccess, _ := meter.Float64Gauge("superserve_canary_last_success_timestamp_seconds")
 
-	return Provider{
+	return &recorder{
 		meter:           meter,
 		runTotal:        runTotal,
 		stepTotal:       stepTotal,
@@ -60,7 +104,7 @@ func NewProvider(ctx context.Context, cfg any) (Provider, func(context.Context) 
 	}, mp.Shutdown, nil
 }
 
-func (p Provider) attrs(environment, region, target, scenario, step, result string) []attribute.KeyValue {
+func (p *recorder) attrs(environment, region, target, scenario, step, result string) []attribute.KeyValue {
 	attrs := []attribute.KeyValue{
 		attribute.String("environment", environment),
 		attribute.String("region", region),
@@ -74,20 +118,22 @@ func (p Provider) attrs(environment, region, target, scenario, step, result stri
 	return attrs
 }
 
-func (p Provider) RecordRun(ctx context.Context, environment, region, target, scenario, result string, duration time.Duration) {
-	if p.runTotal == nil || p.runDuration == nil {
+func (p *recorder) RecordRun(ctx context.Context, environment, region, target, scenario, result string, duration time.Duration) {
+	if p == nil || p.runTotal == nil || p.runDuration == nil {
 		return
 	}
 	attrs := p.attrs(environment, region, target, scenario, "", result)
 	p.runTotal.Add(ctx, 1, metric.WithAttributes(attrs...))
 	p.runDuration.Record(ctx, duration.Seconds(), metric.WithAttributes(attrs...))
 	if result == "success" && p.lastSuccess != nil {
-		p.lastSuccess.Record(ctx, float64(time.Now().Unix()), metric.WithAttributes(attrs...))
+		ts := float64(time.Now().Unix())
+		p.lastSuccess.Record(ctx, ts, metric.WithAttributes(attrs...))
+		p.lastSuccessUnix.Store(int64(ts))
 	}
 }
 
-func (p Provider) RecordStep(ctx context.Context, environment, region, target, scenario, step, result string, duration time.Duration) {
-	if p.stepTotal == nil || p.stepDuration == nil {
+func (p *recorder) RecordStep(ctx context.Context, environment, region, target, scenario, step, result string, duration time.Duration) {
+	if p == nil || p.stepTotal == nil || p.stepDuration == nil {
 		return
 	}
 	attrs := p.attrs(environment, region, target, scenario, step, result)
@@ -95,22 +141,22 @@ func (p Provider) RecordStep(ctx context.Context, environment, region, target, s
 	p.stepDuration.Record(ctx, duration.Seconds(), metric.WithAttributes(attrs...))
 }
 
-func (p Provider) RecordCleanup(ctx context.Context, environment, region, target, result string) {
-	if p.cleanupTotal == nil {
+func (p *recorder) RecordCleanup(ctx context.Context, environment, region, target, result string) {
+	if p == nil || p.cleanupTotal == nil {
 		return
 	}
 	p.cleanupTotal.Add(ctx, 1, metric.WithAttributes(p.attrs(environment, region, target, "cleanup", "", result)...))
 }
 
-func (p Provider) RecordOverlapSkip(ctx context.Context, environment, region, target string) {
-	if p.overlapSkipped == nil {
+func (p *recorder) RecordOverlapSkip(ctx context.Context, environment, region, target string) {
+	if p == nil || p.overlapSkipped == nil {
 		return
 	}
 	p.overlapSkipped.Add(ctx, 1, metric.WithAttributes(p.attrs(environment, region, target, "lifecycle", "", "skipped")...))
 }
 
-func (p Provider) RecordOrphans(ctx context.Context, environment, region, target string, count int64) {
-	if p.orphanResources == nil {
+func (p *recorder) RecordOrphans(ctx context.Context, environment, region, target string, count int64) {
+	if p == nil || p.orphanResources == nil {
 		return
 	}
 	p.orphanResources.Add(ctx, count, metric.WithAttributes(p.attrs(environment, region, target, "janitor", "", "observed")...))

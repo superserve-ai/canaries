@@ -4,6 +4,8 @@ locals {
     region      = "us-central1"
     managed_by  = "terraform"
   }
+
+  otlp_endpoint = "http://10.0.0.2:4318"
 }
 
 resource "google_storage_bucket" "locks" {
@@ -27,6 +29,7 @@ module "lifecycle" {
   image                    = var.image
   api_key_secret_name      = "api-canary-key-staging-us-central1"
   lock_bucket_name         = google_storage_bucket.locks.name
+  otlp_metrics_endpoint    = local.otlp_endpoint
   manual_staging_opt_in    = true
   notification_channel_ids = var.notification_channel_ids
   labels                   = local.labels
@@ -43,6 +46,8 @@ module "janitor" {
   preview_domain           = "staging-sandbox.superserve.ai"
   image                    = var.image
   api_key_secret_name      = "api-canary-key-staging-us-central1"
+  lock_bucket_name         = google_storage_bucket.locks.name
+  otlp_metrics_endpoint    = local.otlp_endpoint
   notification_channel_ids = var.notification_channel_ids
   labels                   = local.labels
 }

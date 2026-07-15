@@ -67,7 +67,46 @@ Rotate credentials by:
 
 ## Local Execution
 
-Environment variables:
+Local runs use explicit runtime and backend settings. The defaults are:
+
+- `CANARY_RUNTIME=local`
+- `CANARY_METRICS_EXPORTER=none`
+- `CANARY_LOCK_BACKEND=file`
+- `CANARY_LOCK_FILE=/tmp/superserve-canary-<target>.lock`
+
+Examples:
+
+```bash
+CANARY_RUNTIME=local \
+CANARY_METRICS_EXPORTER=none \
+CANARY_LOCK_BACKEND=file \
+go run ./cmd/api-canary
+```
+
+```bash
+CANARY_RUNTIME=local \
+CANARY_METRICS_EXPORTER=none \
+CANARY_LOCK_BACKEND=none \
+go run ./cmd/api-canary
+```
+
+```bash
+CANARY_RUNTIME=local \
+CANARY_METRICS_EXPORTER=stdout \
+CANARY_LOCK_BACKEND=file \
+go run ./cmd/api-canary
+```
+
+```bash
+gcloud auth application-default login
+
+CANARY_RUNTIME=local \
+CANARY_METRICS_EXPORTER=none \
+CANARY_LOCK_BACKEND=gcs \
+go run ./cmd/api-canary
+```
+
+For lifecycle and janitor runs you still need the scenario-specific inputs:
 
 ```bash
 export CANARY_MODE=lifecycle
@@ -78,18 +117,23 @@ export GCP_PROJECT_ID=rayai-dev
 export API_BASE_URL=https://api-staging.superserve.ai
 export PREVIEW_DOMAIN=staging-sandbox.superserve.ai
 export CANARY_API_KEY=ss_live_...
-export LOCK_BUCKET=rayai-dev-api-canary-locks
 export MANUAL_STAGING_OPT_IN=true
-```
 
-Run:
-
-```bash
 go run ./cmd/api-canary -mode lifecycle
 go run ./cmd/api-canary -mode janitor
 ```
 
 Manual staging execution creates and deletes real resources. Use a dedicated canary API key.
+
+Cloud Run jobs require explicit observability and lock settings:
+
+```bash
+CANARY_RUNTIME=cloud-run
+CANARY_METRICS_EXPORTER=otlp
+CANARY_LOCK_BACKEND=gcs
+OTEL_EXPORTER_OTLP_ENDPOINT=<existing-collector-endpoint>
+LOCK_BUCKET=<gcs-lock-bucket>
+```
 
 ## Manual Staging Runbook
 
@@ -157,9 +201,17 @@ Apply order:
 4. apply production
 5. populate production secrets
 
+Cloud Run jobs set `CANARY_RUNTIME=cloud-run`, `CANARY_METRICS_EXPORTER=otlp`, and `CANARY_LOCK_BACKEND=gcs` explicitly, and pass the OTLP endpoint through Terraform locals instead of relying on application defaults. The deployment uses the standard `OTEL_EXPORTER_OTLP_ENDPOINT` path that the sandbox stack already uses.
+
 ## Metrics And Alerts
 
 Metrics are emitted over OTLP HTTP and intended to feed the existing GMP path.
+
+Runtime selectors:
+- `CANARY_RUNTIME=local`
+- `CANARY_RUNTIME=cloud-run`
+- `CANARY_METRICS_EXPORTER=none|stdout|otlp`
+- `CANARY_LOCK_BACKEND=none|file|gcs`
 
 Primary metrics:
 - `superserve_canary_run_total`

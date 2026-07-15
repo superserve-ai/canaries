@@ -20,7 +20,7 @@ import (
 type Runner struct {
 	Config  config.Config
 	Client  Client
-	Locker  lock.Locker
+	Locker  lock.Lock
 	Metrics metrics.Provider
 	Clock   func() time.Time
 	HTTP    *http.Client
@@ -40,17 +40,20 @@ func (r Runner) Run(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, r.Config.RunTimeout)
 	defer cancel()
 
-	lockResult, err := r.Locker.Acquire(ctx, r.Config.Target, r.Config.LockTTL)
+	outcome, lease, err := r.Locker.Acquire(ctx, r.Config.Target, r.Config.LockTTL)
 	if err != nil {
 		return fmt.Errorf("acquire lock: %w", err)
 	}
-	if !lockResult.Acquired {
+	if outcome == lock.OutcomeAlreadyRunning {
 		r.Metrics.RecordOverlapSkip(ctx, r.Config.Environment, r.Config.Region, r.Config.Target)
-		log.Info().Str("target", r.Config.Target).Msg("skipping overlapping invocation")
+		log.Info().Str("target", r.Config.Target).Msg("canary skipped because another run holds the target lock")
 		return nil
 	}
 	defer func() {
-		if err := r.Locker.Release(context.Background(), r.Config.Target, lockResult.LeaseToken); err != nil {
+		if lease == nil {
+			return
+		}
+		if err := lease.Release(context.Background()); err != nil {
 			log.Error().Err(err).Msg("release lock failed")
 		}
 	}()

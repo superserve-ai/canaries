@@ -71,8 +71,8 @@ func TestCleanupPreservesPrimaryFailure(t *testing.T) {
 			PreviewPort:    18080,
 		},
 		Client:  client,
-		Locker:  lock.NoopLocker{},
-		Metrics: metrics.Provider{},
+		Locker:  lock.NoopLock{},
+		Metrics: metrics.NoopProvider{},
 		Clock:   time.Now,
 	}
 
@@ -98,7 +98,7 @@ func TestVerifyPreviewRequiresExactToken(t *testing.T) {
 			PreviewPort: 18080,
 		},
 		Client:  client,
-		Metrics: metrics.Provider{},
+		Metrics: metrics.NoopProvider{},
 		Clock:   time.Now,
 		HTTP: &http.Client{
 			Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
@@ -114,6 +114,41 @@ func TestVerifyPreviewRequiresExactToken(t *testing.T) {
 	if err == nil || err.Error() != "preview response mismatch" {
 		t.Fatalf("verifyPreview error = %v", err)
 	}
+}
+
+func TestRunSkipsAlreadyRunning(t *testing.T) {
+	client := &fakeClient{
+		createSandboxFn: func(context.Context, canaryapi.CreateSandboxRequest) (canaryapi.Sandbox, error) {
+			t.Fatal("scenario should not run")
+			return canaryapi.Sandbox{}, nil
+		},
+	}
+	r := Runner{
+		Config: config.Config{
+			Target:      "staging-us-central1",
+			Environment: "staging",
+			Region:      "us-central1",
+			RunTimeout:  time.Second,
+			LockTTL:     time.Minute,
+		},
+		Client:  client,
+		Locker:  alreadyRunningLock{},
+		Metrics: metrics.NoopProvider{},
+		Clock:   time.Now,
+	}
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run returned %v", err)
+	}
+}
+
+type alreadyRunningLock struct{}
+
+func (alreadyRunningLock) Acquire(context.Context, string, time.Duration) (lock.Outcome, lock.Lease, error) {
+	return lock.OutcomeAlreadyRunning, nil, nil
+}
+
+func (alreadyRunningLock) Release(context.Context) error {
+	return nil
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)

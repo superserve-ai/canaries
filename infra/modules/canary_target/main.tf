@@ -69,6 +69,18 @@ resource "google_cloud_run_v2_job" "lifecycle" {
           value = "lifecycle"
         }
         env {
+          name  = "CANARY_RUNTIME"
+          value = "cloud-run"
+        }
+        env {
+          name  = "CANARY_METRICS_EXPORTER"
+          value = "otlp"
+        }
+        env {
+          name  = "CANARY_LOCK_BACKEND"
+          value = "gcs"
+        }
+        env {
           name  = "CANARY_TARGET"
           value = var.target_name
         }
@@ -103,6 +115,10 @@ resource "google_cloud_run_v2_job" "lifecycle" {
         env {
           name  = "OTEL_ENVIRONMENT"
           value = var.environment
+        }
+        env {
+          name  = "OTEL_EXPORTER_OTLP_ENDPOINT"
+          value = var.otlp_metrics_endpoint
         }
         env {
           name  = "MANUAL_STAGING_OPT_IN"

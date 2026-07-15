@@ -30,6 +30,14 @@ variable "api_key_secret_name" {
   type = string
 }
 
+variable "lock_bucket_name" {
+  type = string
+}
+
+variable "otlp_metrics_endpoint" {
+  type = string
+}
+
 variable "labels" {
   type    = map(string)
   default = {}
