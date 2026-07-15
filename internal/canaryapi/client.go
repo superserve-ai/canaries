@@ -42,6 +42,7 @@ type Sandbox struct {
 
 type CreateSandboxRequest struct {
 	Name              string            `json:"name"`
+	FromTemplate      string            `json:"from_template,omitempty"`
 	TimeoutSeconds    int               `json:"timeout_seconds,omitempty"`
 	AutoDeleteSeconds int               `json:"auto_delete_seconds,omitempty"`
 	Metadata          map[string]string `json:"metadata,omitempty"`

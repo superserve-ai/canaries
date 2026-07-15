@@ -27,11 +27,12 @@ The lifecycle canary uses the public customer API with `X-API-Key` authenticatio
 Per run it:
 1. acquires a target-scoped lease from GCS
 2. creates a sandbox with canary metadata
-3. verifies command execution
-4. verifies pause/resume persistence for disk and memory
-5. starts an HTTP server in the sandbox
-6. verifies the deterministic public preview URL returns the exact run token
-7. deletes the sandbox in a best-effort cleanup path
+3. launches from the `superserve/python-3.11` template so `python3` is present in the sandbox
+4. verifies command execution
+5. verifies pause/resume persistence for disk and memory
+6. starts an HTTP server in the sandbox
+7. verifies the deterministic public preview URL returns the exact run token
+8. deletes the sandbox in a best-effort cleanup path
 
 The janitor:
 1. lists canary-owned sandboxes for the environment
@@ -154,8 +155,9 @@ To inspect a retained sandbox:
 1. Find the failure log entry with `sandbox_id`
 2. Open the sandbox in the Superserve UI or use the API client
 3. Check the `failed_step`, `retained_at`, and `expires_at` metadata
-4. Confirm the expected port is still listening inside the sandbox
-5. Delete it manually when finished, or wait for the janitor sweep
+4. Inspect `/tmp/verification-utilities` to see the exact scripts the canary uploaded
+5. Confirm the expected port is still listening inside the sandbox
+6. Delete it manually when finished, or wait for the janitor sweep
 
 Preview failure troubleshooting:
 1. Find the failed run in logs

@@ -119,6 +119,7 @@ func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) 
 	createStart := r.Clock()
 	sb, err := r.Client.CreateSandbox(ctx, canaryapi.CreateSandboxRequest{
 		Name:              sandboxName(r.Config.Target, runID),
+		FromTemplate:      r.Config.SandboxTemplate,
 		TimeoutSeconds:    int(r.Config.RunTimeout.Seconds()),
 		AutoDeleteSeconds: int(r.retentionTTL().Seconds()),
 		Metadata:          metadata,
@@ -169,14 +170,20 @@ func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) 
 		return res
 	}
 
-	verifyDiskCmd := fmt.Sprintf("sh -lc 'test \"$(cat /tmp/canary-token)\" = %q && echo verified'", diskToken)
+	if err := r.uploadVerificationUtilities(ctx, sb.ID, resumeResp.AccessToken); err != nil {
+		res.Err = err
+		res.FailedStep = "prepare_verification_utilities"
+		return res
+	}
+
+	verifyDiskCmd := fmt.Sprintf("sh -lc 'CANARY_DISK_TOKEN=%q /tmp/verification-utilities/verify_disk.sh'", diskToken)
 	if _, err := r.execStep(ctx, sb.ID, resumeResp.AccessToken, "verify_disk", verifyDiskCmd); err != nil {
 		res.Err = fmt.Errorf("verifying disk state: %w", err)
 		res.FailedStep = "verify_disk"
 		return res
 	}
 
-	verifyMemoryCmd := fmt.Sprintf("sh -lc 'pgrep -af %q >/dev/null && echo verified'", memoryToken)
+	verifyMemoryCmd := fmt.Sprintf("sh -lc 'CANARY_MEMORY_TOKEN=%q /tmp/verification-utilities/verify_memory.py'", memoryToken)
 	if _, err := r.execStep(ctx, sb.ID, resumeResp.AccessToken, "verify_memory", verifyMemoryCmd); err != nil {
 		res.Err = fmt.Errorf("verifying memory state: %w", err)
 		res.FailedStep = "verify_memory"

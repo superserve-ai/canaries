@@ -45,6 +45,7 @@ type Config struct {
 	APIBaseURL                      string
 	PreviewDomain                   string
 	APIKey                          string
+	SandboxTemplate                 string
 	RunTimeout                      time.Duration
 	ResourceTTL                     time.Duration
 	PollInterval                    time.Duration
@@ -134,6 +135,7 @@ func Load(rawMode string) (Config, error) {
 		APIBaseURL:                      os.Getenv("API_BASE_URL"),
 		PreviewDomain:                   os.Getenv("PREVIEW_DOMAIN"),
 		APIKey:                          os.Getenv("CANARY_API_KEY"),
+		SandboxTemplate:                 envDefault("CANARY_SANDBOX_TEMPLATE", "superserve/python-3.11"),
 		LockBucket:                      os.Getenv("LOCK_BUCKET"),
 		LockFile:                        os.Getenv("CANARY_LOCK_FILE"),
 		OTELExporterOTLPMetricsEndpoint: strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")),

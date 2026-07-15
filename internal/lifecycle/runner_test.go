@@ -43,6 +43,34 @@ func TestWaitForStatusTerminalFailure(t *testing.T) {
 	}
 }
 
+func TestUploadVerificationUtilitiesUsesRepoAssets(t *testing.T) {
+	var commands []string
+	client := &fakeClient{
+		execFn: func(_ context.Context, _ string, _ string, req canaryapi.ExecRequest) (canaryapi.ExecResult, error) {
+			commands = append(commands, req.Command)
+			return canaryapi.ExecResult{ExitCode: 0}, nil
+		},
+	}
+	r := Runner{
+		Client:  client,
+		Metrics: metrics.NoopProvider{},
+		Clock:   time.Now,
+	}
+
+	if err := r.uploadVerificationUtilities(context.Background(), "sb-1", "tok"); err != nil {
+		t.Fatal(err)
+	}
+	if len(commands) != 1 {
+		t.Fatalf("expected one upload command, got %d", len(commands))
+	}
+	if !strings.Contains(commands[0], "verify_disk.sh") || !strings.Contains(commands[0], "verify_memory.py") {
+		t.Fatalf("upload command did not reference verification assets: %s", commands[0])
+	}
+	if !strings.Contains(commands[0], "/tmp/verification-utilities") {
+		t.Fatalf("upload command did not target verification utilities dir: %s", commands[0])
+	}
+}
+
 func TestCleanupPreservesPrimaryFailure(t *testing.T) {
 	deleteCalled := false
 	client := &fakeClient{

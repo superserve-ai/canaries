@@ -34,6 +34,9 @@ func TestLoad(t *testing.T) {
 		if got, want := cfg.LockFile, "/tmp/superserve-canary-staging-us-central1.lock"; got != want {
 			t.Fatalf("lock file = %q, want %q", got, want)
 		}
+		if got, want := cfg.SandboxTemplate, "superserve/python-3.11"; got != want {
+			t.Fatalf("sandbox template = %q, want %q", got, want)
+		}
 		if cfg.RetainFailedSandbox {
 			t.Fatal("retain failed sandbox should default to false")
 		}

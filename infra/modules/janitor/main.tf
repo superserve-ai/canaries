@@ -68,6 +68,10 @@ resource "google_cloud_run_v2_job" "janitor" {
           value = var.target_name
         }
         env {
+          name  = "CANARY_SANDBOX_TEMPLATE"
+          value = "superserve/python-3.11"
+        }
+        env {
           name  = "CANARY_ENVIRONMENT"
           value = var.environment
         }
