@@ -57,6 +57,8 @@ type Config struct {
 	Metrics                         metricsConfig
 	ManualStaging                   bool
 	PreviewPort                     int
+	RetainFailedSandbox             bool
+	RetainFailedSandboxTTL          time.Duration
 	CommandTimeout                  time.Duration
 	DeleteTimeout                   time.Duration
 	PreviewTimeout                  time.Duration
@@ -105,6 +107,21 @@ func Load(rawMode string) (Config, error) {
 		return Config{}, fmt.Errorf("invalid CANARY_LOCK_BACKEND %q (must be none, file, or gcs)", lockBackend)
 	}
 
+	retainFailedSandbox, err := getenvBoolStrict("CANARY_RETAIN_FAILED_SANDBOX", false)
+	if err != nil {
+		return Config{}, err
+	}
+	retainFailedSandboxTTL, err := getenvDurationStrict("CANARY_RETAIN_FAILED_SANDBOX_TTL", 2*time.Hour)
+	if err != nil {
+		return Config{}, err
+	}
+	if retainFailedSandboxTTL <= 0 {
+		return Config{}, errors.New("CANARY_RETAIN_FAILED_SANDBOX_TTL must be positive")
+	}
+	if retainFailedSandboxTTL > 24*time.Hour {
+		return Config{}, errors.New("CANARY_RETAIN_FAILED_SANDBOX_TTL must be 24h or less")
+	}
+
 	cfg := Config{
 		Mode:                            mode,
 		Runtime:                         runtime,
@@ -123,6 +140,8 @@ func Load(rawMode string) (Config, error) {
 		OTELExporterOTLPEndpoint:        strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")),
 		ManualStaging:                   getenvBool("MANUAL_STAGING_OPT_IN", false),
 		PreviewPort:                     getenvInt("PREVIEW_PORT", 18080),
+		RetainFailedSandbox:             retainFailedSandbox,
+		RetainFailedSandboxTTL:          retainFailedSandboxTTL,
 		RunTimeout:                      getenvDuration("RUN_TIMEOUT", 4*time.Minute),
 		ResourceTTL:                     getenvDuration("RESOURCE_TTL", 1*time.Hour),
 		PollInterval:                    getenvDuration("POLL_INTERVAL", 3*time.Second),
@@ -271,6 +290,30 @@ func getenvBool(key string, fallback bool) bool {
 		return fallback
 	}
 	return parsed
+}
+
+func getenvBoolStrict(key string, fallback bool) (bool, error) {
+	value, ok := os.LookupEnv(key)
+	if !ok || strings.TrimSpace(value) == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseBool(strings.TrimSpace(value))
+	if err != nil {
+		return false, fmt.Errorf("invalid %s %q", key, value)
+	}
+	return parsed, nil
+}
+
+func getenvDurationStrict(key string, fallback time.Duration) (time.Duration, error) {
+	value, ok := os.LookupEnv(key)
+	if !ok || strings.TrimSpace(value) == "" {
+		return fallback, nil
+	}
+	parsed, err := time.ParseDuration(strings.TrimSpace(value))
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s %q", key, value)
+	}
+	return parsed, nil
 }
 
 func getenvInt(key string, fallback int) int {

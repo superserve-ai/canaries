@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestLoad(t *testing.T) {
 	baseEnv := func() {
@@ -30,6 +33,12 @@ func TestLoad(t *testing.T) {
 		}
 		if got, want := cfg.LockFile, "/tmp/superserve-canary-staging-us-central1.lock"; got != want {
 			t.Fatalf("lock file = %q, want %q", got, want)
+		}
+		if cfg.RetainFailedSandbox {
+			t.Fatal("retain failed sandbox should default to false")
+		}
+		if got, want := cfg.RetainFailedSandboxTTL, 2*time.Hour; got != want {
+			t.Fatalf("retain failed sandbox ttl = %s, want %s", got, want)
 		}
 	})
 
@@ -160,6 +169,73 @@ func TestLoad(t *testing.T) {
 		}
 		if cfg.LockBackend != LockBackendGCS {
 			t.Fatalf("lock backend = %q", cfg.LockBackend)
+		}
+	})
+
+	t.Run("retention defaults to false", func(t *testing.T) {
+		baseEnv()
+		cfg, err := Load("lifecycle")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.RetainFailedSandbox {
+			t.Fatal("expected retention to default false")
+		}
+	})
+
+	t.Run("invalid retention bool rejected", func(t *testing.T) {
+		baseEnv()
+		t.Setenv("CANARY_RETAIN_FAILED_SANDBOX", "maybe")
+		if _, err := Load("lifecycle"); err == nil {
+			t.Fatal("expected error")
+		}
+	})
+
+	t.Run("valid retention ttl accepted", func(t *testing.T) {
+		baseEnv()
+		t.Setenv("CANARY_RETAIN_FAILED_SANDBOX", "true")
+		t.Setenv("CANARY_RETAIN_FAILED_SANDBOX_TTL", "4h")
+		cfg, err := Load("lifecycle")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !cfg.RetainFailedSandbox {
+			t.Fatal("expected retention enabled")
+		}
+		if got, want := cfg.RetainFailedSandboxTTL, 4*time.Hour; got != want {
+			t.Fatalf("retain ttl = %s, want %s", got, want)
+		}
+	})
+
+	t.Run("zero ttl rejected", func(t *testing.T) {
+		baseEnv()
+		t.Setenv("CANARY_RETAIN_FAILED_SANDBOX_TTL", "0s")
+		if _, err := Load("lifecycle"); err == nil {
+			t.Fatal("expected error")
+		}
+	})
+
+	t.Run("negative ttl rejected", func(t *testing.T) {
+		baseEnv()
+		t.Setenv("CANARY_RETAIN_FAILED_SANDBOX_TTL", "-1s")
+		if _, err := Load("lifecycle"); err == nil {
+			t.Fatal("expected error")
+		}
+	})
+
+	t.Run("invalid retention duration rejected", func(t *testing.T) {
+		baseEnv()
+		t.Setenv("CANARY_RETAIN_FAILED_SANDBOX_TTL", "not-a-duration")
+		if _, err := Load("lifecycle"); err == nil {
+			t.Fatal("expected error")
+		}
+	})
+
+	t.Run("excessive ttl rejected", func(t *testing.T) {
+		baseEnv()
+		t.Setenv("CANARY_RETAIN_FAILED_SANDBOX_TTL", "25h")
+		if _, err := Load("lifecycle"); err == nil {
+			t.Fatal("expected error")
 		}
 	})
 }

@@ -38,12 +38,13 @@ func TestWaitForStatusTerminalFailure(t *testing.T) {
 	}
 
 	err := r.waitForStatus(context.Background(), "sb-1", "active")
-	if err == nil || err.Error() != `terminal state "failed"` {
+	if err == nil || !strings.Contains(err.Error(), `sandbox entered terminal state "failed"`) {
 		t.Fatalf("waitForStatus error = %v", err)
 	}
 }
 
 func TestCleanupPreservesPrimaryFailure(t *testing.T) {
+	deleteCalled := false
 	client := &fakeClient{
 		createSandboxFn: func(context.Context, canaryapi.CreateSandboxRequest) (canaryapi.Sandbox, error) {
 			return canaryapi.Sandbox{ID: "sb-1", Status: "active", AccessToken: "tok"}, nil
@@ -55,6 +56,7 @@ func TestCleanupPreservesPrimaryFailure(t *testing.T) {
 			return canaryapi.ExecResult{}, errors.New("exec failed")
 		},
 		deleteSandboxFn: func(context.Context, string) error {
+			deleteCalled = true
 			return errors.New("delete failed")
 		},
 		previewURLFn: func(string, int) string { return "https://example.test" },
@@ -76,12 +78,218 @@ func TestCleanupPreservesPrimaryFailure(t *testing.T) {
 		Clock:   time.Now,
 	}
 
-	err := r.runLifecycle(context.Background(), "run-1")
-	if err == nil {
+	result := r.runLifecycle(context.Background(), "run-1")
+	if result.Err == nil {
 		t.Fatal("expected error")
 	}
-	if got := err.Error(); got != "exec failed; cleanup: delete failed" {
+	if got := result.Err.Error(); !strings.Contains(got, "priming sandbox: running initial_command step: exec failed") {
 		t.Fatalf("unexpected error %q", got)
+	}
+	if strings.Contains(result.Err.Error(), "cleanup") {
+		t.Fatalf("cleanup should not replace primary error: %q", result.Err)
+	}
+	if !deleteCalled {
+		t.Fatal("expected delete attempt")
+	}
+}
+
+func TestFailedRunRetainsSandboxWhenEnabled(t *testing.T) {
+	updateCalled := false
+	deleteCalled := false
+	client := &fakeClient{
+		createSandboxFn: func(context.Context, canaryapi.CreateSandboxRequest) (canaryapi.Sandbox, error) {
+			return canaryapi.Sandbox{ID: "sb-1", Status: "active", AccessToken: "tok"}, nil
+		},
+		getSandboxFn: func(context.Context, string) (canaryapi.Sandbox, error) {
+			return canaryapi.Sandbox{ID: "sb-1", Status: "active", AccessToken: "tok"}, nil
+		},
+		execFn: func(context.Context, string, string, canaryapi.ExecRequest) (canaryapi.ExecResult, error) {
+			return canaryapi.ExecResult{}, errors.New("exec failed")
+		},
+		updateSandboxFn: func(context.Context, string, canaryapi.UpdateSandboxRequest) error {
+			updateCalled = true
+			return nil
+		},
+		deleteSandboxFn: func(context.Context, string) error {
+			deleteCalled = true
+			return nil
+		},
+	}
+	r := Runner{
+		Config: config.Config{
+			Target:                 "staging-us-central1",
+			Environment:            "staging",
+			Region:                 "us-central1",
+			ResourceTTL:            time.Hour,
+			RetainFailedSandbox:    true,
+			RetainFailedSandboxTTL: 2 * time.Hour,
+			PollInterval:           time.Millisecond,
+			CommandTimeout:         20 * time.Millisecond,
+			DeleteTimeout:          20 * time.Millisecond,
+			PreviewPort:            18080,
+		},
+		Client:  client,
+		Locker:  lock.NoopLock{},
+		Metrics: metrics.NoopProvider{},
+		Clock:   time.Now,
+	}
+
+	result := r.runLifecycle(context.Background(), "run-1")
+	if result.Err == nil {
+		t.Fatal("expected error")
+	}
+	if !updateCalled {
+		t.Fatal("expected retention metadata update")
+	}
+	if deleteCalled {
+		t.Fatal("did not expect delete when retention is enabled")
+	}
+	if !strings.Contains(result.Err.Error(), "priming sandbox") {
+		t.Fatalf("expected primary error, got %q", result.Err)
+	}
+}
+
+func TestRetentionMetadataFailureDoesNotReplacePrimaryError(t *testing.T) {
+	updateCalled := false
+	deleteCalled := false
+	client := &fakeClient{
+		createSandboxFn: func(context.Context, canaryapi.CreateSandboxRequest) (canaryapi.Sandbox, error) {
+			return canaryapi.Sandbox{ID: "sb-1", Status: "active", AccessToken: "tok"}, nil
+		},
+		getSandboxFn: func(context.Context, string) (canaryapi.Sandbox, error) {
+			return canaryapi.Sandbox{ID: "sb-1", Status: "active", AccessToken: "tok"}, nil
+		},
+		execFn: func(context.Context, string, string, canaryapi.ExecRequest) (canaryapi.ExecResult, error) {
+			return canaryapi.ExecResult{}, errors.New("exec failed")
+		},
+		updateSandboxFn: func(context.Context, string, canaryapi.UpdateSandboxRequest) error {
+			updateCalled = true
+			return errors.New("metadata update failed")
+		},
+		deleteSandboxFn: func(context.Context, string) error {
+			deleteCalled = true
+			return nil
+		},
+	}
+	r := Runner{
+		Config: config.Config{
+			Target:                 "staging-us-central1",
+			Environment:            "staging",
+			Region:                 "us-central1",
+			ResourceTTL:            time.Hour,
+			RetainFailedSandbox:    true,
+			RetainFailedSandboxTTL: 2 * time.Hour,
+			PollInterval:           time.Millisecond,
+			CommandTimeout:         20 * time.Millisecond,
+			DeleteTimeout:          20 * time.Millisecond,
+			PreviewPort:            18080,
+		},
+		Client:  client,
+		Locker:  lock.NoopLock{},
+		Metrics: metrics.NoopProvider{},
+		Clock:   time.Now,
+	}
+
+	result := r.runLifecycle(context.Background(), "run-1")
+	if result.Err == nil {
+		t.Fatal("expected error")
+	}
+	if !updateCalled {
+		t.Fatal("expected retention update attempt")
+	}
+	if deleteCalled {
+		t.Fatal("did not expect delete when retention metadata update fails")
+	}
+	if !strings.Contains(result.Err.Error(), "priming sandbox") {
+		t.Fatalf("expected primary error, got %q", result.Err)
+	}
+}
+
+func TestFailedRunDeletesSandboxWhenRetentionDisabled(t *testing.T) {
+	updateCalled := false
+	deleteCalled := false
+	client := &fakeClient{
+		createSandboxFn: func(context.Context, canaryapi.CreateSandboxRequest) (canaryapi.Sandbox, error) {
+			return canaryapi.Sandbox{ID: "sb-1", Status: "active", AccessToken: "tok"}, nil
+		},
+		getSandboxFn: func(context.Context, string) (canaryapi.Sandbox, error) {
+			return canaryapi.Sandbox{ID: "sb-1", Status: "active", AccessToken: "tok"}, nil
+		},
+		execFn: func(context.Context, string, string, canaryapi.ExecRequest) (canaryapi.ExecResult, error) {
+			return canaryapi.ExecResult{}, errors.New("exec failed")
+		},
+		updateSandboxFn: func(context.Context, string, canaryapi.UpdateSandboxRequest) error {
+			updateCalled = true
+			return nil
+		},
+		deleteSandboxFn: func(context.Context, string) error {
+			deleteCalled = true
+			return nil
+		},
+	}
+	r := Runner{
+		Config: config.Config{
+			Target:         "staging-us-central1",
+			Environment:    "staging",
+			Region:         "us-central1",
+			ResourceTTL:    time.Hour,
+			PollInterval:   time.Millisecond,
+			CommandTimeout: 20 * time.Millisecond,
+			DeleteTimeout:  20 * time.Millisecond,
+			PreviewPort:    18080,
+		},
+		Client:  client,
+		Locker:  lock.NoopLock{},
+		Metrics: metrics.NoopProvider{},
+		Clock:   time.Now,
+	}
+
+	result := r.runLifecycle(context.Background(), "run-1")
+	if result.Err == nil {
+		t.Fatal("expected error")
+	}
+	if updateCalled {
+		t.Fatal("did not expect retention metadata update")
+	}
+	if !deleteCalled {
+		t.Fatal("expected delete when retention is disabled")
+	}
+}
+
+func TestFailureBeforeSandboxCreationRetainsNothing(t *testing.T) {
+	deleteCalled := false
+	client := &fakeClient{
+		createSandboxFn: func(context.Context, canaryapi.CreateSandboxRequest) (canaryapi.Sandbox, error) {
+			return canaryapi.Sandbox{}, errors.New("create failed")
+		},
+		deleteSandboxFn: func(context.Context, string) error {
+			deleteCalled = true
+			return nil
+		},
+	}
+	r := Runner{
+		Config: config.Config{
+			Target:         "staging-us-central1",
+			Environment:    "staging",
+			Region:         "us-central1",
+			ResourceTTL:    time.Hour,
+			PollInterval:   time.Millisecond,
+			CommandTimeout: 20 * time.Millisecond,
+			DeleteTimeout:  20 * time.Millisecond,
+			PreviewPort:    18080,
+		},
+		Client:  client,
+		Locker:  lock.NoopLock{},
+		Metrics: metrics.NoopProvider{},
+		Clock:   time.Now,
+	}
+
+	result := r.runLifecycle(context.Background(), "run-1")
+	if result.Err == nil {
+		t.Fatal("expected error")
+	}
+	if deleteCalled {
+		t.Fatal("did not expect delete when sandbox was never created")
 	}
 }
 
@@ -111,8 +319,129 @@ func TestVerifyPreviewRequiresExactToken(t *testing.T) {
 	}
 
 	err := r.verifyPreview(context.Background(), "sb-1", "expected-token")
-	if err == nil || err.Error() != "preview response mismatch" {
+	if err == nil || !strings.Contains(err.Error(), "preview response mismatch") {
 		t.Fatalf("verifyPreview error = %v", err)
+	}
+}
+
+func TestVerifyPreviewRetriesTransientSandboxUnreachable(t *testing.T) {
+	t.Parallel()
+
+	attempts := 0
+	r := Runner{
+		Config: config.Config{
+			Target:         "prod-usw2",
+			Environment:    "production",
+			Region:         "us-west2",
+			PreviewPort:    18080,
+			PreviewTimeout: 200 * time.Millisecond,
+			PollInterval:   10 * time.Millisecond,
+		},
+		Client: &fakeClient{
+			previewURLFn: func(string, int) string { return "https://preview.example.test" },
+		},
+		Metrics: metrics.NoopProvider{},
+		Clock:   time.Now,
+		HTTP: &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				attempts++
+				if attempts == 1 {
+					return &http.Response{
+						StatusCode: http.StatusBadGateway,
+						Body:       io.NopCloser(strings.NewReader("sandbox unreachable")),
+						Header:     make(http.Header),
+						Request:    req,
+					}, nil
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader("preview-token")),
+					Header:     make(http.Header),
+					Request:    req,
+				}, nil
+			}),
+		},
+	}
+
+	if err := r.verifyPreview(context.Background(), "sb-1", "preview-token"); err != nil {
+		t.Fatalf("verifyPreview returned %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("expected 2 attempts, got %d", attempts)
+	}
+}
+
+func TestVerifyPreviewWrapsProxyUnreachableWithURL(t *testing.T) {
+	t.Parallel()
+
+	r := Runner{
+		Config: config.Config{
+			Target:         "prod-usw2",
+			Environment:    "production",
+			Region:         "us-west2",
+			PreviewPort:    18080,
+			PreviewTimeout: 20 * time.Millisecond,
+			PollInterval:   5 * time.Millisecond,
+		},
+		Client: &fakeClient{
+			previewURLFn: func(string, int) string { return "https://18080-sb-1.preview.example.test" },
+		},
+		Metrics: metrics.NoopProvider{},
+		Clock:   time.Now,
+		HTTP: &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusBadGateway,
+					Body:       io.NopCloser(strings.NewReader("sandbox unreachable")),
+					Header:     make(http.Header),
+					Request:    req,
+				}, nil
+			}),
+		},
+	}
+
+	err := r.verifyPreview(context.Background(), "sb-1", "preview-token")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var stepErr StepError
+	if !errors.As(err, &stepErr) || stepErr.Step != "check_preview_url" {
+		t.Fatalf("expected check_preview_url step error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "verifying preview URL https://18080-sb-1.preview.example.test") {
+		t.Fatalf("missing preview URL context: %v", err)
+	}
+	if !strings.Contains(err.Error(), "preview proxy could not reach the sandbox listener") {
+		t.Fatalf("missing proxy context: %v", err)
+	}
+}
+
+func TestVerifyPreviewCreationFailureRecordsResolveStep(t *testing.T) {
+	t.Parallel()
+
+	r := Runner{
+		Config: config.Config{
+			Target:         "prod-usw2",
+			Environment:    "production",
+			Region:         "us-west2",
+			PreviewPort:    18080,
+			PreviewTimeout: 20 * time.Millisecond,
+			PollInterval:   5 * time.Millisecond,
+		},
+		Client: &fakeClient{
+			previewURLFn: func(string, int) string { return "://bad-url" },
+		},
+		Metrics: metrics.NoopProvider{},
+		Clock:   time.Now,
+	}
+
+	err := r.verifyPreview(context.Background(), "sb-1", "preview-token")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var stepErr StepError
+	if !errors.As(err, &stepErr) || stepErr.Step != "resolve_preview_url" {
+		t.Fatalf("expected resolve_preview_url step error, got %v", err)
 	}
 }
 
@@ -163,6 +492,7 @@ type fakeClient struct {
 	pauseSandboxFn  func(context.Context, string) error
 	resumeSandboxFn func(context.Context, string) (canaryapi.ResumeResponse, error)
 	deleteSandboxFn func(context.Context, string) error
+	updateSandboxFn func(context.Context, string, canaryapi.UpdateSandboxRequest) error
 	execFn          func(context.Context, string, string, canaryapi.ExecRequest) (canaryapi.ExecResult, error)
 	previewURLFn    func(string, int) string
 }
@@ -194,6 +524,13 @@ func (f *fakeClient) DeleteSandbox(ctx context.Context, id string) error {
 		return nil
 	}
 	return f.deleteSandboxFn(ctx, id)
+}
+
+func (f *fakeClient) UpdateSandbox(ctx context.Context, id string, req canaryapi.UpdateSandboxRequest) error {
+	if f.updateSandboxFn == nil {
+		return nil
+	}
+	return f.updateSandboxFn(ctx, id, req)
 }
 
 func (f *fakeClient) Exec(ctx context.Context, sandboxID, accessToken string, req canaryapi.ExecRequest) (canaryapi.ExecResult, error) {

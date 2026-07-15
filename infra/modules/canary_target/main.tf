@@ -81,6 +81,14 @@ resource "google_cloud_run_v2_job" "lifecycle" {
           value = "gcs"
         }
         env {
+          name  = "CANARY_RETAIN_FAILED_SANDBOX"
+          value = tostring(var.retain_failed_sandbox)
+        }
+        env {
+          name  = "CANARY_RETAIN_FAILED_SANDBOX_TTL"
+          value = var.retain_failed_sandbox_ttl
+        }
+        env {
           name  = "CANARY_TARGET"
           value = var.target_name
         }

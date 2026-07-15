@@ -47,6 +47,12 @@ type CreateSandboxRequest struct {
 	Metadata          map[string]string `json:"metadata,omitempty"`
 }
 
+type UpdateSandboxRequest struct {
+	Metadata          map[string]string `json:"metadata,omitempty"`
+	AutoDeleteSeconds *int              `json:"auto_delete_seconds,omitempty"`
+	TimeoutSeconds    *int              `json:"timeout_seconds,omitempty"`
+}
+
 type ExecRequest struct {
 	Command    string `json:"command"`
 	WorkingDir string `json:"working_dir,omitempty"`
@@ -101,7 +107,7 @@ func (c *Client) ListSandboxes(ctx context.Context, query map[string]string) ([]
 		return nil, err
 	}
 	defer resp.Body.Close()
-	if err := requireStatus(resp, http.StatusOK); err != nil {
+	if err := requireStatus(http.MethodGet, u.Path, resp, http.StatusOK); err != nil {
 		return nil, err
 	}
 	var out []Sandbox
@@ -125,6 +131,10 @@ func (c *Client) ResumeSandbox(ctx context.Context, id string) (ResumeResponse, 
 	return out, err
 }
 
+func (c *Client) UpdateSandbox(ctx context.Context, id string, req UpdateSandboxRequest) error {
+	return c.doPatch(ctx, "/sandboxes/"+url.PathEscape(id), req)
+}
+
 func (c *Client) Exec(ctx context.Context, sandboxID, accessToken string, req ExecRequest) (ExecResult, error) {
 	var out ExecResult
 	payload, err := json.Marshal(req)
@@ -144,7 +154,7 @@ func (c *Client) Exec(ctx context.Context, sandboxID, accessToken string, req Ex
 		return out, err
 	}
 	defer resp.Body.Close()
-	if err := requireStatus(resp, http.StatusOK); err != nil {
+	if err := requireStatus(http.MethodPost, "/exec", resp, http.StatusOK); err != nil {
 		return out, err
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
@@ -180,23 +190,23 @@ func (c *Client) doJSON(ctx context.Context, method, path string, in, out any) e
 	}
 	defer resp.Body.Close()
 	if out == nil {
-		return requireStatus(resp, http.StatusNoContent)
+		return requireStatus(method, path, resp, http.StatusNoContent)
 	}
 	switch method {
 	case http.MethodPost:
 		if strings.HasSuffix(path, "/resume") {
-			if err := requireStatus(resp, http.StatusOK); err != nil {
+			if err := requireStatus(method, path, resp, http.StatusOK); err != nil {
 				return err
 			}
 		} else if path == "/sandboxes" {
-			if err := requireStatus(resp, http.StatusCreated); err != nil {
+			if err := requireStatus(method, path, resp, http.StatusCreated); err != nil {
 				return err
 			}
-		} else if err := requireStatus(resp, http.StatusOK, http.StatusCreated); err != nil {
+		} else if err := requireStatus(method, path, resp, http.StatusOK, http.StatusCreated); err != nil {
 			return err
 		}
 	default:
-		if err := requireStatus(resp, http.StatusOK); err != nil {
+		if err := requireStatus(method, path, resp, http.StatusOK); err != nil {
 			return err
 		}
 	}
@@ -214,10 +224,33 @@ func (c *Client) doNoContent(ctx context.Context, method, path string) error {
 		return err
 	}
 	defer resp.Body.Close()
-	return requireStatus(resp, http.StatusNoContent)
+	return requireStatus(method, path, resp, http.StatusNoContent)
 }
 
-func requireStatus(resp *http.Response, allowed ...int) error {
+func (c *Client) doPatch(ctx context.Context, path string, in any) error {
+	payload, err := json.Marshal(in)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, c.baseURL+path, bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("X-API-Key", c.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusOK {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return nil
+	}
+	return requireStatus(http.MethodPatch, path, resp, http.StatusNoContent, http.StatusOK)
+}
+
+func requireStatus(method, path string, resp *http.Response, allowed ...int) error {
 	for _, status := range allowed {
 		if resp.StatusCode == status {
 			return nil
@@ -225,9 +258,9 @@ func requireStatus(resp *http.Response, allowed ...int) error {
 	}
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
 	if resp.StatusCode == http.StatusNotFound {
-		return ErrNotFound
+		return fmt.Errorf("%s %s: %w", method, path, ErrNotFound)
 	}
-	return fmt.Errorf("unexpected status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	return fmt.Errorf("%s %s: unexpected status %d: %s", method, path, resp.StatusCode, strings.TrimSpace(string(body)))
 }
 
 var ErrNotFound = errors.New("resource not found")

@@ -34,6 +34,8 @@ func Run(ctx context.Context, args []string) (err error) {
 		Str("runtime", string(cfg.Runtime)).
 		Str("metrics_exporter", string(cfg.MetricsExporter)).
 		Str("lock_backend", string(cfg.LockBackend)).
+		Bool("retain_failed_sandbox", cfg.RetainFailedSandbox).
+		Dur("retain_failed_sandbox_ttl", cfg.RetainFailedSandboxTTL).
 		Msg("canary configuration")
 	if cfg.LockBackend == config.LockBackendNone {
 		log.Info().Msg("locking disabled for this run")

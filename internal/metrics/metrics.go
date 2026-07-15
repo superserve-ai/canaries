@@ -23,6 +23,8 @@ type Provider interface {
 	RecordCleanup(context.Context, string, string, string, string)
 	RecordOverlapSkip(context.Context, string, string, string)
 	RecordOrphans(context.Context, string, string, string, int64)
+	RecordRetainedSandbox(context.Context, string, string, string, string)
+	RecordRetainedSandboxJanitor(context.Context, string, string, string, int64, int64, int64, int64)
 }
 
 type NoopProvider struct{}
@@ -34,18 +36,27 @@ func (NoopProvider) RecordStep(context.Context, string, string, string, string, 
 func (NoopProvider) RecordCleanup(context.Context, string, string, string, string) {}
 func (NoopProvider) RecordOverlapSkip(context.Context, string, string, string)     {}
 func (NoopProvider) RecordOrphans(context.Context, string, string, string, int64)  {}
+func (NoopProvider) RecordRetainedSandbox(context.Context, string, string, string, string) {
+}
+func (NoopProvider) RecordRetainedSandboxJanitor(context.Context, string, string, string, int64, int64, int64, int64) {
+}
 
 type recorder struct {
-	meter           metric.Meter
-	runTotal        metric.Int64Counter
-	stepTotal       metric.Int64Counter
-	cleanupTotal    metric.Int64Counter
-	overlapSkipped  metric.Int64Counter
-	orphanResources metric.Int64UpDownCounter
-	runDuration     metric.Float64Histogram
-	stepDuration    metric.Float64Histogram
-	lastSuccess     metric.Float64Gauge
-	lastSuccessUnix atomic.Int64
+	meter                  metric.Meter
+	runTotal               metric.Int64Counter
+	stepTotal              metric.Int64Counter
+	cleanupTotal           metric.Int64Counter
+	overlapSkipped         metric.Int64Counter
+	orphanResources        metric.Int64UpDownCounter
+	retainedSandbox        metric.Int64Counter
+	retainedExamined       metric.Int64Counter
+	retainedExpired        metric.Int64Counter
+	retainedDeleted        metric.Int64Counter
+	retainedDeleteFailures metric.Int64Counter
+	runDuration            metric.Float64Histogram
+	stepDuration           metric.Float64Histogram
+	lastSuccess            metric.Float64Gauge
+	lastSuccessUnix        atomic.Int64
 }
 
 func NewProvider(ctx context.Context, cfg config.Config) (Provider, func(context.Context) error, error) {
@@ -87,20 +98,30 @@ func newSDKProvider(_ context.Context, exporter sdkmetric.Exporter) (Provider, f
 	cleanupTotal, _ := meter.Int64Counter("superserve_canary_cleanup_total")
 	overlapSkipped, _ := meter.Int64Counter("superserve_canary_overlap_skipped_total")
 	orphanResources, _ := meter.Int64UpDownCounter("superserve_canary_orphan_resources")
+	retainedSandbox, _ := meter.Int64Counter("superserve_canary_retained_sandbox_total")
+	retainedExamined, _ := meter.Int64Counter("superserve_canary_retained_sandbox_examined_total")
+	retainedExpired, _ := meter.Int64Counter("superserve_canary_retained_sandbox_expired_total")
+	retainedDeleted, _ := meter.Int64Counter("superserve_canary_retained_sandbox_deleted_total")
+	retainedDeleteFailures, _ := meter.Int64Counter("superserve_canary_retained_sandbox_deletion_failure_total")
 	runDuration, _ := meter.Float64Histogram("superserve_canary_run_duration_seconds")
 	stepDuration, _ := meter.Float64Histogram("superserve_canary_step_duration_seconds")
 	lastSuccess, _ := meter.Float64Gauge("superserve_canary_last_success_timestamp_seconds")
 
 	return &recorder{
-		meter:           meter,
-		runTotal:        runTotal,
-		stepTotal:       stepTotal,
-		cleanupTotal:    cleanupTotal,
-		overlapSkipped:  overlapSkipped,
-		orphanResources: orphanResources,
-		runDuration:     runDuration,
-		stepDuration:    stepDuration,
-		lastSuccess:     lastSuccess,
+		meter:                  meter,
+		runTotal:               runTotal,
+		stepTotal:              stepTotal,
+		cleanupTotal:           cleanupTotal,
+		overlapSkipped:         overlapSkipped,
+		orphanResources:        orphanResources,
+		retainedSandbox:        retainedSandbox,
+		retainedExamined:       retainedExamined,
+		retainedExpired:        retainedExpired,
+		retainedDeleted:        retainedDeleted,
+		retainedDeleteFailures: retainedDeleteFailures,
+		runDuration:            runDuration,
+		stepDuration:           stepDuration,
+		lastSuccess:            lastSuccess,
 	}, mp.Shutdown, nil
 }
 
@@ -160,4 +181,31 @@ func (p *recorder) RecordOrphans(ctx context.Context, environment, region, targe
 		return
 	}
 	p.orphanResources.Add(ctx, count, metric.WithAttributes(p.attrs(environment, region, target, "janitor", "", "observed")...))
+}
+
+func (p *recorder) RecordRetainedSandbox(ctx context.Context, environment, region, target, failedStep string) {
+	if p == nil || p.retainedSandbox == nil {
+		return
+	}
+	attrs := append(p.attrs(environment, region, target, "lifecycle", "", "retained"), attribute.String("failed_step", failedStep))
+	p.retainedSandbox.Add(ctx, 1, metric.WithAttributes(attrs...))
+}
+
+func (p *recorder) RecordRetainedSandboxJanitor(ctx context.Context, environment, region, target string, examined, expired, deleted, deleteFailures int64) {
+	if p == nil {
+		return
+	}
+	base := p.attrs(environment, region, target, "janitor", "", "observed")
+	if p.retainedExamined != nil {
+		p.retainedExamined.Add(ctx, examined, metric.WithAttributes(base...))
+	}
+	if p.retainedExpired != nil {
+		p.retainedExpired.Add(ctx, expired, metric.WithAttributes(base...))
+	}
+	if p.retainedDeleted != nil {
+		p.retainedDeleted.Add(ctx, deleted, metric.WithAttributes(base...))
+	}
+	if p.retainedDeleteFailures != nil {
+		p.retainedDeleteFailures.Add(ctx, deleteFailures, metric.WithAttributes(base...))
+	}
 }
