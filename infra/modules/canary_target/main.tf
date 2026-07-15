@@ -209,6 +209,7 @@ resource "google_monitoring_alert_policy" "two_failures" {
 }
 
 resource "google_monitoring_alert_policy" "missing_runs" {
+  count                 = var.create_alerts ? 1 : 0
   project               = var.project_id
   display_name          = "API Canary ${var.target_name}: missing completed runs"
   combiner              = "OR"
