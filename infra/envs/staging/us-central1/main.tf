@@ -37,6 +37,7 @@ module "lifecycle" {
   manual_staging_opt_in     = true
   notification_channel_ids  = var.notification_channel_ids
   labels                    = local.labels
+  create_alerts             = var.create_alerts
 }
 
 module "janitor" {
@@ -56,4 +57,5 @@ module "janitor" {
   retain_failed_sandbox_ttl = local.retain_failed_sandbox_ttl
   notification_channel_ids  = var.notification_channel_ids
   labels                    = local.labels
+  create_alerts             = var.create_alerts
 }

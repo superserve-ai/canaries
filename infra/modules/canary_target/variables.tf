@@ -71,3 +71,8 @@ variable "notification_channel_ids" {
   type    = list(string)
   default = []
 }
+
+variable "create_alerts" {
+  type    = bool
+  default = false
+}

@@ -26,6 +26,9 @@ resource "google_cloud_run_v2_job" "janitor" {
   name     = local.job_name
   location = var.job_region
   labels   = local.labels
+  depends_on = [
+    google_secret_manager_secret_iam_member.runtime_accessor
+  ]
 
   template {
     labels = local.labels
@@ -120,10 +123,28 @@ resource "google_cloud_run_v2_job" "janitor" {
     }
   }
 }
-
-resource "google_monitoring_alert_policy" "janitor_failure" {
+resource "google_monitoring_alert_policy" "janitor_failure_stale_resources" {
+  count                 = var.create_alerts ? 1 : 0
   project               = var.project_id
-  display_name          = "API Canary Janitor ${var.target_name}: failed or stale"
+  display_name          = "API Canary Janitor ${var.target_name}: stale resources"
+  combiner              = "OR"
+  enabled               = true
+  notification_channels = var.notification_channel_ids
+
+  conditions {
+    display_name = "Janitor observed stale resources"
+    condition_prometheus_query_language {
+      query    = "max_over_time(superserve_canary_orphan_resources{target=\"${var.target_name}\"}[24h]) > 0"
+      duration = "0s"
+    }
+  }
+
+  user_labels = local.labels
+}
+resource "google_monitoring_alert_policy" "janitor_failure_24hours" {
+  count                 = var.create_alerts ? 1 : 0
+  project               = var.project_id
+  display_name          = "API Canary Janitor ${var.target_name}: failed"
   combiner              = "OR"
   enabled               = true
   notification_channels = var.notification_channel_ids
@@ -136,13 +157,6 @@ resource "google_monitoring_alert_policy" "janitor_failure" {
     }
   }
 
-  conditions {
-    display_name = "Janitor observed stale resources"
-    condition_prometheus_query_language {
-      query    = "max_over_time(superserve_canary_orphan_resources{target=\"${var.target_name}\"}[24h]) > 0"
-      duration = "0s"
-    }
-  }
-
   user_labels = local.labels
 }
+

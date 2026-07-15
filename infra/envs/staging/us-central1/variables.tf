@@ -16,3 +16,8 @@ variable "notification_channel_ids" {
   type    = list(string)
   default = []
 }
+variable "create_alerts" {
+  description = "Whether to create monitoring alert policies"
+  type        = bool
+  default     = false
+}

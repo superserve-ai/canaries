@@ -51,6 +51,9 @@ resource "google_cloud_run_v2_job" "lifecycle" {
   name     = local.lifecycle_job_name
   location = var.job_region
   labels   = local.labels
+  depends_on = [
+    google_secret_manager_secret_iam_member.runtime_accessor
+  ]
 
   template {
     labels = local.labels
@@ -178,6 +181,7 @@ resource "google_cloud_scheduler_job" "lifecycle" {
 }
 
 resource "google_monitoring_alert_policy" "two_failures" {
+  count                 = var.create_alerts ? 1 : 0
   project               = var.project_id
   display_name          = "API Canary ${var.target_name}: two consecutive failures"
   combiner              = "OR"
