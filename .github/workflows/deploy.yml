@@ -10,43 +10,27 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write
-    outputs:
-      image_staging: ${{ steps.staging.outputs.image }}
-      image_prod: ${{ steps.prod.outputs.image }}
     steps:
       - uses: actions/checkout@v4
 
-      - uses: google-github-actions/auth@v2
+      # Build once without GCP credentials. Each environment-specific deploy
+      # job authenticates with its own service account and pushes this image.
+      - name: Build canary image
+        run: |
+          set -euo pipefail
+          docker build --platform linux/amd64 -t api-canary:${GITHUB_SHA} .
+          docker save api-canary:${GITHUB_SHA} | gzip > /tmp/api-canary-image.tar.gz
+
+      - name: Upload canary image artifact
+        uses: actions/upload-artifact@v4
         with:
-          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
-
-      - uses: google-github-actions/setup-gcloud@v2
-
-      - name: Configure Docker auth
-        run: gcloud auth configure-docker us-central1-docker.pkg.dev,us-west2-docker.pkg.dev --quiet
-
-      - name: Build staging image
-        id: staging
-        run: |
-          set -euo pipefail
-          IMAGE="us-central1-docker.pkg.dev/rayai-dev/superserve/api-canary:${GITHUB_SHA}"
-          docker build -t "$IMAGE" .
-          docker push "$IMAGE"
-          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
-
-      - name: Build production image
-        id: prod
-        run: |
-          set -euo pipefail
-          IMAGE="us-central1-docker.pkg.dev/rayai-prod/superserve/api-canary:${GITHUB_SHA}"
-          docker build -t "$IMAGE" .
-          docker push "$IMAGE"
-          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          name: api-canary-image-${{ github.sha }}
+          path: /tmp/api-canary-image.tar.gz
+          if-no-files-found: error
 
   deploy-staging:
     runs-on: ubuntu-latest
+    environment: staging
     needs: build
     permissions:
       contents: read
@@ -54,10 +38,37 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: google-github-actions/auth@v2
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT_DEV }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Download prebuilt canary image
+        uses: actions/download-artifact@v4
+        with:
+          name: api-canary-image-${{ github.sha }}
+          path: /tmp
+
+      - name: Configure Docker auth
+        run: |
+          gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+
+      - name: Load and push staging image
+        id: image
+        run: |
+          set -euo pipefail
+          gzip -dc /tmp/api-canary-image.tar.gz | docker load
+
+          IMAGE="us-central1-docker.pkg.dev/rayai-dev/superserve/api-canary"
+          docker tag api-canary:${GITHUB_SHA} "${IMAGE}:${GITHUB_SHA}"
+          docker tag api-canary:${GITHUB_SHA} "${IMAGE}:latest"
+          docker push "${IMAGE}:${GITHUB_SHA}"
+          docker push "${IMAGE}:latest"
+
+          echo "image=${IMAGE}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
 
       - uses: hashicorp/setup-terraform@v3
         with:
@@ -68,10 +79,11 @@ jobs:
           set -euo pipefail
           cd infra/envs/staging/us-central1
           terraform init -input=false
-          terraform apply -input=false -auto-approve -var="image=${{ needs.build.outputs.image_staging }}"
+          terraform apply             -input=false             -auto-approve             -var="image=${{ steps.image.outputs.image }}"
 
   deploy-production:
     runs-on: ubuntu-latest
+    environment: production
     needs: [build, deploy-staging]
     permissions:
       contents: read
@@ -79,10 +91,39 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: google-github-actions/auth@v2
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT_PROD }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Download prebuilt canary image
+        uses: actions/download-artifact@v4
+        with:
+          name: api-canary-image-${{ github.sha }}
+          path: /tmp
+
+      # The production image is stored once in the existing us-central1
+      # Artifact Registry and may be deployed by Terraform to multiple regions.
+      - name: Configure Docker auth
+        run: |
+          gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+
+      - name: Load and push production image
+        id: image
+        run: |
+          set -euo pipefail
+          gzip -dc /tmp/api-canary-image.tar.gz | docker load
+
+          IMAGE="us-central1-docker.pkg.dev/rayai-prod/superserve/api-canary"
+          docker tag api-canary:${GITHUB_SHA} "${IMAGE}:${GITHUB_SHA}"
+          docker tag api-canary:${GITHUB_SHA} "${IMAGE}:latest"
+          docker push "${IMAGE}:${GITHUB_SHA}"
+          docker push "${IMAGE}:latest"
+
+          echo "image=${IMAGE}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
 
       - uses: hashicorp/setup-terraform@v3
         with:
@@ -93,4 +134,4 @@ jobs:
           set -euo pipefail
           cd infra/envs/production
           terraform init -input=false
-          terraform apply -input=false -auto-approve -var="image=${{ needs.build.outputs.image_prod }}"
+          terraform apply             -input=false             -auto-approve             -var="image=${{ steps.image.outputs.image }}"
