@@ -30,6 +30,24 @@ variable "api_key_secret_name" {
   type = string
 }
 
+variable "lock_bucket_name" {
+  type = string
+}
+
+variable "otlp_metrics_endpoint" {
+  type = string
+}
+
+variable "retain_failed_sandbox" {
+  type    = bool
+  default = false
+}
+
+variable "retain_failed_sandbox_ttl" {
+  type    = string
+  default = "2h"
+}
+
 variable "labels" {
   type    = map(string)
   default = {}

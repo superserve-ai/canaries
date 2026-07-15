@@ -2,14 +2,12 @@ package app
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"net/http"
 	"os"
 	"time"
 
-	"cloud.google.com/go/storage"
 	"github.com/rs/zerolog/log"
 
 	"github.com/superserve-ai/canaries/internal/canaryapi"
@@ -20,7 +18,7 @@ import (
 	"github.com/superserve-ai/canaries/internal/metrics"
 )
 
-func Run(ctx context.Context, args []string) error {
+func Run(ctx context.Context, args []string) (err error) {
 	fs := flag.NewFlagSet("api-canary", flag.ContinueOnError)
 	mode := fs.String("mode", envDefault("CANARY_MODE", "lifecycle"), "lifecycle or janitor")
 	if err := fs.Parse(args); err != nil {
@@ -32,14 +30,24 @@ func Run(ctx context.Context, args []string) error {
 		return err
 	}
 
-	mp, shutdownMetrics, err := metrics.NewProvider(ctx, cfg.Metrics)
+	log.Info().
+		Str("runtime", string(cfg.Runtime)).
+		Str("metrics_exporter", string(cfg.MetricsExporter)).
+		Str("lock_backend", string(cfg.LockBackend)).
+		Bool("retain_failed_sandbox", cfg.RetainFailedSandbox).
+		Dur("retain_failed_sandbox_ttl", cfg.RetainFailedSandboxTTL).
+		Msg("canary configuration")
+	if cfg.LockBackend == config.LockBackendNone {
+		log.Info().Msg("locking disabled for this run")
+	}
+
+	mp, shutdownMetrics, err := metrics.NewProvider(ctx, cfg)
 	if err != nil {
 		return fmt.Errorf("init metrics: %w", err)
 	}
 	defer func() {
-		if err := shutdownMetrics(context.Background()); err != nil {
-			log.Error().Err(err).Msg("metrics shutdown failed")
-		}
+		shutdownErr := shutdownMetrics(context.Background())
+		err = combineRunAndShutdownError(err, shutdownErr, cfg.Runtime)
 	}()
 
 	httpClient := &http.Client{Timeout: cfg.HTTPTimeout}
@@ -74,19 +82,34 @@ func Run(ctx context.Context, args []string) error {
 	}
 }
 
-func newLocker(ctx context.Context, cfg config.Config) (lock.Locker, func(), error) {
+func newLocker(ctx context.Context, cfg config.Config) (lock.Lock, func(), error) {
 	if cfg.Mode != config.ModeLifecycle {
-		return lock.NoopLocker{}, func() {}, nil
+		return lock.NoopLock{}, func() {}, nil
 	}
-	if cfg.LockBucket == "" {
-		return nil, nil, errors.New("LOCK_BUCKET is required for lifecycle mode")
-	}
-	client, err := storage.NewClient(ctx)
+	locker, closeFn, err := lock.New(ctx, lock.Config{
+		Backend:  string(cfg.LockBackend),
+		FilePath: cfg.LockFile,
+		Bucket:   cfg.LockBucket,
+	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("create storage client: %w", err)
+		return nil, nil, err
 	}
-	locker := lock.NewGCSLocker(client, cfg.LockBucket)
-	return locker, func() { _ = client.Close() }, nil
+	return locker, closeFn, nil
+}
+
+func combineRunAndShutdownError(runErr, shutdownErr error, runtime config.Runtime) error {
+	if shutdownErr == nil {
+		return runErr
+	}
+	if runErr != nil {
+		log.Warn().Err(shutdownErr).Msg("metrics shutdown failed")
+		return runErr
+	}
+	if runtime == config.RuntimeCloudRun {
+		return shutdownErr
+	}
+	log.Warn().Err(shutdownErr).Msg("metrics shutdown failed")
+	return nil
 }
 
 func envDefault(key, fallback string) string {
