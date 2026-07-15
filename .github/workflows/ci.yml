@@ -57,8 +57,14 @@ jobs:
           cd infra/envs/production
           terraform init -backend=false
           terraform validate
-
-      - name: Secret scan
-        uses: zricethezav/gitleaks-action@v2
+      - name: Install Gitleaks
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_VERSION: 8.28.0
+        run: |
+          curl -sSfL \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | tar -xz gitleaks
+          sudo install gitleaks /usr/local/bin/gitleaks
+
+      - name: Scan for secrets
+        run: gitleaks git --redact --verbose
