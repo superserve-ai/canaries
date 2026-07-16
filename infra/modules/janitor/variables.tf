@@ -62,3 +62,11 @@ variable "create_alerts" {
   type    = bool
   default = false
 }
+variable "vpc_connector" {
+  type = string
+}
+
+variable "vpc_egress" {
+  type    = string
+  default = "ALL_TRAFFIC"
+}

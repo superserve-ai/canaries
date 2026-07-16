@@ -37,7 +37,10 @@ resource "google_cloud_run_v2_job" "janitor" {
       service_account = google_service_account.runtime.email
       timeout         = "600s"
       max_retries     = 0
-
+      vpc_access {
+        connector = var.vpc_connector
+        egress    = var.vpc_egress
+      }
       containers {
         image = var.image
         args  = ["-mode", "janitor"]

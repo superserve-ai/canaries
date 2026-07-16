@@ -38,6 +38,8 @@ module "lifecycle" {
   notification_channel_ids  = var.notification_channel_ids
   labels                    = local.labels
   create_alerts             = var.create_alerts
+  vpc_connector             = "projects/rayai-dev/locations/us-central1/connectors/ss-vpc-conn-f1b3552"
+  vpc_egress                = "ALL_TRAFFIC"
 }
 
 module "janitor" {
@@ -58,4 +60,6 @@ module "janitor" {
   notification_channel_ids  = var.notification_channel_ids
   labels                    = local.labels
   create_alerts             = var.create_alerts
+  vpc_connector             = "projects/rayai-dev/locations/us-central1/connectors/ss-vpc-conn-f1b3552"
+  vpc_egress                = "ALL_TRAFFIC"
 }
