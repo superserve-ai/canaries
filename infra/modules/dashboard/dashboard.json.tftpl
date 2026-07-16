@@ -21,10 +21,10 @@ ${jsonencode({
           },
           {
             scorecard = {
-              title = "Last successful run age (s)"
+              title = "Last successful lifecycle run age (s)"
               timeSeriesQuery = {
                 prometheusQuery = format(
-                  "time() - max by (target) (superserve_canary_last_success_timestamp_seconds{environment=%q,region=%q,target=%q,result=\"success\"})",
+                  "time() - max by (target) (superserve_canary_last_success_timestamp_seconds{environment=%q,region=%q,target=%q,scenario=\"lifecycle\",result=\"success\"})",
                   environment,
                   target.region,
                   target.target
@@ -37,10 +37,10 @@ ${jsonencode({
           },
           {
             scorecard = {
-              title = "Last completed run age (s)"
+              title = "Last lifecycle completion age (s)"
               timeSeriesQuery = {
                 prometheusQuery = format(
-                  "time() - max by (target) (superserve_canary_last_completed_timestamp_seconds{environment=%q,region=%q,target=%q})",
+                  "time() - max by (target) (superserve_canary_last_completed_timestamp_seconds{environment=%q,region=%q,target=%q,scenario=\"lifecycle\"})",
                   environment,
                   target.region,
                   target.target
@@ -261,6 +261,21 @@ ${jsonencode({
                   environment,
                   target.region,
                   target.target
+                )
+              }
+              sparkChart = {
+                sparkChartType = "SPARK_LINE"
+              }
+            }
+          },
+          {
+            scorecard = {
+              title = "Janitor Cloud Run completions (15m)"
+              timeSeriesQuery = {
+                prometheusQuery = format(
+                  "increase({\"run.googleapis.com/job/completed_execution_count\", monitored_resource=\"cloud_run_job\", job_name=%q, location=%q}[15m])",
+                  "api-canary-janitor-${target.target}",
+                  target.region
                 )
               }
               sparkChart = {
