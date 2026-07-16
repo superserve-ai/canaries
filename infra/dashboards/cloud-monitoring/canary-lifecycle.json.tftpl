@@ -139,6 +139,7 @@ ${jsonencode({
                   )
                 }
                 plotType = "LINE"
+                legendTemplate = "{{target}}"
               }
             ]
           }
@@ -155,6 +156,7 @@ ${jsonencode({
                   )
                 }
                 plotType = "LINE"
+                legendTemplate = "{{target}}"
               }
             ]
           }
@@ -172,6 +174,7 @@ ${jsonencode({
                   )
                 }
                 plotType = "LINE"
+                legendTemplate = "{{target}}"
               }
             ]
           }
@@ -180,6 +183,117 @@ ${jsonencode({
           text = {
             content = "## Lifecycle timing"
             format  = "MARKDOWN"
+          }
+        },
+        {
+          title = "Create -> sandbox active"
+          xyChart = {
+            dataSets = [
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "histogram_quantile(0.50, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"create_total\"}[30m])))",
+                    environment
+                  )
+                }
+                plotType = "LINE"
+                legendTemplate = "{{target}} p50"
+              },
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "histogram_quantile(0.95, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"create_total\"}[30m])))",
+                    environment
+                  )
+                }
+                plotType = "LINE"
+                legendTemplate = "{{target}} p95"
+              },
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "histogram_quantile(0.99, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"create_total\"}[30m])))",
+                    environment
+                  )
+                }
+                plotType = "LINE"
+                legendTemplate = "{{target}} p99"
+              }
+            ]
+          }
+        },
+        {
+          title = "Pause -> sandbox paused"
+          xyChart = {
+            dataSets = [
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "histogram_quantile(0.50, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"pause_total\"}[30m])))",
+                    environment
+                  )
+                }
+                plotType = "LINE"
+                legendTemplate = "{{target}} p50"
+              },
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "histogram_quantile(0.95, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"pause_total\"}[30m])))",
+                    environment
+                  )
+                }
+                plotType = "LINE"
+                legendTemplate = "{{target}} p95"
+              },
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "histogram_quantile(0.99, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"pause_total\"}[30m])))",
+                    environment
+                  )
+                }
+                plotType = "LINE"
+                legendTemplate = "{{target}} p99"
+              }
+            ]
+          }
+        },
+        {
+          title = "Resume -> sandbox active"
+          xyChart = {
+            dataSets = [
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "histogram_quantile(0.50, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"resume_total\"}[30m])))",
+                    environment
+                  )
+                }
+                plotType = "LINE"
+                legendTemplate = "{{target}} p50"
+              },
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "histogram_quantile(0.95, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"resume_total\"}[30m])))",
+                    environment
+                  )
+                }
+                plotType = "LINE"
+                legendTemplate = "{{target}} p95"
+              },
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "histogram_quantile(0.99, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"resume_total\"}[30m])))",
+                    environment
+                  )
+                }
+                plotType = "LINE"
+                legendTemplate = "{{target}} p99"
+              }
+            ]
           }
         },
         {
@@ -193,8 +307,8 @@ ${jsonencode({
                     environment
                   )
                 }
-                plotType = "LINE",
-"legendTemplate": "p50"
+                plotType = "LINE"
+                legendTemplate = "{{target}} p50"
               },
               {
                 timeSeriesQuery = {
@@ -203,8 +317,8 @@ ${jsonencode({
                     environment
                   )
                 }
-                plotType = "LINE",
-  "legendTemplate": "p95"
+                plotType = "LINE"
+                legendTemplate = "{{target}} p95"
               },
               {
                 timeSeriesQuery = {
@@ -213,8 +327,8 @@ ${jsonencode({
                     environment
                   )
                 }
-                plotType = "LINE",
-  "legendTemplate": "p99"
+                plotType = "LINE"
+                legendTemplate = "{{target}} p99"
               }
             ]
           }
@@ -230,8 +344,8 @@ ${jsonencode({
                     environment
                   )
                 }
-                plotType = "LINE",
-  "legendTemplate": "p50"
+                plotType = "LINE"
+                legendTemplate = "{{target}} p50"
               },
               {
                 timeSeriesQuery = {
@@ -240,8 +354,8 @@ ${jsonencode({
                     environment
                   )
                 }
-                plotType = "LINE",
-  "legendTemplate": "p95"
+                plotType = "LINE"
+                legendTemplate = "{{target}} p95"
               },
               {
                 timeSeriesQuery = {
@@ -250,45 +364,8 @@ ${jsonencode({
                     environment
                   )
                 }
-                plotType = "LINE",
-  "legendTemplate": "p99"
-              }
-            ]
-          }
-        },
-        {
-          title = "Create readiness duration"
-          xyChart = {
-            dataSets = [
-              {
-                timeSeriesQuery = {
-                  prometheusQuery = format(
-                    "histogram_quantile(0.50, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"create_wait_active\"}[30m])))",
-                    environment
-                  )
-                }
-                plotType = "LINE",
-  "legendTemplate": "p50"
-              },
-              {
-                timeSeriesQuery = {
-                  prometheusQuery = format(
-                    "histogram_quantile(0.95, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"create_wait_active\"}[30m])))",
-                    environment
-                  )
-                }
-                plotType = "LINE",
-  "legendTemplate": "p95"
-              },
-              {
-                timeSeriesQuery = {
-                  prometheusQuery = format(
-                    "histogram_quantile(0.99, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"create_wait_active\"}[30m])))",
-                    environment
-                  )
-                }
-                plotType = "LINE",
-  "legendTemplate": "p99"
+                plotType = "LINE"
+                legendTemplate = "{{target}} p99"
               }
             ]
           }
@@ -304,8 +381,8 @@ ${jsonencode({
                     environment
                   )
                 }
-                plotType = "LINE",
-  "legendTemplate": "p50"
+                plotType = "LINE"
+                legendTemplate = "{{target}} p50"
               },
               {
                 timeSeriesQuery = {
@@ -314,8 +391,8 @@ ${jsonencode({
                     environment
                   )
                 }
-                plotType = "LINE",
-  "legendTemplate": "p95"
+                plotType = "LINE"
+                legendTemplate = "{{target}} p95"
               },
               {
                 timeSeriesQuery = {
@@ -324,45 +401,8 @@ ${jsonencode({
                     environment
                   )
                 }
-                plotType = "LINE",
-  "legendTemplate": "p99"
-              }
-            ]
-          }
-        },
-        {
-          title = "Pause readiness duration"
-          xyChart = {
-            dataSets = [
-              {
-                timeSeriesQuery = {
-                  prometheusQuery = format(
-                    "histogram_quantile(0.50, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"pause_wait_paused\"}[30m])))",
-                    environment
-                  )
-                }
-                plotType = "LINE",
-  "legendTemplate": "p50"
-              },
-              {
-                timeSeriesQuery = {
-                  prometheusQuery = format(
-                    "histogram_quantile(0.95, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"pause_wait_paused\"}[30m])))",
-                    environment
-                  )
-                }
-                plotType = "LINE",
-  "legendTemplate": "p95"
-              },
-              {
-                timeSeriesQuery = {
-                  prometheusQuery = format(
-                    "histogram_quantile(0.99, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"pause_wait_paused\"}[30m])))",
-                    environment
-                  )
-                }
-                plotType = "LINE",
-  "legendTemplate": "p99"
+                plotType = "LINE"
+                legendTemplate = "{{target}} p99"
               }
             ]
           }
@@ -378,8 +418,8 @@ ${jsonencode({
                     environment
                   )
                 }
-                plotType = "LINE",
-  "legendTemplate": "p50"
+                plotType = "LINE"
+                legendTemplate = "{{target}} p50"
               },
               {
                 timeSeriesQuery = {
@@ -388,8 +428,8 @@ ${jsonencode({
                     environment
                   )
                 }
-                plotType = "LINE",
-  "legendTemplate": "p95"
+                plotType = "LINE"
+                legendTemplate = "{{target}} p95"
               },
               {
                 timeSeriesQuery = {
@@ -398,45 +438,8 @@ ${jsonencode({
                     environment
                   )
                 }
-                plotType = "LINE",
-  "legendTemplate": "p99"
-              }
-            ]
-          }
-        },
-        {
-          title = "Resume readiness duration"
-          xyChart = {
-            dataSets = [
-              {
-                timeSeriesQuery = {
-                  prometheusQuery = format(
-                    "histogram_quantile(0.50, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"resume_wait_active\"}[30m])))",
-                    environment
-                  )
-                }
-                plotType = "LINE",
-  "legendTemplate": "p50"
-              },
-              {
-                timeSeriesQuery = {
-                  prometheusQuery = format(
-                    "histogram_quantile(0.95, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"resume_wait_active\"}[30m])))",
-                    environment
-                  )
-                }
-                plotType = "LINE",
-  "legendTemplate": "p95"
-              },
-              {
-                timeSeriesQuery = {
-                  prometheusQuery = format(
-                    "histogram_quantile(0.99, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"resume_wait_active\"}[30m])))",
-                    environment
-                  )
-                }
-                plotType = "LINE",
-  "legendTemplate": "p99"
+                plotType = "LINE"
+                legendTemplate = "{{target}} p99"
               }
             ]
           }
@@ -452,8 +455,8 @@ ${jsonencode({
                     environment
                   )
                 }
-                plotType = "LINE",
-  "legendTemplate": "p50"
+                plotType = "LINE"
+                legendTemplate = "{{target}} p50"
               },
               {
                 timeSeriesQuery = {
@@ -462,8 +465,8 @@ ${jsonencode({
                     environment
                   )
                 }
-                plotType = "LINE",
-  "legendTemplate": "p95"
+                plotType = "LINE"
+                legendTemplate = "{{target}} p95"
               },
               {
                 timeSeriesQuery = {
@@ -472,8 +475,8 @@ ${jsonencode({
                     environment
                   )
                 }
-                plotType = "LINE",
-  "legendTemplate": "p99"
+                plotType = "LINE"
+                legendTemplate = "{{target}} p99"
               }
             ]
           }
@@ -489,8 +492,8 @@ ${jsonencode({
                     environment
                   )
                 }
-                plotType = "LINE",
-  "legendTemplate": "p50"
+                plotType = "LINE"
+                legendTemplate = "{{target}} p50"
               },
               {
                 timeSeriesQuery = {
@@ -499,8 +502,8 @@ ${jsonencode({
                     environment
                   )
                 }
-                plotType = "LINE",
-  "legendTemplate": "p95"
+                plotType = "LINE"
+                legendTemplate = "{{target}} p95"
               },
               {
                 timeSeriesQuery = {
@@ -509,8 +512,8 @@ ${jsonencode({
                     environment
                   )
                 }
-                plotType = "LINE",
-  "legendTemplate": "p99"
+                plotType = "LINE"
+                legendTemplate = "{{target}} p99"
               }
             ]
           }
@@ -533,6 +536,7 @@ ${jsonencode({
                   )
                 }
                 plotType = "LINE"
+                legendTemplate = "{{target}} {{step}}"
               }
             ]
           }

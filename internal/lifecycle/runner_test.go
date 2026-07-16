@@ -121,6 +121,70 @@ func TestCleanupPreservesPrimaryFailure(t *testing.T) {
 	}
 }
 
+func TestRunLifecycleRecordsTotalDurations(t *testing.T) {
+	statusCalls := 0
+	metrics := &lifecycleMetricsRecorder{}
+	client := &fakeClient{
+		createSandboxFn: func(context.Context, canaryapi.CreateSandboxRequest) (canaryapi.Sandbox, error) {
+			return canaryapi.Sandbox{ID: "sb-1", Status: "active", AccessToken: "tok"}, nil
+		},
+		getSandboxFn: func(context.Context, string) (canaryapi.Sandbox, error) {
+			statusCalls++
+			switch statusCalls {
+			case 1:
+				return canaryapi.Sandbox{ID: "sb-1", Status: "active", AccessToken: "tok"}, nil
+			case 2:
+				return canaryapi.Sandbox{ID: "sb-1", Status: "paused", AccessToken: "tok"}, nil
+			default:
+				return canaryapi.Sandbox{ID: "sb-1", Status: "active", AccessToken: "tok"}, nil
+			}
+		},
+		previewURLFn: func(string, int) string { return "https://preview.example.test" },
+		execFn: func(context.Context, string, string, canaryapi.ExecRequest) (canaryapi.ExecResult, error) {
+			return canaryapi.ExecResult{ExitCode: 0}, nil
+		},
+	}
+	r := Runner{
+		Config: config.Config{
+			Target:                 "staging-us-central1",
+			Environment:            "staging",
+			Region:                 "us-central1",
+			ResourceTTL:            time.Hour,
+			PollInterval:           time.Millisecond,
+			CommandTimeout:         20 * time.Millisecond,
+			DeleteTimeout:          20 * time.Millisecond,
+			PreviewPort:            18080,
+			PreviewTimeout:         20 * time.Millisecond,
+			RetainFailedSandbox:    false,
+			RetainFailedSandboxTTL: 2 * time.Hour,
+		},
+		Client:  client,
+		Locker:  lock.NoopLock{},
+		Metrics: metrics,
+		Clock:   time.Now,
+		HTTP: &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader("preview-run-1")),
+					Header:     make(http.Header),
+					Request:    req,
+				}, nil
+			}),
+		},
+	}
+
+	if result := r.runLifecycle(context.Background(), "run-1"); result.Err != nil {
+		t.Fatalf("runLifecycle returned %v", result.Err)
+	}
+
+	for _, step := range []string{"create_total", "pause_total", "resume_total"} {
+		if !containsStep(metrics.steps, step) {
+			t.Fatalf("expected step %q in %v", step, metrics.steps)
+		}
+	}
+}
+
 func TestFailedRunRetainsSandboxWhenEnabled(t *testing.T) {
 	updateCalled := false
 	deleteCalled := false
@@ -496,6 +560,42 @@ func TestRunSkipsAlreadyRunning(t *testing.T) {
 	if err := r.Run(context.Background()); err != nil {
 		t.Fatalf("Run returned %v", err)
 	}
+}
+
+type lifecycleMetricsRecorder struct {
+	steps []string
+}
+
+func (m *lifecycleMetricsRecorder) RecordRun(context.Context, string, string, string, string, string, time.Duration) {
+}
+
+func (m *lifecycleMetricsRecorder) RecordStep(_ context.Context, _, _, _, _, step, result string, _ time.Duration) {
+	m.steps = append(m.steps, step+":"+result)
+}
+
+func (m *lifecycleMetricsRecorder) RecordCleanup(context.Context, string, string, string, string) {}
+
+func (m *lifecycleMetricsRecorder) RecordOverlapSkip(context.Context, string, string, string) {}
+
+func (m *lifecycleMetricsRecorder) RecordExecutionDelta(context.Context, string, string, string, string, int64) {
+}
+
+func (m *lifecycleMetricsRecorder) RecordOrphans(context.Context, string, string, string, int64, time.Duration) {
+}
+
+func (m *lifecycleMetricsRecorder) RecordRetainedSandbox(context.Context, string, string, string, string) {
+}
+
+func (m *lifecycleMetricsRecorder) RecordJanitorResources(context.Context, string, string, string, int64, int64, int64) {
+}
+
+func containsStep(steps []string, want string) bool {
+	for _, step := range steps {
+		if strings.HasPrefix(step, want+":") {
+			return true
+		}
+	}
+	return false
 }
 
 type alreadyRunningLock struct{}
