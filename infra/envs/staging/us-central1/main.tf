@@ -9,9 +9,16 @@ locals {
   retain_failed_sandbox     = true
   retain_failed_sandbox_ttl = "2h"
 
-  dashboard_targets = [
+  lifecycle_dashboard_targets = [
     {
       target = "staging-us-central1"
+      region = "us-central1"
+    }
+  ]
+
+  janitor_dashboard_targets = [
+    {
+      target = "staging"
       region = "us-central1"
     }
   ]
@@ -22,7 +29,7 @@ locals {
       definition = templatefile("${path.module}/../../../dashboards/cloud-monitoring/canary-lifecycle.json.tftpl", {
         project_id  = var.project_id
         environment = local.labels.environment
-        targets     = local.dashboard_targets
+        targets     = local.lifecycle_dashboard_targets
       })
     }
     canary_janitor = {
@@ -30,7 +37,7 @@ locals {
       definition = templatefile("${path.module}/../../../dashboards/cloud-monitoring/canary-janitor.json.tftpl", {
         project_id  = var.project_id
         environment = local.labels.environment
-        targets     = local.dashboard_targets
+        targets     = local.janitor_dashboard_targets
       })
     }
     canary_cleanup = {
@@ -38,7 +45,7 @@ locals {
       definition = templatefile("${path.module}/../../../dashboards/cloud-monitoring/canary-cleanup.json.tftpl", {
         project_id  = var.project_id
         environment = local.labels.environment
-        targets     = local.dashboard_targets
+        targets     = local.janitor_dashboard_targets
       })
     }
   }
