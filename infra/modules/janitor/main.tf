@@ -1,4 +1,7 @@
 locals {
+  use_direct_vpc = var.vpc_connector == null && var.vpc_network != null && var.vpc_subnetwork != null
+  use_vpc_access = var.vpc_connector != null || local.use_direct_vpc
+
   job_name = "api-canary-janitor-${var.target_name}"
   labels = merge(var.labels, {
     environment = var.environment
@@ -37,9 +40,23 @@ resource "google_cloud_run_v2_job" "janitor" {
       service_account = google_service_account.runtime.email
       timeout         = "600s"
       max_retries     = 0
-      vpc_access {
-        connector = var.vpc_connector
-        egress    = var.vpc_egress
+      dynamic "vpc_access" {
+        for_each = local.use_vpc_access ? [1] : []
+
+        content {
+          connector = var.vpc_connector
+          egress    = var.vpc_egress
+
+          dynamic "network_interfaces" {
+            for_each = local.use_direct_vpc ? [1] : []
+
+            content {
+              network    = var.vpc_network
+              subnetwork = var.vpc_subnetwork
+              tags       = var.vpc_tags
+            }
+          }
+        }
       }
       containers {
         image = var.image
@@ -162,4 +179,3 @@ resource "google_monitoring_alert_policy" "janitor_failure_24hours" {
 
   user_labels = local.labels
 }
-

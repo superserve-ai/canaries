@@ -85,3 +85,18 @@ variable "vpc_egress" {
   type    = string
   default = "ALL_TRAFFIC"
 }
+
+variable "vpc_network" {
+  type    = string
+  default = null
+}
+
+variable "vpc_subnetwork" {
+  type    = string
+  default = null
+}
+
+variable "vpc_tags" {
+  type    = list(string)
+  default = []
+}

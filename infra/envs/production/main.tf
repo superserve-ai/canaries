@@ -15,17 +15,25 @@ locals {
   lifecycle_targets = {
     production-us-central1 = {
       target_region       = "us-central1"
+      job_region          = "us-central1"
       api_base_url        = "https://usc-api.superserve.ai"
       preview_domain      = "usc-sandbox.superserve.ai"
       api_key_secret_name = "api-canary-key-production-us-central1"
       otlp_endpoint       = local.otlp_endpoints.production-us-central1
+      vpc_connector       = "projects/rayai-prod/locations/us-central1/connectors/superserve-prod-conn"
+      vpc_egress          = "ALL_TRAFFIC"
     }
     production-us-west2 = {
       target_region       = "us-west2"
+      job_region          = "us-west2"
       api_base_url        = "https://usw-api.superserve.ai"
       preview_domain      = "usw-sandbox.superserve.ai"
       api_key_secret_name = "api-canary-key-production-us-west2"
       otlp_endpoint       = local.otlp_endpoints.production-us-west2
+      vpc_network         = "superserve-production-vpc"
+      vpc_subnetwork      = "superserve-usw2-cr-subnet"
+      vpc_tags            = ["cr-usw2"]
+      vpc_egress          = "PRIVATE_RANGES_ONLY"
     }
   }
 }
@@ -43,7 +51,7 @@ module "lifecycle" {
   source   = "../../modules/canary_target"
 
   project_id                = var.project_id
-  job_region                = var.job_region
+  job_region                = each.value.job_region
   target_name               = each.key
   environment               = "production"
   target_region             = each.value.target_region
@@ -57,23 +65,34 @@ module "lifecycle" {
   retain_failed_sandbox_ttl = local.retain_failed_sandbox_ttl
   notification_channel_ids  = var.notification_channel_ids
   labels                    = merge(local.labels, { region = each.value.target_region })
+  vpc_connector             = try(each.value.vpc_connector, null)
+  vpc_egress                = try(each.value.vpc_egress, "ALL_TRAFFIC")
+  vpc_network               = try(each.value.vpc_network, null)
+  vpc_subnetwork            = try(each.value.vpc_subnetwork, null)
+  vpc_tags                  = try(each.value.vpc_tags, [])
 }
 
 module "janitor" {
-  source = "../../modules/janitor"
+  for_each = local.lifecycle_targets
+  source   = "../../modules/janitor"
 
   project_id                = var.project_id
-  job_region                = var.job_region
-  target_name               = "production"
+  job_region                = each.value.job_region
+  target_name               = each.key
   environment               = "production"
-  api_base_url              = "https://usc-api.superserve.ai"
-  preview_domain            = "usc-sandbox.superserve.ai"
+  api_base_url              = each.value.api_base_url
+  preview_domain            = each.value.preview_domain
   image                     = var.image
-  api_key_secret_name       = "api-canary-key-production-us-central1"
+  api_key_secret_name       = each.value.api_key_secret_name
   lock_bucket_name          = google_storage_bucket.locks.name
-  otlp_metrics_endpoint     = local.otlp_endpoints.production-us-central1
+  otlp_metrics_endpoint     = each.value.otlp_endpoint
   retain_failed_sandbox     = local.retain_failed_sandbox
   retain_failed_sandbox_ttl = local.retain_failed_sandbox_ttl
   notification_channel_ids  = var.notification_channel_ids
-  labels                    = local.labels
+  labels                    = merge(local.labels, { region = each.value.target_region })
+  vpc_connector             = try(each.value.vpc_connector, null)
+  vpc_egress                = try(each.value.vpc_egress, "ALL_TRAFFIC")
+  vpc_network               = try(each.value.vpc_network, null)
+  vpc_subnetwork            = try(each.value.vpc_subnetwork, null)
+  vpc_tags                  = try(each.value.vpc_tags, [])
 }
