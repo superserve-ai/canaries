@@ -62,6 +62,11 @@ variable "scheduler_cron" {
   default = "*/5 * * * *"
 }
 
+variable "scheduler_enabled" {
+  type    = bool
+  default = true
+}
+
 variable "manual_staging_opt_in" {
   type    = bool
   default = false
@@ -75,4 +80,28 @@ variable "notification_channel_ids" {
 variable "create_alerts" {
   type    = bool
   default = false
+}
+
+variable "vpc_connector" {
+  type = string
+}
+
+variable "vpc_egress" {
+  type    = string
+  default = "ALL_TRAFFIC"
+}
+
+variable "vpc_network" {
+  type    = string
+  default = null
+}
+
+variable "vpc_subnetwork" {
+  type    = string
+  default = null
+}
+
+variable "vpc_tags" {
+  type    = list(string)
+  default = []
 }

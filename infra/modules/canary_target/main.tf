@@ -1,4 +1,7 @@
 locals {
+  use_direct_vpc = var.vpc_connector == null && var.vpc_network != null && var.vpc_subnetwork != null
+  use_vpc_access = var.vpc_connector != null || local.use_direct_vpc
+
   lifecycle_job_name = "api-canary-${var.target_name}"
   scheduler_name     = "api-canary-schedule-${var.target_name}"
   labels = merge(var.labels, {
@@ -62,7 +65,24 @@ resource "google_cloud_run_v2_job" "lifecycle" {
       service_account = google_service_account.runtime.email
       timeout         = "600s"
       max_retries     = 0
+      dynamic "vpc_access" {
+        for_each = local.use_vpc_access ? [1] : []
 
+        content {
+          connector = var.vpc_connector
+          egress    = var.vpc_egress
+
+          dynamic "network_interfaces" {
+            for_each = local.use_direct_vpc ? [1] : []
+
+            content {
+              network    = var.vpc_network
+              subnetwork = var.vpc_subnetwork
+              tags       = var.vpc_tags
+            }
+          }
+        }
+      }
       containers {
         image = var.image
         args  = ["-mode", "lifecycle"]
@@ -154,6 +174,7 @@ resource "google_cloud_run_v2_job" "lifecycle" {
 }
 
 resource "google_cloud_run_v2_job_iam_member" "scheduler_invoker" {
+  count    = var.scheduler_enabled ? 1 : 0
   project  = var.project_id
   location = var.job_region
   name     = google_cloud_run_v2_job.lifecycle.name
@@ -162,6 +183,7 @@ resource "google_cloud_run_v2_job_iam_member" "scheduler_invoker" {
 }
 
 resource "google_cloud_scheduler_job" "lifecycle" {
+  count       = var.scheduler_enabled ? 1 : 0
   project     = var.project_id
   region      = var.job_region
   name        = local.scheduler_name

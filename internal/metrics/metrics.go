@@ -22,9 +22,10 @@ type Provider interface {
 	RecordStep(context.Context, string, string, string, string, string, string, time.Duration)
 	RecordCleanup(context.Context, string, string, string, string)
 	RecordOverlapSkip(context.Context, string, string, string)
-	RecordOrphans(context.Context, string, string, string, int64)
+	RecordExecutionDelta(context.Context, string, string, string, string, int64)
+	RecordOrphans(context.Context, string, string, string, int64, time.Duration)
 	RecordRetainedSandbox(context.Context, string, string, string, string)
-	RecordRetainedSandboxJanitor(context.Context, string, string, string, int64, int64, int64, int64)
+	RecordJanitorResources(context.Context, string, string, string, int64, int64, int64)
 }
 
 type NoopProvider struct{}
@@ -35,28 +36,32 @@ func (NoopProvider) RecordStep(context.Context, string, string, string, string, 
 }
 func (NoopProvider) RecordCleanup(context.Context, string, string, string, string) {}
 func (NoopProvider) RecordOverlapSkip(context.Context, string, string, string)     {}
-func (NoopProvider) RecordOrphans(context.Context, string, string, string, int64)  {}
+func (NoopProvider) RecordExecutionDelta(context.Context, string, string, string, string, int64) {
+}
+func (NoopProvider) RecordOrphans(context.Context, string, string, string, int64, time.Duration) {}
 func (NoopProvider) RecordRetainedSandbox(context.Context, string, string, string, string) {
 }
-func (NoopProvider) RecordRetainedSandboxJanitor(context.Context, string, string, string, int64, int64, int64, int64) {
+func (NoopProvider) RecordJanitorResources(context.Context, string, string, string, int64, int64, int64) {
 }
 
 type recorder struct {
-	meter                  metric.Meter
-	runTotal               metric.Int64Counter
-	stepTotal              metric.Int64Counter
-	cleanupTotal           metric.Int64Counter
-	overlapSkipped         metric.Int64Counter
-	orphanResources        metric.Int64UpDownCounter
-	retainedSandbox        metric.Int64Counter
-	retainedExamined       metric.Int64Counter
-	retainedExpired        metric.Int64Counter
-	retainedDeleted        metric.Int64Counter
-	retainedDeleteFailures metric.Int64Counter
-	runDuration            metric.Float64Histogram
-	stepDuration           metric.Float64Histogram
-	lastSuccess            metric.Float64Gauge
-	lastSuccessUnix        atomic.Int64
+	meter                    metric.Meter
+	runTotal                 metric.Int64Counter
+	stepTotal                metric.Int64Counter
+	cleanupTotal             metric.Int64Counter
+	overlapSkipped           metric.Int64Counter
+	runningExecutions        metric.Int64UpDownCounter
+	orphanResources          metric.Float64Gauge
+	oldestOrphanAge          metric.Float64Gauge
+	retainedSandbox          metric.Int64Counter
+	janitorResourcesExamined metric.Int64Counter
+	janitorResourcesDeleted  metric.Int64Counter
+	janitorDeleteFailures    metric.Int64Counter
+	runDuration              metric.Float64Histogram
+	stepDuration             metric.Float64Histogram
+	lastCompleted            metric.Float64Gauge
+	lastSuccess              metric.Float64Gauge
+	lastSuccessUnix          atomic.Int64
 }
 
 func NewProvider(ctx context.Context, cfg config.Config) (Provider, func(context.Context) error, error) {
@@ -97,31 +102,35 @@ func newSDKProvider(_ context.Context, exporter sdkmetric.Exporter) (Provider, f
 	stepTotal, _ := meter.Int64Counter("superserve_canary_step_total")
 	cleanupTotal, _ := meter.Int64Counter("superserve_canary_cleanup_total")
 	overlapSkipped, _ := meter.Int64Counter("superserve_canary_overlap_skipped_total")
-	orphanResources, _ := meter.Int64UpDownCounter("superserve_canary_orphan_resources")
+	runningExecutions, _ := meter.Int64UpDownCounter("superserve_canary_running_executions")
+	orphanResources, _ := meter.Float64Gauge("superserve_canary_orphan_resources")
+	oldestOrphanAge, _ := meter.Float64Gauge("superserve_canary_oldest_orphan_age_seconds")
 	retainedSandbox, _ := meter.Int64Counter("superserve_canary_retained_sandbox_total")
-	retainedExamined, _ := meter.Int64Counter("superserve_canary_retained_sandbox_examined_total")
-	retainedExpired, _ := meter.Int64Counter("superserve_canary_retained_sandbox_expired_total")
-	retainedDeleted, _ := meter.Int64Counter("superserve_canary_retained_sandbox_deleted_total")
-	retainedDeleteFailures, _ := meter.Int64Counter("superserve_canary_retained_sandbox_deletion_failure_total")
+	janitorResourcesExamined, _ := meter.Int64Counter("superserve_canary_janitor_resources_examined_total")
+	janitorResourcesDeleted, _ := meter.Int64Counter("superserve_canary_janitor_resources_deleted_total")
+	janitorDeleteFailures, _ := meter.Int64Counter("superserve_canary_janitor_delete_failures_total")
 	runDuration, _ := meter.Float64Histogram("superserve_canary_run_duration_seconds")
 	stepDuration, _ := meter.Float64Histogram("superserve_canary_step_duration_seconds")
+	lastCompleted, _ := meter.Float64Gauge("superserve_canary_last_completed_timestamp_seconds")
 	lastSuccess, _ := meter.Float64Gauge("superserve_canary_last_success_timestamp_seconds")
 
 	return &recorder{
-		meter:                  meter,
-		runTotal:               runTotal,
-		stepTotal:              stepTotal,
-		cleanupTotal:           cleanupTotal,
-		overlapSkipped:         overlapSkipped,
-		orphanResources:        orphanResources,
-		retainedSandbox:        retainedSandbox,
-		retainedExamined:       retainedExamined,
-		retainedExpired:        retainedExpired,
-		retainedDeleted:        retainedDeleted,
-		retainedDeleteFailures: retainedDeleteFailures,
-		runDuration:            runDuration,
-		stepDuration:           stepDuration,
-		lastSuccess:            lastSuccess,
+		meter:                    meter,
+		runTotal:                 runTotal,
+		stepTotal:                stepTotal,
+		cleanupTotal:             cleanupTotal,
+		overlapSkipped:           overlapSkipped,
+		runningExecutions:        runningExecutions,
+		orphanResources:          orphanResources,
+		oldestOrphanAge:          oldestOrphanAge,
+		retainedSandbox:          retainedSandbox,
+		janitorResourcesExamined: janitorResourcesExamined,
+		janitorResourcesDeleted:  janitorResourcesDeleted,
+		janitorDeleteFailures:    janitorDeleteFailures,
+		runDuration:              runDuration,
+		stepDuration:             stepDuration,
+		lastCompleted:            lastCompleted,
+		lastSuccess:              lastSuccess,
 	}, mp.Shutdown, nil
 }
 
@@ -146,6 +155,10 @@ func (p *recorder) RecordRun(ctx context.Context, environment, region, target, s
 	attrs := p.attrs(environment, region, target, scenario, "", result)
 	p.runTotal.Add(ctx, 1, metric.WithAttributes(attrs...))
 	p.runDuration.Record(ctx, duration.Seconds(), metric.WithAttributes(attrs...))
+	if p.lastCompleted != nil {
+		ts := float64(time.Now().Unix())
+		p.lastCompleted.Record(ctx, ts, metric.WithAttributes(attrs...))
+	}
 	if result == "success" && p.lastSuccess != nil {
 		ts := float64(time.Now().Unix())
 		p.lastSuccess.Record(ctx, ts, metric.WithAttributes(attrs...))
@@ -176,36 +189,44 @@ func (p *recorder) RecordOverlapSkip(ctx context.Context, environment, region, t
 	p.overlapSkipped.Add(ctx, 1, metric.WithAttributes(p.attrs(environment, region, target, "lifecycle", "", "skipped")...))
 }
 
-func (p *recorder) RecordOrphans(ctx context.Context, environment, region, target string, count int64) {
+func (p *recorder) RecordExecutionDelta(ctx context.Context, environment, region, target, scenario string, delta int64) {
+	if p == nil || p.runningExecutions == nil {
+		return
+	}
+	p.runningExecutions.Add(ctx, delta, metric.WithAttributes(p.attrs(environment, region, target, scenario, "", "running")...))
+}
+
+func (p *recorder) RecordOrphans(ctx context.Context, environment, region, target string, count int64, oldestAge time.Duration) {
 	if p == nil || p.orphanResources == nil {
 		return
 	}
-	p.orphanResources.Add(ctx, count, metric.WithAttributes(p.attrs(environment, region, target, "janitor", "", "observed")...))
+	attrs := p.attrs(environment, region, target, "janitor", "", "observed")
+	p.orphanResources.Record(ctx, float64(count), metric.WithAttributes(attrs...))
+	if p.oldestOrphanAge != nil {
+		p.oldestOrphanAge.Record(ctx, oldestAge.Seconds(), metric.WithAttributes(attrs...))
+	}
 }
 
 func (p *recorder) RecordRetainedSandbox(ctx context.Context, environment, region, target, failedStep string) {
 	if p == nil || p.retainedSandbox == nil {
 		return
 	}
-	attrs := append(p.attrs(environment, region, target, "lifecycle", "", "retained"), attribute.String("failed_step", failedStep))
+	attrs := p.attrs(environment, region, target, "lifecycle", failedStep, "retained")
 	p.retainedSandbox.Add(ctx, 1, metric.WithAttributes(attrs...))
 }
 
-func (p *recorder) RecordRetainedSandboxJanitor(ctx context.Context, environment, region, target string, examined, expired, deleted, deleteFailures int64) {
+func (p *recorder) RecordJanitorResources(ctx context.Context, environment, region, target string, examined, deleted, deleteFailures int64) {
 	if p == nil {
 		return
 	}
 	base := p.attrs(environment, region, target, "janitor", "", "observed")
-	if p.retainedExamined != nil {
-		p.retainedExamined.Add(ctx, examined, metric.WithAttributes(base...))
+	if p.janitorResourcesExamined != nil {
+		p.janitorResourcesExamined.Add(ctx, examined, metric.WithAttributes(base...))
 	}
-	if p.retainedExpired != nil {
-		p.retainedExpired.Add(ctx, expired, metric.WithAttributes(base...))
+	if p.janitorResourcesDeleted != nil {
+		p.janitorResourcesDeleted.Add(ctx, deleted, metric.WithAttributes(base...))
 	}
-	if p.retainedDeleted != nil {
-		p.retainedDeleted.Add(ctx, deleted, metric.WithAttributes(base...))
-	}
-	if p.retainedDeleteFailures != nil {
-		p.retainedDeleteFailures.Add(ctx, deleteFailures, metric.WithAttributes(base...))
+	if p.janitorDeleteFailures != nil {
+		p.janitorDeleteFailures.Add(ctx, deleteFailures, metric.WithAttributes(base...))
 	}
 }

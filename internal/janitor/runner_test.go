@@ -47,7 +47,7 @@ func TestJanitorDeletesExpiredRetainedSandbox(t *testing.T) {
 	if !deleteCalled {
 		t.Fatal("expected delete")
 	}
-	if metrics.examined != 1 || metrics.expired != 1 || metrics.deleted != 1 || metrics.deleteFailures != 0 {
+	if metrics.examined != 1 || metrics.deleted != 1 || metrics.deleteFailures != 0 {
 		t.Fatalf("unexpected metrics: %+v", metrics)
 	}
 }
@@ -181,7 +181,6 @@ func (f *fakeJanitorClient) DeleteSandbox(ctx context.Context, id string) error 
 
 type janitorMetricsRecorder struct {
 	examined       int64
-	expired        int64
 	deleted        int64
 	deleteFailures int64
 }
@@ -192,12 +191,14 @@ func (m *janitorMetricsRecorder) RecordStep(context.Context, string, string, str
 }
 func (m *janitorMetricsRecorder) RecordCleanup(context.Context, string, string, string, string) {}
 func (m *janitorMetricsRecorder) RecordOverlapSkip(context.Context, string, string, string)     {}
-func (m *janitorMetricsRecorder) RecordOrphans(context.Context, string, string, string, int64)  {}
+func (m *janitorMetricsRecorder) RecordExecutionDelta(context.Context, string, string, string, string, int64) {
+}
+func (m *janitorMetricsRecorder) RecordOrphans(context.Context, string, string, string, int64, time.Duration) {
+}
 func (m *janitorMetricsRecorder) RecordRetainedSandbox(context.Context, string, string, string, string) {
 }
-func (m *janitorMetricsRecorder) RecordRetainedSandboxJanitor(_ context.Context, _ string, _ string, _ string, examined, expired, deleted, deleteFailures int64) {
+func (m *janitorMetricsRecorder) RecordJanitorResources(_ context.Context, _ string, _ string, _ string, examined, deleted, deleteFailures int64) {
 	m.examined += examined
-	m.expired += expired
 	m.deleted += deleted
 	m.deleteFailures += deleteFailures
 }
