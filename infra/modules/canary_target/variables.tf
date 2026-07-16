@@ -62,6 +62,11 @@ variable "scheduler_cron" {
   default = "*/5 * * * *"
 }
 
+variable "scheduler_enabled" {
+  type    = bool
+  default = true
+}
+
 variable "manual_staging_opt_in" {
   type    = bool
   default = false

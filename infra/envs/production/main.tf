@@ -63,6 +63,7 @@ module "lifecycle" {
   otlp_metrics_endpoint     = each.value.otlp_endpoint
   retain_failed_sandbox     = local.retain_failed_sandbox
   retain_failed_sandbox_ttl = local.retain_failed_sandbox_ttl
+  scheduler_enabled         = false
   notification_channel_ids  = var.notification_channel_ids
   labels                    = merge(local.labels, { region = each.value.target_region })
   vpc_connector             = try(each.value.vpc_connector, null)

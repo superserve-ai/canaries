@@ -174,6 +174,7 @@ resource "google_cloud_run_v2_job" "lifecycle" {
 }
 
 resource "google_cloud_run_v2_job_iam_member" "scheduler_invoker" {
+  count    = var.scheduler_enabled ? 1 : 0
   project  = var.project_id
   location = var.job_region
   name     = google_cloud_run_v2_job.lifecycle.name
@@ -182,6 +183,7 @@ resource "google_cloud_run_v2_job_iam_member" "scheduler_invoker" {
 }
 
 resource "google_cloud_scheduler_job" "lifecycle" {
+  count       = var.scheduler_enabled ? 1 : 0
   project     = var.project_id
   region      = var.job_region
   name        = local.scheduler_name
