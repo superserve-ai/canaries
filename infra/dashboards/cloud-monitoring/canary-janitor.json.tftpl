@@ -1,0 +1,265 @@
+${jsonencode({
+  displayName = "${environment} canary janitor"
+  gridLayout = {
+    columns = 4
+    widgets = concat(
+      [
+        {
+          text = {
+            content = "# Canary Janitor\nProject: ${project_id}\nEnvironment: ${environment}"
+            format  = "MARKDOWN"
+          }
+        }
+      ],
+      flatten([
+        for target in targets : [
+          {
+            text = {
+              content = "## Janitor ${target.target}"
+              format  = "MARKDOWN"
+            }
+          },
+          {
+            title = "Current orphaned sandboxes"
+            scorecard = {
+              timeSeriesQuery = {
+                prometheusQuery = format(
+                  "superserve_canary_orphan_resources{environment=%q,region=%q,target=%q,scenario=\"janitor\",result=\"observed\"}",
+                  environment,
+                  target.region,
+                  target.target
+                )
+              }
+              sparkChartView = {
+                sparkChartType = "SPARK_LINE"
+              }
+            }
+          },
+          {
+            title = "Oldest orphan age (s)"
+            scorecard = {
+              timeSeriesQuery = {
+                prometheusQuery = format(
+                  "superserve_canary_oldest_orphan_age_seconds{environment=%q,region=%q,target=%q,scenario=\"janitor\",result=\"observed\"}",
+                  environment,
+                  target.region,
+                  target.target
+                )
+              }
+              sparkChartView = {
+                sparkChartType = "SPARK_LINE"
+              }
+            }
+          },
+          {
+            title = "Resources examined"
+            scorecard = {
+              timeSeriesQuery = {
+                prometheusQuery = format(
+                  "increase(superserve_canary_janitor_resources_examined_total{environment=%q,region=%q,target=%q,scenario=\"janitor\",result=\"observed\"}[24h])",
+                  environment,
+                  target.region,
+                  target.target
+                )
+              }
+              sparkChartView = {
+                sparkChartType = "SPARK_LINE"
+              }
+            }
+          },
+          {
+            title = "Resources deleted"
+            scorecard = {
+              timeSeriesQuery = {
+                prometheusQuery = format(
+                  "increase(superserve_canary_janitor_resources_deleted_total{environment=%q,region=%q,target=%q,scenario=\"janitor\",result=\"observed\"}[24h])",
+                  environment,
+                  target.region,
+                  target.target
+                )
+              }
+              sparkChartView = {
+                sparkChartType = "SPARK_LINE"
+              }
+            }
+          },
+          {
+            title = "Delete failures"
+            scorecard = {
+              timeSeriesQuery = {
+                prometheusQuery = format(
+                  "increase(superserve_canary_janitor_delete_failures_total{environment=%q,region=%q,target=%q,scenario=\"janitor\",result=\"observed\"}[24h])",
+                  environment,
+                  target.region,
+                  target.target
+                )
+              }
+              sparkChartView = {
+                sparkChartType = "SPARK_LINE"
+              }
+            }
+          },
+          {
+            title = "Successful janitor runs"
+            scorecard = {
+              timeSeriesQuery = {
+                prometheusQuery = format(
+                  "increase(superserve_canary_run_total{environment=%q,region=%q,target=%q,scenario=\"janitor\",result=\"success\"}[24h])",
+                  environment,
+                  target.region,
+                  target.target
+                )
+              }
+              sparkChartView = {
+                sparkChartType = "SPARK_LINE"
+              }
+            }
+          },
+          {
+            title = "Failed janitor runs"
+            scorecard = {
+              timeSeriesQuery = {
+                prometheusQuery = format(
+                  "increase(superserve_canary_run_total{environment=%q,region=%q,target=%q,scenario=\"janitor\",result=\"failure\"}[24h])",
+                  environment,
+                  target.region,
+                  target.target
+                )
+              }
+              sparkChartView = {
+                sparkChartType = "SPARK_LINE"
+              }
+            }
+          },
+          {
+            title = "Last janitor completion age (s)"
+            scorecard = {
+              timeSeriesQuery = {
+                prometheusQuery = format(
+                  "time() - max by (target) (superserve_canary_last_completed_timestamp_seconds{environment=%q,region=%q,target=%q,scenario=\"janitor\"})",
+                  environment,
+                  target.region,
+                  target.target
+                )
+              }
+              sparkChartView = {
+                sparkChartType = "SPARK_LINE"
+              }
+            }
+          },
+          {
+            title = "Last successful janitor run age (s)"
+            scorecard = {
+              timeSeriesQuery = {
+                prometheusQuery = format(
+                  "time() - max by (target) (superserve_canary_last_success_timestamp_seconds{environment=%q,region=%q,target=%q,scenario=\"janitor\",result=\"success\"})",
+                  environment,
+                  target.region,
+                  target.target
+                )
+              }
+              sparkChartView = {
+                sparkChartType = "SPARK_LINE"
+              }
+            }
+          },
+          {
+            title = "Janitor Cloud Run completions (15m)"
+            scorecard = {
+              timeSeriesQuery = {
+                prometheusQuery = format(
+                  "increase({\"run.googleapis.com/job/completed_execution_count\", monitored_resource=\"cloud_run_job\", job_name=%q, location=%q}[15m])",
+                  "api-canary-janitor-${target.target}",
+                  target.region
+                )
+              }
+              sparkChartView = {
+                sparkChartType = "SPARK_LINE"
+              }
+            }
+          }
+        ]
+      ]),
+      [
+        {
+          text = {
+            content = "## Janitor"
+            format  = "MARKDOWN"
+          }
+        },
+        {
+          title = "Janitor resources examined"
+          xyChart = {
+            dataSets = [
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "sum by (target) (increase(superserve_canary_janitor_resources_examined_total{environment=%q,scenario=\"janitor\"}[1h]))",
+                    environment
+                  )
+                }
+                plotType = "LINE"
+              }
+            ]
+          }
+        },
+        {
+          title = "Janitor resources deleted"
+          xyChart = {
+            dataSets = [
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "sum by (target) (increase(superserve_canary_janitor_resources_deleted_total{environment=%q,scenario=\"janitor\"}[1h]))",
+                    environment
+                  )
+                }
+                plotType = "LINE"
+              }
+            ]
+          }
+        },
+        {
+          title = "Janitor delete failures"
+          xyChart = {
+            dataSets = [
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "sum by (target) (increase(superserve_canary_janitor_delete_failures_total{environment=%q,scenario=\"janitor\"}[1h]))",
+                    environment
+                  )
+                }
+                plotType = "LINE"
+              }
+            ]
+          }
+        },
+        {
+          title = "Janitor failures and successes"
+          xyChart = {
+            dataSets = [
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "sum by (target) (increase(superserve_canary_run_total{environment=%q,scenario=\"janitor\",result=\"success\"}[1h]))",
+                    environment
+                  )
+                }
+                plotType = "LINE"
+              },
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "sum by (target) (increase(superserve_canary_run_total{environment=%q,scenario=\"janitor\",result=\"failure\"}[1h]))",
+                    environment
+                  )
+                }
+                plotType = "LINE"
+              }
+            ]
+          }
+        }
+      ])
+  }
+})}
