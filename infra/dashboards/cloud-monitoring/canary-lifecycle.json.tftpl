@@ -183,7 +183,7 @@ ${jsonencode({
           }
         },
         {
-          title = "Total lifecycle latency"
+          title = "End-to-end canary run duration"
           xyChart = {
             dataSets = [
               {
@@ -220,13 +220,13 @@ ${jsonencode({
           }
         },
         {
-          title = "Sandbox create latency"
+          title = "Create API request duration"
           xyChart = {
             dataSets = [
               {
                 timeSeriesQuery = {
                   prometheusQuery = format(
-                    "histogram_quantile(0.50, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"create\"}[30m])))",
+                    "histogram_quantile(0.50, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"create_request\"}[30m])))",
                     environment
                   )
                 }
@@ -236,7 +236,7 @@ ${jsonencode({
               {
                 timeSeriesQuery = {
                   prometheusQuery = format(
-                    "histogram_quantile(0.95, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"create\"}[30m])))",
+                    "histogram_quantile(0.95, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"create_request\"}[30m])))",
                     environment
                   )
                 }
@@ -246,7 +246,7 @@ ${jsonencode({
               {
                 timeSeriesQuery = {
                   prometheusQuery = format(
-                    "histogram_quantile(0.99, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"create\"}[30m])))",
+                    "histogram_quantile(0.99, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"create_request\"}[30m])))",
                     environment
                   )
                 }
@@ -257,13 +257,13 @@ ${jsonencode({
           }
         },
         {
-          title = "Pause latency"
+          title = "Create readiness duration"
           xyChart = {
             dataSets = [
               {
                 timeSeriesQuery = {
                   prometheusQuery = format(
-                    "histogram_quantile(0.50, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"pause\"}[30m])))",
+                    "histogram_quantile(0.50, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"create_wait_active\"}[30m])))",
                     environment
                   )
                 }
@@ -273,7 +273,7 @@ ${jsonencode({
               {
                 timeSeriesQuery = {
                   prometheusQuery = format(
-                    "histogram_quantile(0.95, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"pause\"}[30m])))",
+                    "histogram_quantile(0.95, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"create_wait_active\"}[30m])))",
                     environment
                   )
                 }
@@ -283,7 +283,7 @@ ${jsonencode({
               {
                 timeSeriesQuery = {
                   prometheusQuery = format(
-                    "histogram_quantile(0.99, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"pause\"}[30m])))",
+                    "histogram_quantile(0.99, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"create_wait_active\"}[30m])))",
                     environment
                   )
                 }
@@ -294,13 +294,13 @@ ${jsonencode({
           }
         },
         {
-          title = "Resume latency"
+          title = "Pause API request duration"
           xyChart = {
             dataSets = [
               {
                 timeSeriesQuery = {
                   prometheusQuery = format(
-                    "histogram_quantile(0.50, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"resume\"}[30m])))",
+                    "histogram_quantile(0.50, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"pause_request\"}[30m])))",
                     environment
                   )
                 }
@@ -310,7 +310,7 @@ ${jsonencode({
               {
                 timeSeriesQuery = {
                   prometheusQuery = format(
-                    "histogram_quantile(0.95, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"resume\"}[30m])))",
+                    "histogram_quantile(0.95, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"pause_request\"}[30m])))",
                     environment
                   )
                 }
@@ -320,7 +320,7 @@ ${jsonencode({
               {
                 timeSeriesQuery = {
                   prometheusQuery = format(
-                    "histogram_quantile(0.99, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"resume\"}[30m])))",
+                    "histogram_quantile(0.99, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"pause_request\"}[30m])))",
                     environment
                   )
                 }
@@ -331,7 +331,118 @@ ${jsonencode({
           }
         },
         {
-          title = "Preview URL latency"
+          title = "Pause readiness duration"
+          xyChart = {
+            dataSets = [
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "histogram_quantile(0.50, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"pause_wait_paused\"}[30m])))",
+                    environment
+                  )
+                }
+                plotType = "LINE",
+  "legendTemplate": "p50"
+              },
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "histogram_quantile(0.95, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"pause_wait_paused\"}[30m])))",
+                    environment
+                  )
+                }
+                plotType = "LINE",
+  "legendTemplate": "p95"
+              },
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "histogram_quantile(0.99, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"pause_wait_paused\"}[30m])))",
+                    environment
+                  )
+                }
+                plotType = "LINE",
+  "legendTemplate": "p99"
+              }
+            ]
+          }
+        },
+        {
+          title = "Resume API request duration"
+          xyChart = {
+            dataSets = [
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "histogram_quantile(0.50, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"resume_request\"}[30m])))",
+                    environment
+                  )
+                }
+                plotType = "LINE",
+  "legendTemplate": "p50"
+              },
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "histogram_quantile(0.95, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"resume_request\"}[30m])))",
+                    environment
+                  )
+                }
+                plotType = "LINE",
+  "legendTemplate": "p95"
+              },
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "histogram_quantile(0.99, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"resume_request\"}[30m])))",
+                    environment
+                  )
+                }
+                plotType = "LINE",
+  "legendTemplate": "p99"
+              }
+            ]
+          }
+        },
+        {
+          title = "Resume readiness duration"
+          xyChart = {
+            dataSets = [
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "histogram_quantile(0.50, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"resume_wait_active\"}[30m])))",
+                    environment
+                  )
+                }
+                plotType = "LINE",
+  "legendTemplate": "p50"
+              },
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "histogram_quantile(0.95, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"resume_wait_active\"}[30m])))",
+                    environment
+                  )
+                }
+                plotType = "LINE",
+  "legendTemplate": "p95"
+              },
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "histogram_quantile(0.99, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"resume_wait_active\"}[30m])))",
+                    environment
+                  )
+                }
+                plotType = "LINE",
+  "legendTemplate": "p99"
+              }
+            ]
+          }
+        },
+        {
+          title = "Preview URL readiness duration"
           xyChart = {
             dataSets = [
               {
@@ -368,13 +479,13 @@ ${jsonencode({
           }
         },
         {
-          title = "Delete latency"
+          title = "Delete API request duration"
           xyChart = {
             dataSets = [
               {
                 timeSeriesQuery = {
                   prometheusQuery = format(
-                    "histogram_quantile(0.50, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"delete_sandbox\"}[30m])))",
+                    "histogram_quantile(0.50, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"delete_request\"}[30m])))",
                     environment
                   )
                 }
@@ -384,7 +495,7 @@ ${jsonencode({
               {
                 timeSeriesQuery = {
                   prometheusQuery = format(
-                    "histogram_quantile(0.95, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"delete_sandbox\"}[30m])))",
+                    "histogram_quantile(0.95, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"delete_request\"}[30m])))",
                     environment
                   )
                 }
@@ -394,7 +505,7 @@ ${jsonencode({
               {
                 timeSeriesQuery = {
                   prometheusQuery = format(
-                    "histogram_quantile(0.99, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"delete_sandbox\"}[30m])))",
+                    "histogram_quantile(0.99, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"delete_request\"}[30m])))",
                     environment
                   )
                 }

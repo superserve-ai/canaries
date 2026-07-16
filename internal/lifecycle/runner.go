@@ -126,17 +126,17 @@ func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) 
 		AutoDeleteSeconds: int(r.retentionTTL().Seconds()),
 		Metadata:          metadata,
 	})
-	r.Metrics.RecordStep(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", "create", result(err), r.Clock().Sub(createStart))
+	r.Metrics.RecordStep(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", "create_request", result(err), r.Clock().Sub(createStart))
 	if err != nil {
 		res.Err = fmt.Errorf("creating sandbox: %w", err)
-		res.FailedStep = "create_sandbox"
+		res.FailedStep = "create_request"
 		return res
 	}
 	resources.SandboxID = sb.ID
 
-	if err := r.waitForStatus(ctx, sb.ID, "active"); err != nil {
+	if err := r.waitForStatusTimed(ctx, sb.ID, "active", "create_wait_active"); err != nil {
 		res.Err = fmt.Errorf("waiting for sandbox to become active: %w", err)
-		res.FailedStep = "wait_ready"
+		res.FailedStep = "create_wait_active"
 		return res
 	}
 
@@ -151,24 +151,24 @@ func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) 
 
 	if err := r.pause(ctx, sb.ID); err != nil {
 		res.Err = fmt.Errorf("pausing sandbox: %w", err)
-		res.FailedStep = "pause"
+		res.FailedStep = "pause_request"
 		return res
 	}
-	if err := r.waitForStatus(ctx, sb.ID, "paused"); err != nil {
+	if err := r.waitForStatusTimed(ctx, sb.ID, "paused", "pause_wait_paused"); err != nil {
 		res.Err = fmt.Errorf("waiting for sandbox to pause: %w", err)
-		res.FailedStep = "wait_paused"
+		res.FailedStep = "pause_wait_paused"
 		return res
 	}
 
 	resumeResp, err := r.resume(ctx, sb.ID)
 	if err != nil {
 		res.Err = fmt.Errorf("resuming sandbox: %w", err)
-		res.FailedStep = "resume"
+		res.FailedStep = "resume_request"
 		return res
 	}
-	if err := r.waitForStatus(ctx, sb.ID, "active"); err != nil {
+	if err := r.waitForStatusTimed(ctx, sb.ID, "active", "resume_wait_active"); err != nil {
 		res.Err = fmt.Errorf("waiting for sandbox to resume: %w", err)
-		res.FailedStep = "wait_resumed"
+		res.FailedStep = "resume_wait_active"
 		return res
 	}
 
@@ -252,13 +252,17 @@ func (r Runner) waitForStatus(ctx context.Context, sandboxID, want string) error
 	}
 }
 
+func (r Runner) waitForStatusTimed(ctx context.Context, sandboxID, want, step string) error {
+	start := r.Clock()
+	err := r.waitForStatus(ctx, sandboxID, want)
+	r.Metrics.RecordStep(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", step, result(err), r.Clock().Sub(start))
+	return err
+}
+
 func (r Runner) pause(ctx context.Context, sandboxID string) error {
 	start := r.Clock()
 	err := r.Client.PauseSandbox(ctx, sandboxID)
-	if err == nil {
-		err = r.waitForStatus(ctx, sandboxID, "paused")
-	}
-	r.Metrics.RecordStep(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", "pause", result(err), r.Clock().Sub(start))
+	r.Metrics.RecordStep(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", "pause_request", result(err), r.Clock().Sub(start))
 	if err != nil {
 		err = fmt.Errorf("pausing sandbox: %w", err)
 	}
@@ -271,7 +275,7 @@ func (r Runner) resume(ctx context.Context, sandboxID string) (canaryapi.ResumeR
 	if err == nil && resp.Status != "active" {
 		err = fmt.Errorf("unexpected resume status %q", resp.Status)
 	}
-	r.Metrics.RecordStep(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", "resume", result(err), r.Clock().Sub(start))
+	r.Metrics.RecordStep(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", "resume_request", result(err), r.Clock().Sub(start))
 	if err != nil {
 		err = fmt.Errorf("resuming sandbox: %w", err)
 	}
@@ -411,7 +415,7 @@ func (r Runner) deleteSandboxBestEffort(ctx context.Context, sandboxID string) e
 		err = nil
 	}
 	r.Metrics.RecordCleanup(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, result(err))
-	r.Metrics.RecordStep(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", "delete_sandbox", result(err), r.Clock().Sub(start))
+	r.Metrics.RecordStep(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", "delete_request", result(err), r.Clock().Sub(start))
 	if err != nil {
 		return fmt.Errorf("deleting sandbox: %w", err)
 	}

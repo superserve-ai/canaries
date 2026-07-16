@@ -12,7 +12,7 @@ Gauges export as the instrument name as written.
 | Metric | Type | Labels | Description |
 | --- | --- | --- | --- |
 | `superserve_canary_run_total` | Counter | `environment`, `region`, `target`, `scenario`, `result` | Counts completed canary runs for lifecycle and janitor modes. |
-| `superserve_canary_step_total` | Counter | `environment`, `region`, `target`, `scenario`, `step`, `result` | Counts lifecycle step outcomes, including create, pause, resume, preview, and delete. |
+| `superserve_canary_step_total` | Counter | `environment`, `region`, `target`, `scenario`, `step`, `result` | Counts lifecycle step outcomes, including request and readiness phases for create, pause, resume, preview, and delete. |
 | `superserve_canary_cleanup_total` | Counter | `environment`, `region`, `target`, `scenario`, `result` | Counts sandbox cleanup attempts from lifecycle finalization. |
 | `superserve_canary_overlap_skipped_total` | Counter | `environment`, `region`, `target`, `scenario`, `result` | Counts lifecycle runs skipped because another run already held the target lock. |
 | `superserve_canary_running_executions` | Up-down counter | `environment`, `region`, `target`, `scenario`, `result` | Tracks current in-flight executions per target and scenario. |
@@ -23,7 +23,7 @@ Gauges export as the instrument name as written.
 | `superserve_canary_janitor_resources_deleted_total` | Counter | `environment`, `region`, `target`, `scenario`, `result` | Counts retained sandboxes the janitor successfully deleted. |
 | `superserve_canary_janitor_delete_failures_total` | Counter | `environment`, `region`, `target`, `scenario`, `result` | Counts janitor delete attempts that failed. |
 | `superserve_canary_run_duration_seconds` | Histogram | `environment`, `region`, `target`, `scenario`, `result` | End-to-end run duration for lifecycle and janitor runs. |
-| `superserve_canary_step_duration_seconds` | Histogram | `environment`, `region`, `target`, `scenario`, `step`, `result` | Lifecycle step duration histograms for create, pause, resume, preview, and delete. |
+| `superserve_canary_step_duration_seconds` | Histogram | `environment`, `region`, `target`, `scenario`, `step`, `result` | Lifecycle step duration histograms for create request, create readiness, pause request, pause readiness, resume request, resume readiness, preview polling, and delete request. |
 | `superserve_canary_last_completed_timestamp_seconds` | Gauge | `environment`, `region`, `target`, `scenario`, `result` | Timestamp of the last completed run, successful or failed. |
 | `superserve_canary_last_success_timestamp_seconds` | Gauge | `environment`, `region`, `target`, `scenario`, `result` | Timestamp of the last successful run. |
 
