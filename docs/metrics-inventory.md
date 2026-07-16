@@ -31,6 +31,6 @@ Gauges export as the instrument name as written.
 
 - No metric uses `sandbox_id`, `run_id`, `preview_url`, or `error` as a label.
 - `failed_step` is no longer emitted as a separate label; retained failures use the bounded `step` label instead.
-- `create_total` and `pause_total` capture the full user wait for the operation, while `resume_total` runs through the first successful post-resume command to better reflect when the sandbox is usable. The corresponding `*_request` and `*_wait_*` steps remain available for diagnostics.
+- `create_total`, `pause_total`, and `resume_total` all end when the sandbox reaches the requested active or paused state. The corresponding `*_request` and `*_wait_*` steps remain available for diagnostics.
 - `cleanup_total` is sufficient for cleanup success/failure panels by filtering `result`.
 - `run_total` is sufficient for janitor success/failure panels by filtering `scenario="janitor"` and `result`.

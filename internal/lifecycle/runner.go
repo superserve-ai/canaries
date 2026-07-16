@@ -119,10 +119,6 @@ func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) 
 		"run_id":        runID,
 	}
 	createStart := r.Clock()
-	var createTotalErr error
-	defer func() {
-		r.Metrics.RecordStep(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", "create_total", result(createTotalErr), r.Clock().Sub(createStart))
-	}()
 	sb, err := r.Client.CreateSandbox(ctx, canaryapi.CreateSandboxRequest{
 		Name:              sandboxName(r.Config.Target, runID),
 		FromTemplate:      r.Config.SandboxTemplate,
@@ -132,7 +128,7 @@ func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) 
 	})
 	r.Metrics.RecordStep(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", "create_request", result(err), r.Clock().Sub(createStart))
 	if err != nil {
-		createTotalErr = err
+		r.Metrics.RecordStep(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", "create_total", result(err), r.Clock().Sub(createStart))
 		res.Err = fmt.Errorf("creating sandbox: %w", err)
 		res.FailedStep = "create_request"
 		return res
@@ -140,12 +136,12 @@ func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) 
 	resources.SandboxID = sb.ID
 
 	if err := r.waitForStatusTimed(ctx, sb.ID, "active", "create_wait_active"); err != nil {
-		createTotalErr = err
+		r.Metrics.RecordStep(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", "create_total", result(err), r.Clock().Sub(createStart))
 		res.Err = fmt.Errorf("waiting for sandbox to become active: %w", err)
 		res.FailedStep = "create_wait_active"
 		return res
 	}
-	createTotalErr = nil
+	r.Metrics.RecordStep(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", "create_total", "success", r.Clock().Sub(createStart))
 
 	diskToken := "disk-" + uuid.NewString()
 	memoryToken := "mem-" + uuid.NewString()
@@ -157,50 +153,41 @@ func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) 
 	}
 
 	pauseStart := r.Clock()
-	var pauseTotalErr error
-	defer func() {
-		r.Metrics.RecordStep(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", "pause_total", result(pauseTotalErr), r.Clock().Sub(pauseStart))
-	}()
 	if err := r.pause(ctx, sb.ID); err != nil {
-		pauseTotalErr = err
+		r.Metrics.RecordStep(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", "pause_total", result(err), r.Clock().Sub(pauseStart))
 		res.Err = fmt.Errorf("pausing sandbox: %w", err)
 		res.FailedStep = "pause_request"
 		return res
 	}
 	if err := r.waitForStatusTimed(ctx, sb.ID, "paused", "pause_wait_paused"); err != nil {
-		pauseTotalErr = err
+		r.Metrics.RecordStep(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", "pause_total", result(err), r.Clock().Sub(pauseStart))
 		res.Err = fmt.Errorf("waiting for sandbox to pause: %w", err)
 		res.FailedStep = "pause_wait_paused"
 		return res
 	}
-	pauseTotalErr = nil
+	r.Metrics.RecordStep(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", "pause_total", "success", r.Clock().Sub(pauseStart))
 
 	resumeStart := r.Clock()
-	var resumeTotalErr error
-	defer func() {
-		r.Metrics.RecordStep(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", "resume_total", result(resumeTotalErr), r.Clock().Sub(resumeStart))
-	}()
 	resumeResp, err := r.resume(ctx, sb.ID)
 	if err != nil {
-		resumeTotalErr = err
+		r.Metrics.RecordStep(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", "resume_total", result(err), r.Clock().Sub(resumeStart))
 		res.Err = fmt.Errorf("resuming sandbox: %w", err)
 		res.FailedStep = "resume_request"
 		return res
 	}
 	if err := r.waitForStatusTimed(ctx, sb.ID, "active", "resume_wait_active"); err != nil {
-		resumeTotalErr = err
+		r.Metrics.RecordStep(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", "resume_total", result(err), r.Clock().Sub(resumeStart))
 		res.Err = fmt.Errorf("waiting for sandbox to resume: %w", err)
 		res.FailedStep = "resume_wait_active"
 		return res
 	}
+	r.Metrics.RecordStep(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", "resume_total", "success", r.Clock().Sub(resumeStart))
 
 	if err := r.uploadVerificationUtilities(ctx, sb.ID, resumeResp.AccessToken); err != nil {
-		resumeTotalErr = err
 		res.Err = err
 		res.FailedStep = "prepare_verification_utilities"
 		return res
 	}
-	resumeTotalErr = nil
 
 	verifyDiskCmd := fmt.Sprintf("sh -lc 'CANARY_DISK_TOKEN=%q /tmp/verification-utilities/verify_disk.sh'", diskToken)
 	if _, err := r.execStep(ctx, sb.ID, resumeResp.AccessToken, "verify_disk", verifyDiskCmd); err != nil {
