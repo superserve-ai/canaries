@@ -45,23 +45,23 @@ func (NoopProvider) RecordJanitorResources(context.Context, string, string, stri
 }
 
 type recorder struct {
-	meter                  metric.Meter
-	runTotal               metric.Int64Counter
-	stepTotal              metric.Int64Counter
-	cleanupTotal           metric.Int64Counter
-	overlapSkipped         metric.Int64Counter
-	runningExecutions      metric.Int64UpDownCounter
-	orphanResources        metric.Float64Gauge
-	oldestOrphanAge        metric.Float64Gauge
-	retainedSandbox        metric.Int64Counter
+	meter                    metric.Meter
+	runTotal                 metric.Int64Counter
+	stepTotal                metric.Int64Counter
+	cleanupTotal             metric.Int64Counter
+	overlapSkipped           metric.Int64Counter
+	runningExecutions        metric.Int64UpDownCounter
+	orphanResources          metric.Float64Gauge
+	oldestOrphanAge          metric.Float64Gauge
+	retainedSandbox          metric.Int64Counter
 	janitorResourcesExamined metric.Int64Counter
 	janitorResourcesDeleted  metric.Int64Counter
 	janitorDeleteFailures    metric.Int64Counter
-	runDuration            metric.Float64Histogram
-	stepDuration           metric.Float64Histogram
-	lastCompleted          metric.Float64Gauge
-	lastSuccess            metric.Float64Gauge
-	lastSuccessUnix        atomic.Int64
+	runDuration              metric.Float64Histogram
+	stepDuration             metric.Float64Histogram
+	lastCompleted            metric.Float64Gauge
+	lastSuccess              metric.Float64Gauge
+	lastSuccessUnix          atomic.Int64
 }
 
 func NewProvider(ctx context.Context, cfg config.Config) (Provider, func(context.Context) error, error) {
@@ -115,22 +115,22 @@ func newSDKProvider(_ context.Context, exporter sdkmetric.Exporter) (Provider, f
 	lastSuccess, _ := meter.Float64Gauge("superserve_canary_last_success_timestamp_seconds")
 
 	return &recorder{
-		meter:                  meter,
-		runTotal:               runTotal,
-		stepTotal:              stepTotal,
-		cleanupTotal:           cleanupTotal,
-		overlapSkipped:         overlapSkipped,
-		runningExecutions:      runningExecutions,
-		orphanResources:        orphanResources,
-		oldestOrphanAge:        oldestOrphanAge,
-		retainedSandbox:        retainedSandbox,
+		meter:                    meter,
+		runTotal:                 runTotal,
+		stepTotal:                stepTotal,
+		cleanupTotal:             cleanupTotal,
+		overlapSkipped:           overlapSkipped,
+		runningExecutions:        runningExecutions,
+		orphanResources:          orphanResources,
+		oldestOrphanAge:          oldestOrphanAge,
+		retainedSandbox:          retainedSandbox,
 		janitorResourcesExamined: janitorResourcesExamined,
 		janitorResourcesDeleted:  janitorResourcesDeleted,
 		janitorDeleteFailures:    janitorDeleteFailures,
-		runDuration:            runDuration,
-		stepDuration:           stepDuration,
-		lastCompleted:          lastCompleted,
-		lastSuccess:            lastSuccess,
+		runDuration:              runDuration,
+		stepDuration:             stepDuration,
+		lastCompleted:            lastCompleted,
+		lastSuccess:              lastSuccess,
 	}, mp.Shutdown, nil
 }
 

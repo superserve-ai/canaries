@@ -238,6 +238,22 @@ ${jsonencode({
           },
           {
             scorecard = {
+              title = "Last janitor completion age (s)"
+              timeSeriesQuery = {
+                prometheusQuery = format(
+                  "time() - max by (target) (superserve_canary_last_completed_timestamp_seconds{environment=%q,region=%q,target=%q,scenario=\"janitor\"})",
+                  environment,
+                  target.region,
+                  target.target
+                )
+              }
+              sparkChart = {
+                sparkChartType = "SPARK_LINE"
+              }
+            }
+          },
+          {
+            scorecard = {
               title = "Last successful janitor run age (s)"
               timeSeriesQuery = {
                 prometheusQuery = format(
@@ -668,7 +684,7 @@ ${jsonencode({
         },
         {
           xyChart = {
-            title = "Janitor run outcomes"
+            title = "Janitor failures and successes"
             dataSets = [
               {
                 timeSeriesQuery = {

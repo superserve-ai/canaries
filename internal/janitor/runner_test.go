@@ -193,7 +193,8 @@ func (m *janitorMetricsRecorder) RecordCleanup(context.Context, string, string, 
 func (m *janitorMetricsRecorder) RecordOverlapSkip(context.Context, string, string, string)     {}
 func (m *janitorMetricsRecorder) RecordExecutionDelta(context.Context, string, string, string, string, int64) {
 }
-func (m *janitorMetricsRecorder) RecordOrphans(context.Context, string, string, string, int64, time.Duration) {}
+func (m *janitorMetricsRecorder) RecordOrphans(context.Context, string, string, string, int64, time.Duration) {
+}
 func (m *janitorMetricsRecorder) RecordRetainedSandbox(context.Context, string, string, string, string) {
 }
 func (m *janitorMetricsRecorder) RecordJanitorResources(_ context.Context, _ string, _ string, _ string, examined, deleted, deleteFailures int64) {
