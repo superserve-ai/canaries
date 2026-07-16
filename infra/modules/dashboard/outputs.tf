@@ -1,18 +1,35 @@
-locals {
-  dashboard_resource_name = try(google_monitoring_dashboard.this[0].id, null)
-  dashboard_id            = local.dashboard_resource_name == null ? null : replace(local.dashboard_resource_name, "projects/${var.project_id}/dashboards/", "")
+output "dashboards" {
+  description = "Created Cloud Monitoring dashboards keyed by logical name."
+  value = {
+    for name, dashboard in google_monitoring_dashboard.this :
+    name => {
+      display_name = var.dashboards[name].display_name
+      id           = replace(dashboard.id, "projects/${var.project_id}/dashboards/", "")
+      url = format(
+        "https://console.cloud.google.com/monitoring/dashboards/builder/%s?project=%s",
+        basename(dashboard.id),
+        var.project_id,
+      )
+    }
+  }
 }
 
-output "dashboard_id" {
-  description = "Cloud Monitoring dashboard resource ID"
-  value       = local.dashboard_id
+output "dashboard_ids" {
+  description = "Created Cloud Monitoring dashboard IDs keyed by logical name."
+  value = {
+    for name, dashboard in google_monitoring_dashboard.this :
+    name => replace(dashboard.id, "projects/${var.project_id}/dashboards/", "")
+  }
 }
 
-output "dashboard_url" {
-  description = "Cloud Monitoring dashboard URL"
-  value = local.dashboard_resource_name == null ? null : format(
-    "https://console.cloud.google.com/monitoring/dashboards/builder/%s?project=%s",
-    basename(local.dashboard_resource_name),
-    var.project_id,
-  )
+output "dashboard_urls" {
+  description = "Created Cloud Monitoring dashboard URLs keyed by logical name."
+  value = {
+    for name, dashboard in google_monitoring_dashboard.this :
+    name => format(
+      "https://console.cloud.google.com/monitoring/dashboards/builder/%s?project=%s",
+      basename(dashboard.id),
+      var.project_id,
+    )
+  }
 }

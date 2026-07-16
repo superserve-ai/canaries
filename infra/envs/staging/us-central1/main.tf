@@ -8,6 +8,47 @@ locals {
   otlp_endpoint             = "http://10.0.0.2:4318"
   retain_failed_sandbox     = true
   retain_failed_sandbox_ttl = "2h"
+
+  lifecycle_dashboard_targets = [
+    {
+      target = "staging-us-central1"
+      region = "us-central1"
+    }
+  ]
+
+  janitor_dashboard_targets = [
+    {
+      target = "staging"
+      region = "us-central1"
+    }
+  ]
+
+  dashboards = {
+    canary_lifecycle = {
+      display_name = "staging canary lifecycle"
+      definition = templatefile("${path.module}/../../../dashboards/cloud-monitoring/canary-lifecycle.json.tftpl", {
+        project_id  = var.project_id
+        environment = local.labels.environment
+        targets     = local.lifecycle_dashboard_targets
+      })
+    }
+    canary_janitor = {
+      display_name = "staging canary janitor"
+      definition = templatefile("${path.module}/../../../dashboards/cloud-monitoring/canary-janitor.json.tftpl", {
+        project_id  = var.project_id
+        environment = local.labels.environment
+        targets     = local.janitor_dashboard_targets
+      })
+    }
+    canary_cleanup = {
+      display_name = "staging canary cleanup"
+      definition = templatefile("${path.module}/../../../dashboards/cloud-monitoring/canary-cleanup.json.tftpl", {
+        project_id  = var.project_id
+        environment = local.labels.environment
+        targets     = local.janitor_dashboard_targets
+      })
+    }
+  }
 }
 
 resource "google_storage_bucket" "locks" {
@@ -67,13 +108,6 @@ module "janitor" {
 module "dashboard" {
   source = "../../../modules/dashboard"
 
-  project_id        = var.project_id
-  environment       = local.labels.environment
-  dashboard_enabled = true
-  targets = [
-    {
-      target = "staging-us-central1"
-      region = "us-central1"
-    }
-  ]
+  project_id = var.project_id
+  dashboards = local.dashboards
 }

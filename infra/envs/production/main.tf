@@ -36,6 +36,40 @@ locals {
       vpc_egress          = "PRIVATE_RANGES_ONLY"
     }
   }
+
+  dashboard_targets = [
+    for name, cfg in local.lifecycle_targets : {
+      target = name
+      region = cfg.target_region
+    }
+  ]
+
+  dashboards = {
+    canary_lifecycle = {
+      display_name = "production canary lifecycle"
+      definition = templatefile("${path.module}/../../dashboards/cloud-monitoring/canary-lifecycle.json.tftpl", {
+        project_id  = var.project_id
+        environment = local.labels.environment
+        targets     = local.dashboard_targets
+      })
+    }
+    canary_janitor = {
+      display_name = "production canary janitor"
+      definition = templatefile("${path.module}/../../dashboards/cloud-monitoring/canary-janitor.json.tftpl", {
+        project_id  = var.project_id
+        environment = local.labels.environment
+        targets     = local.dashboard_targets
+      })
+    }
+    canary_cleanup = {
+      display_name = "production canary cleanup"
+      definition = templatefile("${path.module}/../../dashboards/cloud-monitoring/canary-cleanup.json.tftpl", {
+        project_id  = var.project_id
+        environment = local.labels.environment
+        targets     = local.dashboard_targets
+      })
+    }
+  }
 }
 
 resource "google_storage_bucket" "locks" {
@@ -101,13 +135,6 @@ module "janitor" {
 module "dashboard" {
   source = "../../modules/dashboard"
 
-  project_id        = var.project_id
-  environment       = local.labels.environment
-  dashboard_enabled = true
-  targets = [
-    for name, cfg in local.lifecycle_targets : {
-      target = name
-      region = cfg.target_region
-    }
-  ]
+  project_id = var.project_id
+  dashboards = local.dashboards
 }

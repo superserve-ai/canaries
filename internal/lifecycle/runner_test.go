@@ -121,6 +121,119 @@ func TestCleanupPreservesPrimaryFailure(t *testing.T) {
 	}
 }
 
+func TestRunLifecycleRecordsTotalDurations(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(0, 0)}
+	statusCalls := 0
+	metrics := &lifecycleMetricsRecorder{}
+	client := &fakeClient{
+		createSandboxFn: func(context.Context, canaryapi.CreateSandboxRequest) (canaryapi.Sandbox, error) {
+			clock.Advance(2 * time.Second)
+			return canaryapi.Sandbox{ID: "sb-1", Status: "active", AccessToken: "tok"}, nil
+		},
+		getSandboxFn: func(context.Context, string) (canaryapi.Sandbox, error) {
+			statusCalls++
+			switch statusCalls {
+			case 1:
+				clock.Advance(3 * time.Second)
+				return canaryapi.Sandbox{ID: "sb-1", Status: "active", AccessToken: "tok"}, nil
+			case 2:
+				clock.Advance(13 * time.Second)
+				return canaryapi.Sandbox{ID: "sb-1", Status: "paused", AccessToken: "tok"}, nil
+			default:
+				clock.Advance(19 * time.Second)
+				return canaryapi.Sandbox{ID: "sb-1", Status: "active", AccessToken: "tok"}, nil
+			}
+		},
+		pauseSandboxFn: func(context.Context, string) error {
+			clock.Advance(11 * time.Second)
+			return nil
+		},
+		resumeSandboxFn: func(context.Context, string) (canaryapi.ResumeResponse, error) {
+			clock.Advance(17 * time.Second)
+			return canaryapi.ResumeResponse{ID: "sb-1", Status: "active", AccessToken: "resume-token"}, nil
+		},
+		previewURLFn: func(string, int) string { return "https://preview.example.test" },
+		execFn: func(_ context.Context, _ string, _ string, req canaryapi.ExecRequest) (canaryapi.ExecResult, error) {
+			switch {
+			case strings.Contains(req.Command, "/tmp/canary-token"):
+				clock.Advance(7 * time.Second)
+			case strings.Contains(req.Command, "mkdir -p /tmp/verification-utilities"):
+				clock.Advance(23 * time.Second)
+			case strings.Contains(req.Command, "verify_disk.sh"):
+				clock.Advance(29 * time.Second)
+			case strings.Contains(req.Command, "verify_memory.py"):
+				clock.Advance(31 * time.Second)
+			case strings.Contains(req.Command, "http.server"):
+				clock.Advance(37 * time.Second)
+			default:
+				t.Fatalf("unexpected exec command: %s", req.Command)
+			}
+			return canaryapi.ExecResult{ExitCode: 0}, nil
+		},
+		deleteSandboxFn: func(context.Context, string) error {
+			clock.Advance(43 * time.Second)
+			return nil
+		},
+	}
+	r := Runner{
+		Config: config.Config{
+			Target:                 "staging-us-central1",
+			Environment:            "staging",
+			Region:                 "us-central1",
+			ResourceTTL:            time.Hour,
+			PollInterval:           time.Millisecond,
+			CommandTimeout:         20 * time.Millisecond,
+			DeleteTimeout:          20 * time.Millisecond,
+			PreviewPort:            18080,
+			PreviewTimeout:         20 * time.Millisecond,
+			RetainFailedSandbox:    false,
+			RetainFailedSandboxTTL: 2 * time.Hour,
+		},
+		Client:  client,
+		Locker:  lock.NoopLock{},
+		Metrics: metrics,
+		Clock:   clock.Now,
+		HTTP: &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				clock.Advance(41 * time.Second)
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader("preview-run-1")),
+					Header:     make(http.Header),
+					Request:    req,
+				}, nil
+			}),
+		},
+	}
+
+	if result := r.runLifecycle(context.Background(), "run-1"); result.Err != nil {
+		t.Fatalf("runLifecycle returned %v", result.Err)
+	}
+
+	wantDurations := map[string]time.Duration{
+		"create_request":                 2 * time.Second,
+		"create_wait_active":             3 * time.Second,
+		"create_total":                   5 * time.Second,
+		"pause_request":                  11 * time.Second,
+		"pause_wait_paused":              13 * time.Second,
+		"pause_total":                    24 * time.Second,
+		"resume_request":                 17 * time.Second,
+		"resume_wait_active":             19 * time.Second,
+		"resume_total":                   36 * time.Second,
+		"prepare_verification_utilities": 23 * time.Second,
+		"verify_disk":                    29 * time.Second,
+		"verify_memory":                  31 * time.Second,
+		"start_http_server":              37 * time.Second,
+		"preview":                        41 * time.Second,
+		"delete_request":                 43 * time.Second,
+	}
+	for step, want := range wantDurations {
+		if got := metrics.durations[step]; got != want {
+			t.Fatalf("%s duration = %s, want %s", step, got, want)
+		}
+	}
+}
+
 func TestFailedRunRetainsSandboxWhenEnabled(t *testing.T) {
 	updateCalled := false
 	deleteCalled := false
@@ -496,6 +609,48 @@ func TestRunSkipsAlreadyRunning(t *testing.T) {
 	if err := r.Run(context.Background()); err != nil {
 		t.Fatalf("Run returned %v", err)
 	}
+}
+
+type lifecycleMetricsRecorder struct {
+	durations map[string]time.Duration
+}
+
+func (m *lifecycleMetricsRecorder) RecordRun(context.Context, string, string, string, string, string, time.Duration) {
+}
+
+func (m *lifecycleMetricsRecorder) RecordStep(_ context.Context, _, _, _, _, step, result string, duration time.Duration) {
+	if m.durations == nil {
+		m.durations = map[string]time.Duration{}
+	}
+	m.durations[step] = duration
+}
+
+func (m *lifecycleMetricsRecorder) RecordCleanup(context.Context, string, string, string, string) {}
+
+func (m *lifecycleMetricsRecorder) RecordOverlapSkip(context.Context, string, string, string) {}
+
+func (m *lifecycleMetricsRecorder) RecordExecutionDelta(context.Context, string, string, string, string, int64) {
+}
+
+func (m *lifecycleMetricsRecorder) RecordOrphans(context.Context, string, string, string, int64, time.Duration) {
+}
+
+func (m *lifecycleMetricsRecorder) RecordRetainedSandbox(context.Context, string, string, string, string) {
+}
+
+func (m *lifecycleMetricsRecorder) RecordJanitorResources(context.Context, string, string, string, int64, int64, int64) {
+}
+
+type fakeClock struct {
+	now time.Time
+}
+
+func (c *fakeClock) Now() time.Time {
+	return c.now
+}
+
+func (c *fakeClock) Advance(d time.Duration) {
+	c.now = c.now.Add(d)
 }
 
 type alreadyRunningLock struct{}

@@ -1,0 +1,546 @@
+${jsonencode({
+  displayName = "${environment} API canary"
+  gridLayout = {
+    columns = 4
+    widgets = concat(
+      [
+        {
+          text = {
+            content = "# Canary Lifecycle\nProject: ${project_id}\nEnvironment: ${environment}"
+            format  = "MARKDOWN"
+          }
+        }
+      ],
+      flatten([
+        for target in targets : [
+          {
+            text = {
+              content = "## ${target.target} (${target.region})"
+              format  = "MARKDOWN"
+            }
+          },
+          {
+            title = "Last successful lifecycle run age (s)"
+            scorecard = {
+              timeSeriesQuery = {
+                prometheusQuery = format(
+                  "time() - max by (target) (superserve_canary_last_success_timestamp_seconds{environment=%q,region=%q,target=%q,scenario=\"lifecycle\",result=\"success\"})",
+                  environment,
+                  target.region,
+                  target.target
+                )
+              }
+              sparkChartView = {
+                sparkChartType = "SPARK_LINE"
+              }
+            }
+          },
+          {
+            title = "Last lifecycle completion age (s)"
+            scorecard = {
+              timeSeriesQuery = {
+                prometheusQuery = format(
+                  "time() - max by (target) (superserve_canary_last_completed_timestamp_seconds{environment=%q,region=%q,target=%q,scenario=\"lifecycle\"})",
+                  environment,
+                  target.region,
+                  target.target
+                )
+              }
+              sparkChartView = {
+                sparkChartType = "SPARK_LINE"
+              }
+            }
+          },
+          {
+            title = "Failures in last 15m"
+            scorecard = {
+              timeSeriesQuery = {
+                prometheusQuery = format(
+                  "increase(superserve_canary_run_total{environment=%q,region=%q,target=%q,scenario=\"lifecycle\",result=\"failure\"}[15m])",
+                  environment,
+                  target.region,
+                  target.target
+                )
+              }
+              sparkChartView = {
+                sparkChartType = "SPARK_LINE"
+              }
+            }
+          },
+          {
+            title = "Success rate (%)"
+            scorecard = {
+              timeSeriesQuery = {
+                prometheusQuery = format(
+                  "100 * sum(rate(superserve_canary_run_total{environment=%q,region=%q,target=%q,scenario=\"lifecycle\",result=\"success\"}[15m])) / sum(rate(superserve_canary_run_total{environment=%q,region=%q,target=%q,scenario=\"lifecycle\"}[15m]))",
+                  environment,
+                  target.region,
+                  target.target,
+                  environment,
+                  target.region,
+                  target.target
+                )
+              }
+              sparkChartView = {
+                sparkChartType = "SPARK_LINE"
+              }
+            }
+          },
+          {
+            title = "Running executions"
+            scorecard = {
+              timeSeriesQuery = {
+                prometheusQuery = format(
+                  "superserve_canary_running_executions{environment=%q,region=%q,target=%q,scenario=\"lifecycle\"}",
+                  environment,
+                  target.region,
+                  target.target
+                )
+              }
+              sparkChartView = {
+                sparkChartType = "SPARK_LINE"
+              }
+            }
+          },
+          {
+            title = "Overlap skips"
+            scorecard = {
+              timeSeriesQuery = {
+                prometheusQuery = format(
+                  "increase(superserve_canary_overlap_skipped_total{environment=%q,region=%q,target=%q,scenario=\"lifecycle\"}[24h])",
+                  environment,
+                  target.region,
+                  target.target
+                )
+              }
+              sparkChartView = {
+                sparkChartType = "SPARK_LINE"
+              }
+            }
+          }
+        ]
+      ]),
+      [
+        {
+          text = {
+            content = "## Lifecycle success / failure"
+            format  = "MARKDOWN"
+          }
+        },
+        {
+          title = "Lifecycle successes"
+          xyChart = {
+            dataSets = [
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "sum by (target) (increase(superserve_canary_run_total{environment=%q,scenario=\"lifecycle\",result=\"success\"}[15m]))",
+                    environment
+                  )
+                }
+                plotType = "LINE"
+                legendTemplate = "{{target}}"
+              }
+            ]
+          }
+        },
+        {
+          title = "Lifecycle failures"
+          xyChart = {
+            dataSets = [
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "sum by (target) (increase(superserve_canary_run_total{environment=%q,scenario=\"lifecycle\",result=\"failure\"}[15m]))",
+                    environment
+                  )
+                }
+                plotType = "LINE"
+                legendTemplate = "{{target}}"
+              }
+            ]
+          }
+        },
+        {
+          title = "Lifecycle success rate"
+          xyChart = {
+            dataSets = [
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "100 * sum by (target) (rate(superserve_canary_run_total{environment=%q,scenario=\"lifecycle\",result=\"success\"}[15m])) / sum by (target) (rate(superserve_canary_run_total{environment=%q,scenario=\"lifecycle\"}[15m]))",
+                    environment,
+                    environment
+                  )
+                }
+                plotType = "LINE"
+                legendTemplate = "{{target}}"
+              }
+            ]
+          }
+        },
+        {
+          text = {
+            content = "## Lifecycle timing"
+            format  = "MARKDOWN"
+          }
+        },
+        {
+          title = "Create -> sandbox active"
+          xyChart = {
+            dataSets = [
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "histogram_quantile(0.50, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"create_total\"}[30m])))",
+                    environment
+                  )
+                }
+                plotType = "LINE"
+                legendTemplate = "{{target}} p50"
+              },
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "histogram_quantile(0.95, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"create_total\"}[30m])))",
+                    environment
+                  )
+                }
+                plotType = "LINE"
+                legendTemplate = "{{target}} p95"
+              },
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "histogram_quantile(0.99, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"create_total\"}[30m])))",
+                    environment
+                  )
+                }
+                plotType = "LINE"
+                legendTemplate = "{{target}} p99"
+              }
+            ]
+          }
+        },
+        {
+          title = "Pause -> sandbox paused"
+          xyChart = {
+            dataSets = [
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "histogram_quantile(0.50, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"pause_total\"}[30m])))",
+                    environment
+                  )
+                }
+                plotType = "LINE"
+                legendTemplate = "{{target}} p50"
+              },
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "histogram_quantile(0.95, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"pause_total\"}[30m])))",
+                    environment
+                  )
+                }
+                plotType = "LINE"
+                legendTemplate = "{{target}} p95"
+              },
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "histogram_quantile(0.99, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"pause_total\"}[30m])))",
+                    environment
+                  )
+                }
+                plotType = "LINE"
+                legendTemplate = "{{target}} p99"
+              }
+            ]
+          }
+        },
+        {
+          title = "Resume -> sandbox active"
+          xyChart = {
+            dataSets = [
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "histogram_quantile(0.50, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"resume_total\"}[30m])))",
+                    environment
+                  )
+                }
+                plotType = "LINE"
+                legendTemplate = "{{target}} p50"
+              },
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "histogram_quantile(0.95, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"resume_total\"}[30m])))",
+                    environment
+                  )
+                }
+                plotType = "LINE"
+                legendTemplate = "{{target}} p95"
+              },
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "histogram_quantile(0.99, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"resume_total\"}[30m])))",
+                    environment
+                  )
+                }
+                plotType = "LINE"
+                legendTemplate = "{{target}} p99"
+              }
+            ]
+          }
+        },
+        {
+          title = "End-to-end canary run duration"
+          xyChart = {
+            dataSets = [
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "histogram_quantile(0.50, sum by (le, target) (rate(superserve_canary_run_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\"}[30m])))",
+                    environment
+                  )
+                }
+                plotType = "LINE"
+                legendTemplate = "{{target}} p50"
+              },
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "histogram_quantile(0.95, sum by (le, target) (rate(superserve_canary_run_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\"}[30m])))",
+                    environment
+                  )
+                }
+                plotType = "LINE"
+                legendTemplate = "{{target}} p95"
+              },
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "histogram_quantile(0.99, sum by (le, target) (rate(superserve_canary_run_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\"}[30m])))",
+                    environment
+                  )
+                }
+                plotType = "LINE"
+                legendTemplate = "{{target}} p99"
+              }
+            ]
+          }
+        },
+        {
+          title = "Create API request duration"
+          xyChart = {
+            dataSets = [
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "histogram_quantile(0.50, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"create_request\"}[30m])))",
+                    environment
+                  )
+                }
+                plotType = "LINE"
+                legendTemplate = "{{target}} p50"
+              },
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "histogram_quantile(0.95, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"create_request\"}[30m])))",
+                    environment
+                  )
+                }
+                plotType = "LINE"
+                legendTemplate = "{{target}} p95"
+              },
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "histogram_quantile(0.99, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"create_request\"}[30m])))",
+                    environment
+                  )
+                }
+                plotType = "LINE"
+                legendTemplate = "{{target}} p99"
+              }
+            ]
+          }
+        },
+        {
+          title = "Pause API request duration"
+          xyChart = {
+            dataSets = [
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "histogram_quantile(0.50, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"pause_request\"}[30m])))",
+                    environment
+                  )
+                }
+                plotType = "LINE"
+                legendTemplate = "{{target}} p50"
+              },
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "histogram_quantile(0.95, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"pause_request\"}[30m])))",
+                    environment
+                  )
+                }
+                plotType = "LINE"
+                legendTemplate = "{{target}} p95"
+              },
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "histogram_quantile(0.99, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"pause_request\"}[30m])))",
+                    environment
+                  )
+                }
+                plotType = "LINE"
+                legendTemplate = "{{target}} p99"
+              }
+            ]
+          }
+        },
+        {
+          title = "Resume API request duration"
+          xyChart = {
+            dataSets = [
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "histogram_quantile(0.50, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"resume_request\"}[30m])))",
+                    environment
+                  )
+                }
+                plotType = "LINE"
+                legendTemplate = "{{target}} p50"
+              },
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "histogram_quantile(0.95, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"resume_request\"}[30m])))",
+                    environment
+                  )
+                }
+                plotType = "LINE"
+                legendTemplate = "{{target}} p95"
+              },
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "histogram_quantile(0.99, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"resume_request\"}[30m])))",
+                    environment
+                  )
+                }
+                plotType = "LINE"
+                legendTemplate = "{{target}} p99"
+              }
+            ]
+          }
+        },
+        {
+          title = "Preview URL readiness duration"
+          xyChart = {
+            dataSets = [
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "histogram_quantile(0.50, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"preview\"}[30m])))",
+                    environment
+                  )
+                }
+                plotType = "LINE"
+                legendTemplate = "{{target}} p50"
+              },
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "histogram_quantile(0.95, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"preview\"}[30m])))",
+                    environment
+                  )
+                }
+                plotType = "LINE"
+                legendTemplate = "{{target}} p95"
+              },
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "histogram_quantile(0.99, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"preview\"}[30m])))",
+                    environment
+                  )
+                }
+                plotType = "LINE"
+                legendTemplate = "{{target}} p99"
+              }
+            ]
+          }
+        },
+        {
+          title = "Delete API request duration"
+          xyChart = {
+            dataSets = [
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "histogram_quantile(0.50, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"delete_request\"}[30m])))",
+                    environment
+                  )
+                }
+                plotType = "LINE"
+                legendTemplate = "{{target}} p50"
+              },
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "histogram_quantile(0.95, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"delete_request\"}[30m])))",
+                    environment
+                  )
+                }
+                plotType = "LINE"
+                legendTemplate = "{{target}} p95"
+              },
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "histogram_quantile(0.99, sum by (le, target) (rate(superserve_canary_step_duration_seconds_bucket{environment=%q,scenario=\"lifecycle\",step=\"delete_request\"}[30m])))",
+                    environment
+                  )
+                }
+                plotType = "LINE"
+                legendTemplate = "{{target}} p99"
+              }
+            ]
+          }
+        },
+        {
+          text = {
+            content = "## Failure breakdown"
+            format  = "MARKDOWN"
+          }
+        },
+        {
+          title = "Failure breakdown by step"
+          xyChart = {
+            dataSets = [
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "sum by (target, step) (increase(superserve_canary_step_total{environment=%q,scenario=\"lifecycle\",result=\"failure\"}[1h]))",
+                    environment
+                  )
+                }
+                plotType = "LINE"
+                legendTemplate = "{{target}} {{step}}"
+              }
+            ]
+          }
+        }
+      ])
+  }
+})}

@@ -1,0 +1,131 @@
+${jsonencode({
+  displayName = "${environment} canary cleanup"
+  gridLayout = {
+    columns = 4
+    widgets = concat(
+      [
+        {
+          text = {
+            content = "# Canary Cleanup\nProject: ${project_id}\nEnvironment: ${environment}"
+            format  = "MARKDOWN"
+          }
+        }
+      ],
+      flatten([
+        for target in targets : [
+          {
+            text = {
+              content = "## Cleanup ${target.target}"
+              format  = "MARKDOWN"
+            }
+          },
+          {
+            title = "Current retained sandbox count"
+            scorecard = {
+              timeSeriesQuery = {
+                prometheusQuery = format(
+                  "superserve_canary_orphan_resources{environment=%q,region=%q,target=%q,scenario=\"janitor\",result=\"observed\"}",
+                  environment,
+                  target.region,
+                  target.target
+                )
+              }
+              sparkChartView = {
+                sparkChartType = "SPARK_LINE"
+              }
+            }
+          },
+          {
+            title = "Retained sandboxes"
+            scorecard = {
+              timeSeriesQuery = {
+                prometheusQuery = format(
+                  "increase(superserve_canary_retained_sandbox_total{environment=%q,region=%q,target=%q,scenario=\"lifecycle\",result=\"retained\"}[24h])",
+                  environment,
+                  target.region,
+                  target.target
+                )
+              }
+              sparkChartView = {
+                sparkChartType = "SPARK_LINE"
+              }
+            }
+          },
+          {
+            title = "Cleanup successes"
+            scorecard = {
+              timeSeriesQuery = {
+                prometheusQuery = format(
+                  "increase(superserve_canary_cleanup_total{environment=%q,region=%q,target=%q,scenario=\"cleanup\",result=\"success\"}[24h])",
+                  environment,
+                  target.region,
+                  target.target
+                )
+              }
+              sparkChartView = {
+                sparkChartType = "SPARK_LINE"
+              }
+            }
+          },
+          {
+            title = "Cleanup failures"
+            scorecard = {
+              timeSeriesQuery = {
+                prometheusQuery = format(
+                  "increase(superserve_canary_cleanup_total{environment=%q,region=%q,target=%q,scenario=\"cleanup\",result=\"failure\"}[24h])",
+                  environment,
+                  target.region,
+                  target.target
+                )
+              }
+              sparkChartView = {
+                sparkChartType = "SPARK_LINE"
+              }
+            }
+          }
+        ]
+      ]),
+      [
+        {
+          text = {
+            content = "## Cleanup"
+            format  = "MARKDOWN"
+          }
+        },
+        {
+          title = "Cleanup outcomes"
+          xyChart = {
+            dataSets = [
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "sum by (target) (increase(superserve_canary_cleanup_total{environment=%q,scenario=\"cleanup\",result=\"success\"}[1h]))",
+                    environment
+                  )
+                }
+                plotType = "LINE"
+              },
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "sum by (target) (increase(superserve_canary_cleanup_total{environment=%q,scenario=\"cleanup\",result=\"failure\"}[1h]))",
+                    environment
+                  )
+                }
+                plotType = "LINE"
+              },
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "sum by (target, step) (increase(superserve_canary_retained_sandbox_total{environment=%q,result=\"retained\"}[1h]))",
+                    environment
+                  )
+                }
+                plotType = "LINE"
+              }
+            ]
+          }
+        }
+      ])
+  }
+})}
