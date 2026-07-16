@@ -96,3 +96,17 @@ module "janitor" {
   vpc_subnetwork            = try(each.value.vpc_subnetwork, null)
   vpc_tags                  = try(each.value.vpc_tags, [])
 }
+
+module "dashboard" {
+  source = "../../modules/dashboard"
+
+  project_id        = var.project_id
+  environment       = local.labels.environment
+  dashboard_enabled = true
+  targets = [
+    for name, cfg in local.lifecycle_targets : {
+      target = name
+      region = cfg.target_region
+    }
+  ]
+}

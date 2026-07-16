@@ -22,7 +22,9 @@ func TestNewProvider(t *testing.T) {
 		provider.RecordStep(context.Background(), "env", "region", "target", "lifecycle", "step", "success", 10)
 		provider.RecordCleanup(context.Background(), "env", "region", "target", "success")
 		provider.RecordOverlapSkip(context.Background(), "env", "region", "target")
-		provider.RecordOrphans(context.Background(), "env", "region", "target", 1)
+		provider.RecordExecutionDelta(context.Background(), "env", "region", "target", "lifecycle", 1)
+		provider.RecordOrphans(context.Background(), "env", "region", "target", 1, 10)
+		provider.RecordJanitorResources(context.Background(), "env", "region", "target", 1, 1, 0)
 		if err := shutdown(context.Background()); err != nil {
 			t.Fatal(err)
 		}

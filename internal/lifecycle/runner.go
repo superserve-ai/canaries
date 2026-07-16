@@ -84,6 +84,8 @@ func (r Runner) Run(ctx context.Context) error {
 			log.Error().Err(err).Msg("release lock failed")
 		}
 	}()
+	r.Metrics.RecordExecutionDelta(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", 1)
+	defer r.Metrics.RecordExecutionDelta(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", -1)
 
 	runID := fmt.Sprintf("%s-%s-%d-%s", r.Config.Environment, r.Config.Region, r.Clock().Unix(), uuid.NewString()[:8])
 	start := r.Clock()
