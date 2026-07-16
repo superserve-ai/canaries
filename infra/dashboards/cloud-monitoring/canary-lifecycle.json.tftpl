@@ -20,35 +20,31 @@ ${jsonencode({
             }
           },
           {
-            title = "Last successful lifecycle run age (s)"
+            title = "End-to-end canary health"
             scorecard = {
               timeSeriesQuery = {
                 prometheusQuery = format(
-                  "time() - max by (target) (superserve_canary_last_success_timestamp_seconds{environment=%q,region=%q,target=%q,scenario=\"lifecycle\",result=\"success\"})",
+                  "((((time() - max by (target) (superserve_canary_last_success_timestamp_seconds{environment=%q,region=%q,target=%q,scenario=\"lifecycle\",result=\"success\"})) < bool 600) * (increase(superserve_canary_run_total{environment=%q,region=%q,target=%q,scenario=\"lifecycle\",result=\"failure\"}[15m]) == bool 0)) or vector(0))",
+                  environment,
+                  target.region,
+                  target.target,
                   environment,
                   target.region,
                   target.target
                 )
               }
-              sparkChartView = {
-                sparkChartType = "SPARK_LINE"
+              gaugeView = {
+                lowerBound = 0
+                upperBound = 1
               }
-            }
-          },
-          {
-            title = "Last lifecycle completion age (s)"
-            scorecard = {
-              timeSeriesQuery = {
-                prometheusQuery = format(
-                  "time() - max by (target) (superserve_canary_last_completed_timestamp_seconds{environment=%q,region=%q,target=%q,scenario=\"lifecycle\"})",
-                  environment,
-                  target.region,
-                  target.target
-                )
-              }
-              sparkChartView = {
-                sparkChartType = "SPARK_LINE"
-              }
+              thresholds = [
+                {
+                  color = "RED"
+                  direction = "BELOW"
+                  label = "Failing"
+                  value = 0.5
+                }
+              ]
             }
           },
           {
@@ -56,7 +52,7 @@ ${jsonencode({
             scorecard = {
               timeSeriesQuery = {
                 prometheusQuery = format(
-                  "increase(superserve_canary_run_total{environment=%q,region=%q,target=%q,scenario=\"lifecycle\",result=\"failure\"}[15m])",
+                  "increase(superserve_canary_run_total{environment=%q,region=%q,target=%q,scenario=\"lifecycle\",result=\"failure\"}[15m]) or vector(0)",
                   environment,
                   target.region,
                   target.target
@@ -65,6 +61,44 @@ ${jsonencode({
               sparkChartView = {
                 sparkChartType = "SPARK_LINE"
               }
+              thresholds = [
+                {
+                  color = "RED"
+                  direction = "ABOVE"
+                  label = "Any failures"
+                  value = 0.5
+                }
+              ]
+            }
+          },
+          {
+            title = "Time since last successful run (s)"
+            scorecard = {
+              timeSeriesQuery = {
+                prometheusQuery = format(
+                  "(time() - max by (target) (superserve_canary_last_success_timestamp_seconds{environment=%q,region=%q,target=%q,scenario=\"lifecycle\",result=\"success\"})) or vector(999999)",
+                  environment,
+                  target.region,
+                  target.target
+                )
+              }
+              sparkChartView = {
+                sparkChartType = "SPARK_LINE"
+              }
+              thresholds = [
+                {
+                  color = "RED"
+                  direction = "ABOVE"
+                  label = "Stale"
+                  value = 720
+                },
+                {
+                  color = "YELLOW"
+                  direction = "ABOVE"
+                  label = "Aging"
+                  value = 420
+                }
+              ]
             }
           },
           {
@@ -72,7 +106,7 @@ ${jsonencode({
             scorecard = {
               timeSeriesQuery = {
                 prometheusQuery = format(
-                  "100 * sum(rate(superserve_canary_run_total{environment=%q,region=%q,target=%q,scenario=\"lifecycle\",result=\"success\"}[15m])) / sum(rate(superserve_canary_run_total{environment=%q,region=%q,target=%q,scenario=\"lifecycle\"}[15m]))",
+                  "((100 * sum(rate(superserve_canary_run_total{environment=%q,region=%q,target=%q,scenario=\"lifecycle\",result=\"success\"}[15m])) / clamp_min(sum(rate(superserve_canary_run_total{environment=%q,region=%q,target=%q,scenario=\"lifecycle\"}[15m])), 0.000001)) or vector(0))",
                   environment,
                   target.region,
                   target.target,
@@ -84,22 +118,20 @@ ${jsonencode({
               sparkChartView = {
                 sparkChartType = "SPARK_LINE"
               }
-            }
-          },
-          {
-            title = "Running executions"
-            scorecard = {
-              timeSeriesQuery = {
-                prometheusQuery = format(
-                  "superserve_canary_running_executions{environment=%q,region=%q,target=%q,scenario=\"lifecycle\"}",
-                  environment,
-                  target.region,
-                  target.target
-                )
-              }
-              sparkChartView = {
-                sparkChartType = "SPARK_LINE"
-              }
+              thresholds = [
+                {
+                  color = "RED"
+                  direction = "BELOW"
+                  label = "Below 80%"
+                  value = 80
+                },
+                {
+                  color = "YELLOW"
+                  direction = "BELOW"
+                  label = "Below 100%"
+                  value = 100
+                }
+              ]
             }
           },
           {
@@ -107,7 +139,7 @@ ${jsonencode({
             scorecard = {
               timeSeriesQuery = {
                 prometheusQuery = format(
-                  "increase(superserve_canary_overlap_skipped_total{environment=%q,region=%q,target=%q,scenario=\"lifecycle\"}[24h])",
+                  "increase(superserve_canary_overlap_skipped_total{environment=%q,region=%q,target=%q,scenario=\"lifecycle\"}[24h]) or vector(0)",
                   environment,
                   target.region,
                   target.target
@@ -116,8 +148,86 @@ ${jsonencode({
               sparkChartView = {
                 sparkChartType = "SPARK_LINE"
               }
+              thresholds = [
+                {
+                  color = "YELLOW"
+                  direction = "ABOVE"
+                  label = "Any skips"
+                  value = 0.5
+                }
+              ]
             }
-          }
+          },
+          {
+            title = "Failed runs retained for debugging"
+            scorecard = {
+              timeSeriesQuery = {
+                prometheusQuery = format(
+                  "sum(increase(superserve_canary_retained_sandbox_total{environment=%q,region=%q,target=%q,scenario=\"lifecycle\",result=\"retained\"}[24h])) or vector(0)",
+                  environment,
+                  target.region,
+                  target.target
+                )
+              }
+              sparkChartView = {
+                sparkChartType = "SPARK_LINE"
+              }
+              thresholds = [
+                {
+                  color = environment == "production" ? "RED" : "YELLOW"
+                  direction = "ABOVE"
+                  label = "Any retained runs"
+                  value = 0.5
+                }
+              ]
+            }
+          },
+          {
+            title = "Running executions"
+            scorecard = {
+              timeSeriesQuery = {
+                prometheusQuery = format(
+                  "superserve_canary_running_executions{environment=%q,region=%q,target=%q,scenario=\"lifecycle\"} or vector(0)",
+                  environment,
+                  target.region,
+                  target.target
+                )
+              }
+            }
+          },
+          {
+            text = {
+              content = "## Scheduler liveness"
+              format  = "MARKDOWN"
+            }
+          },
+          {
+            title = "Last lifecycle completion age (s)"
+            scorecard = {
+              timeSeriesQuery = {
+                prometheusQuery = format(
+                  "(time() - max by (target) (superserve_canary_last_completed_timestamp_seconds{environment=%q,region=%q,target=%q,scenario=\"lifecycle\"})) or vector(999999)",
+                  environment,
+                  target.region,
+                  target.target
+                )
+              }
+              thresholds = [
+                {
+                  color = "RED"
+                  direction = "ABOVE"
+                  label = "Stale"
+                  value = 720
+                },
+                {
+                  color = "YELLOW"
+                  direction = "ABOVE"
+                  label = "Aging"
+                  value = 420
+                }
+              ]
+            }
+          },
         ]
       ]),
       [
