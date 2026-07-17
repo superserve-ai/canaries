@@ -6,7 +6,7 @@ ${jsonencode({
       [
         {
           text = {
-            content = "# Canary Lifecycle\nProject: ${project_id}\nEnvironment: ${environment}"
+            content = "# Canary Lifecycle\nProject: ${project_id}\n\nEnvironment: ${environment}\n\nTargets:\n${join("\n", [for target in targets : "- ${target.target} (${target.region})"])}"
             format  = "MARKDOWN"
           }
         }
@@ -14,35 +14,61 @@ ${jsonencode({
       flatten([
         for target in targets : [
           {
-            text = {
-              content = "## ${target.target} (${target.region})"
-              format  = "MARKDOWN"
-            }
-          },
-          {
-            title = "End-to-end canary health"
+            title = "Last run"
             scorecard = {
               timeSeriesQuery = {
                 prometheusQuery = format(
-                  "((((time() - max by (target) (superserve_canary_last_success_timestamp_seconds{environment=%q,region=%q,target=%q,scenario=\"lifecycle\",result=\"success\"})) < bool 600) * (increase(superserve_canary_run_total{environment=%q,region=%q,target=%q,scenario=\"lifecycle\",result=\"failure\"}[15m]) == bool 0)) or vector(0))",
+                  "((max by (target) (max_over_time(superserve_canary_last_success_timestamp_seconds{environment=%q,region=%q,target=%q,scenario=\"lifecycle\",result=\"success\"}[24h])) or label_replace(vector(0), \"target\", %q, \"\", \"\")) + 5 >= bool (max by (target) (max_over_time(superserve_canary_last_completed_timestamp_seconds{environment=%q,region=%q,target=%q,scenario=\"lifecycle\"}[24h])) or label_replace(vector(9999999999), \"target\", %q, \"\", \"\")))",
                   environment,
                   target.region,
                   target.target,
+                  target.target,
                   environment,
                   target.region,
+                  target.target,
                   target.target
                 )
-              }
-              gaugeView = {
-                lowerBound = 0
-                upperBound = 1
               }
               thresholds = [
                 {
                   color = "RED"
                   direction = "BELOW"
-                  label = "Failing"
+                  label = "Failure"
                   value = 0.5
+                }
+              ]
+            }
+          },
+          {
+            title = "End-to-end canary health"
+            xyChart = {
+              chartOptions = {
+                mode = "COLOR"
+              }
+              dataSets = [
+                {
+                  timeSeriesQuery = {
+                    prometheusQuery = format(
+                      "increase(superserve_canary_run_total{environment=%q,region=%q,target=%q,scenario=\"lifecycle\",result=\"success\"}[5m])",
+                      environment,
+                      target.region,
+                      target.target
+                    )
+                  }
+                  plotType = "STACKED_BAR"
+                  legendTemplate = "Healthy runs"
+                },
+                {
+                  timeSeriesQuery = {
+                    prometheusQuery = format(
+                      "-1 * increase(superserve_canary_run_total{environment=%q,region=%q,target=%q,scenario=\"lifecycle\",result=\"failure\"}[5m])",
+                      environment,
+                      target.region,
+                      target.target
+                    )
+                  }
+                  plotType = "STACKED_BAR"
+                  legendTemplate = "Failing"
                 }
               ]
             }
@@ -76,7 +102,7 @@ ${jsonencode({
             scorecard = {
               timeSeriesQuery = {
                 prometheusQuery = format(
-                  "(time() - max by (target) (superserve_canary_last_success_timestamp_seconds{environment=%q,region=%q,target=%q,scenario=\"lifecycle\",result=\"success\"})) or vector(999999)",
+                  "(time() - max_over_time(superserve_canary_last_success_timestamp_seconds{environment=%q,region=%q,target=%q,scenario=\"lifecycle\",result=\"success\"}[24h])) or vector(999999)",
                   environment,
                   target.region,
                   target.target
@@ -102,11 +128,11 @@ ${jsonencode({
             }
           },
           {
-            title = "Success rate (%)"
+            title = "Success rate (6h rolling) (%)"
             scorecard = {
               timeSeriesQuery = {
                 prometheusQuery = format(
-                  "((100 * sum(rate(superserve_canary_run_total{environment=%q,region=%q,target=%q,scenario=\"lifecycle\",result=\"success\"}[15m])) / clamp_min(sum(rate(superserve_canary_run_total{environment=%q,region=%q,target=%q,scenario=\"lifecycle\"}[15m])), 0.000001)) or vector(0))",
+                  "((100 * sum(increase(superserve_canary_run_total{environment=%q,region=%q,target=%q,scenario=\"lifecycle\",result=\"success\"}[6h])) / clamp_min(sum(increase(superserve_canary_run_total{environment=%q,region=%q,target=%q,scenario=\"lifecycle\"}[6h])), 0.000001)) or vector(0))",
                   environment,
                   target.region,
                   target.target,
@@ -206,7 +232,7 @@ ${jsonencode({
             scorecard = {
               timeSeriesQuery = {
                 prometheusQuery = format(
-                  "(time() - max by (target) (superserve_canary_last_completed_timestamp_seconds{environment=%q,region=%q,target=%q,scenario=\"lifecycle\"})) or vector(999999)",
+                  "(time() - max_over_time(superserve_canary_last_completed_timestamp_seconds{environment=%q,region=%q,target=%q,scenario=\"lifecycle\"}[24h])) or vector(999999)",
                   environment,
                   target.region,
                   target.target
