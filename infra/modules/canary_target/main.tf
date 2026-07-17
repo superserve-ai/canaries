@@ -43,12 +43,6 @@ resource "google_secret_manager_secret_iam_member" "runtime_accessor" {
   member    = "serviceAccount:${google_service_account.runtime.email}"
 }
 
-resource "google_storage_bucket_iam_member" "lock_admin" {
-  bucket = var.lock_bucket_name
-  role   = "roles/storage.objectAdmin"
-  member = "serviceAccount:${google_service_account.runtime.email}"
-}
-
 resource "google_cloud_run_v2_job" "lifecycle" {
   project  = var.project_id
   name     = local.lifecycle_job_name

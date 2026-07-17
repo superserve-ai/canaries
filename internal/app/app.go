@@ -105,9 +105,6 @@ func combineRunAndShutdownError(runErr, shutdownErr error, runtime config.Runtim
 		log.Warn().Err(shutdownErr).Msg("metrics shutdown failed")
 		return runErr
 	}
-	if runtime == config.RuntimeCloudRun {
-		return shutdownErr
-	}
 	log.Warn().Err(shutdownErr).Msg("metrics shutdown failed")
 	return nil
 }

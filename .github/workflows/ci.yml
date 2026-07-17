@@ -8,8 +8,11 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    environment: staging
     permissions:
       contents: read
+    env:
+      TF_VAR_deployment_service_account_email: ${{ vars.GCP_SERVICE_ACCOUNT }}
     steps:
       - uses: actions/checkout@v4
 
@@ -57,6 +60,13 @@ jobs:
           cd infra/envs/production
           terraform init -backend=false
           terraform validate
+
+      - name: Terraform init and validate production east
+        run: |
+          set -euo pipefail
+          cd infra/envs/production/us-east4
+          terraform init -backend=false
+          terraform validate
       - name: Install Gitleaks
         env:
           GITLEAKS_VERSION: 8.28.0
@@ -68,3 +78,79 @@ jobs:
 
       - name: Scan for secrets
         run: gitleaks git --redact --verbose
+
+  terraform-plan:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    environment: ${{ matrix.environment }}
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      TF_VAR_notification_channel_ids: ${{ vars.TF_VAR_NOTIFICATION_CHANNEL_IDS || '[]' }}
+      TF_VAR_deployment_service_account_email: ${{ vars.GCP_SERVICE_ACCOUNT }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: staging
+            environment: staging
+            workdir: infra/envs/staging/us-central1
+          - name: production
+            environment: production
+            workdir: infra/envs/production
+          - name: production east
+            environment: production
+            workdir: infra/envs/production/us-east4
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Terraform plan summary
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "${{ matrix.workdir }}"
+          terraform init -input=false
+
+          set +e
+          terraform plan -input=false -lock=false -detailed-exitcode -no-color -out=tfplan -var="image=api-canary:pr-${GITHUB_SHA}" > /tmp/plan.log
+          plan_exit=$?
+          set -e
+
+          if [ "$plan_exit" -eq 1 ]; then
+            cat /tmp/plan.log
+            exit "$plan_exit"
+          fi
+
+          terraform show -no-color tfplan > /tmp/show.log
+
+          summary_line="$(grep -E '^Plan: |^No changes\.' /tmp/show.log | tail -n 1 || true)"
+
+          {
+            echo "## Terraform plan: ${{ matrix.name }}"
+            echo
+            if [ -n "$summary_line" ]; then
+              echo "$summary_line"
+            else
+              echo "Plan output generated."
+            fi
+            echo
+            echo "<details><summary>Plan output</summary>"
+            echo
+            echo '```text'
+            sed -n '1,200p' /tmp/show.log
+            echo '```'
+            echo
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"

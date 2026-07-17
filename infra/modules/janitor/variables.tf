@@ -62,6 +62,11 @@ variable "create_alerts" {
   type    = bool
   default = false
 }
+
+variable "enable_alerts" {
+  type    = bool
+  default = true
+}
 variable "vpc_connector" {
   type = string
 }

@@ -44,11 +44,20 @@ func TestWaitForStatusTerminalFailure(t *testing.T) {
 }
 
 func TestUploadVerificationUtilitiesUsesRepoAssets(t *testing.T) {
-	var commands []string
+	var writes []struct {
+		path string
+		size int
+	}
 	client := &fakeClient{
-		execFn: func(_ context.Context, _ string, _ string, req canaryapi.ExecRequest) (canaryapi.ExecResult, error) {
-			commands = append(commands, req.Command)
-			return canaryapi.ExecResult{ExitCode: 0}, nil
+		writeFileFn: func(_ context.Context, sandboxID, _ string, path string, content []byte) error {
+			if sandboxID != "sb-1" {
+				t.Fatalf("unexpected sandboxID %q", sandboxID)
+			}
+			writes = append(writes, struct {
+				path string
+				size int
+			}{path: path, size: len(content)})
+			return nil
 		},
 	}
 	r := Runner{
@@ -60,14 +69,17 @@ func TestUploadVerificationUtilitiesUsesRepoAssets(t *testing.T) {
 	if err := r.uploadVerificationUtilities(context.Background(), "sb-1", "tok"); err != nil {
 		t.Fatal(err)
 	}
-	if len(commands) != 1 {
-		t.Fatalf("expected one upload command, got %d", len(commands))
+	if len(writes) != 2 {
+		t.Fatalf("expected two writes, got %d", len(writes))
 	}
-	if !strings.Contains(commands[0], "verify_disk.sh") || !strings.Contains(commands[0], "verify_memory.py") {
-		t.Fatalf("upload command did not reference verification assets: %s", commands[0])
+	if writes[0].path != "/tmp/verification-utilities/verify_disk.sh" {
+		t.Fatalf("first write path = %q", writes[0].path)
 	}
-	if !strings.Contains(commands[0], "/tmp/verification-utilities") {
-		t.Fatalf("upload command did not target verification utilities dir: %s", commands[0])
+	if writes[0].size == 0 || writes[1].size == 0 {
+		t.Fatalf("expected non-empty verification assets: %+v", writes)
+	}
+	if writes[1].path != "/tmp/verification-utilities/verify_memory.py" {
+		t.Fatalf("second write path = %q", writes[1].path)
 	}
 }
 
@@ -124,6 +136,8 @@ func TestCleanupPreservesPrimaryFailure(t *testing.T) {
 func TestRunLifecycleRecordsTotalDurations(t *testing.T) {
 	clock := &fakeClock{now: time.Unix(0, 0)}
 	statusCalls := 0
+	writeCalls := 0
+	verificationUploadAdvanced := false
 	metrics := &lifecycleMetricsRecorder{}
 	client := &fakeClient{
 		createSandboxFn: func(context.Context, canaryapi.CreateSandboxRequest) (canaryapi.Sandbox, error) {
@@ -153,12 +167,21 @@ func TestRunLifecycleRecordsTotalDurations(t *testing.T) {
 			return canaryapi.ResumeResponse{ID: "sb-1", Status: "active", AccessToken: "resume-token"}, nil
 		},
 		previewURLFn: func(string, int) string { return "https://preview.example.test" },
+		writeFileFn: func(_ context.Context, sandboxID, _ string, path string, _ []byte) error {
+			if sandboxID != "sb-1" {
+				t.Fatalf("unexpected sandboxID %q", sandboxID)
+			}
+			writeCalls++
+			if strings.Contains(path, "verification-utilities") && !verificationUploadAdvanced {
+				clock.Advance(23 * time.Second)
+				verificationUploadAdvanced = true
+			}
+			return nil
+		},
 		execFn: func(_ context.Context, _ string, _ string, req canaryapi.ExecRequest) (canaryapi.ExecResult, error) {
 			switch {
-			case strings.Contains(req.Command, "/tmp/canary-token"):
+			case strings.Contains(req.Command, "time.sleep(3600)"):
 				clock.Advance(7 * time.Second)
-			case strings.Contains(req.Command, "mkdir -p /tmp/verification-utilities"):
-				clock.Advance(23 * time.Second)
 			case strings.Contains(req.Command, "verify_disk.sh"):
 				clock.Advance(29 * time.Second)
 			case strings.Contains(req.Command, "verify_memory.py"):
@@ -676,6 +699,7 @@ type fakeClient struct {
 	resumeSandboxFn func(context.Context, string) (canaryapi.ResumeResponse, error)
 	deleteSandboxFn func(context.Context, string) error
 	updateSandboxFn func(context.Context, string, canaryapi.UpdateSandboxRequest) error
+	writeFileFn     func(context.Context, string, string, string, []byte) error
 	execFn          func(context.Context, string, string, canaryapi.ExecRequest) (canaryapi.ExecResult, error)
 	previewURLFn    func(string, int) string
 }
@@ -714,6 +738,13 @@ func (f *fakeClient) UpdateSandbox(ctx context.Context, id string, req canaryapi
 		return nil
 	}
 	return f.updateSandboxFn(ctx, id, req)
+}
+
+func (f *fakeClient) WriteFile(ctx context.Context, sandboxID, accessToken, path string, content []byte) error {
+	if f.writeFileFn == nil {
+		return nil
+	}
+	return f.writeFileFn(ctx, sandboxID, accessToken, path, content)
 }
 
 func (f *fakeClient) Exec(ctx context.Context, sandboxID, accessToken string, req canaryapi.ExecRequest) (canaryapi.ExecResult, error) {

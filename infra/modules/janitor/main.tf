@@ -144,30 +144,45 @@ resource "google_cloud_run_v2_job" "janitor" {
   }
 }
 resource "google_monitoring_alert_policy" "janitor_failure_stale_resources" {
-  count                 = var.create_alerts ? 1 : 0
+  count                 = var.create_alerts && var.enable_alerts ? 1 : 0
   project               = var.project_id
   display_name          = "API Canary Janitor ${var.target_name}: stale resources"
   combiner              = "OR"
   enabled               = true
   notification_channels = var.notification_channel_ids
 
+  lifecycle {
+    precondition {
+      condition     = !var.create_alerts || length(var.notification_channel_ids) > 0
+      error_message = "notification_channel_ids must be set when create_alerts is enabled"
+    }
+  }
+
   conditions {
     display_name = "Janitor observed stale resources"
     condition_prometheus_query_language {
-      query    = "max_over_time(superserve_canary_orphan_resources{target=\"${var.target_name}\"}[24h]) > 0"
-      duration = "0s"
+      query                     = "max_over_time(superserve_canary_orphan_resources{target=\"${var.target_name}\"}[24h]) > 0"
+      duration                  = "0s"
+      disable_metric_validation = true
     }
   }
 
   user_labels = local.labels
 }
 resource "google_monitoring_alert_policy" "janitor_failure_24hours" {
-  count                 = var.create_alerts ? 1 : 0
+  count                 = var.create_alerts && var.enable_alerts ? 1 : 0
   project               = var.project_id
   display_name          = "API Canary Janitor ${var.target_name}: failed"
   combiner              = "OR"
   enabled               = true
   notification_channels = var.notification_channel_ids
+
+  lifecycle {
+    precondition {
+      condition     = !var.create_alerts || length(var.notification_channel_ids) > 0
+      error_message = "notification_channel_ids must be set when create_alerts is enabled"
+    }
+  }
 
   conditions {
     display_name = "Janitor failures in 24h"

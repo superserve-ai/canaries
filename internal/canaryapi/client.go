@@ -164,6 +164,32 @@ func (c *Client) Exec(ctx context.Context, sandboxID, accessToken string, req Ex
 	return out, nil
 }
 
+func (c *Client) WriteFile(ctx context.Context, sandboxID, accessToken, path string, content []byte) error {
+	target, err := url.Parse(c.baseURL + "/files")
+	if err != nil {
+		return err
+	}
+	values := target.Query()
+	values.Set("path", path)
+	target.RawQuery = values.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target.String(), bytes.NewReader(content))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+	req.Header.Set("X-Access-Token", accessToken)
+	req.Header.Set("X-Superserve-Sandbox-Id", sandboxID)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if err := requireStatus(http.MethodPost, "/files", resp, http.StatusOK, http.StatusCreated); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (c *Client) PreviewURL(sandboxID string, port int) string {
 	return fmt.Sprintf("https://%d-%s.%s", port, sandboxID, c.previewDomain)
 }

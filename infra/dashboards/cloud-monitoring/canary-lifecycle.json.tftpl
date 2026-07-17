@@ -102,7 +102,7 @@ ${jsonencode({
             scorecard = {
               timeSeriesQuery = {
                 prometheusQuery = format(
-                  "(time() - max_over_time(superserve_canary_last_success_timestamp_seconds{environment=%q,region=%q,target=%q,scenario=\"lifecycle\",result=\"success\"}[24h])) or vector(999999)",
+                  "(time() - max_over_time(superserve_canary_last_success_timestamp_seconds{environment=%q,region=%q,target=%q,scenario=\"lifecycle\",result=\"success\"}[24h]))",
                   environment,
                   target.region,
                   target.target
@@ -232,7 +232,7 @@ ${jsonencode({
             scorecard = {
               timeSeriesQuery = {
                 prometheusQuery = format(
-                  "(time() - max_over_time(superserve_canary_last_completed_timestamp_seconds{environment=%q,region=%q,target=%q,scenario=\"lifecycle\"}[24h])) or vector(999999)",
+                  "(time() - max_over_time(superserve_canary_last_completed_timestamp_seconds{environment=%q,region=%q,target=%q,scenario=\"lifecycle\"}[24h]))",
                   environment,
                   target.region,
                   target.target
@@ -275,7 +275,6 @@ ${jsonencode({
                   )
                 }
                 plotType = "LINE"
-                legendTemplate = "{{target}}"
               }
             ]
           }
@@ -292,7 +291,6 @@ ${jsonencode({
                   )
                 }
                 plotType = "LINE"
-                legendTemplate = "{{target}}"
               }
             ]
           }
@@ -310,7 +308,6 @@ ${jsonencode({
                   )
                 }
                 plotType = "LINE"
-                legendTemplate = "{{target}}"
               }
             ]
           }
@@ -333,7 +330,7 @@ ${jsonencode({
                   )
                 }
                 plotType = "LINE"
-                legendTemplate = "{{target}} p50"
+                legendTemplate = "p50"
               },
               {
                 timeSeriesQuery = {
@@ -343,7 +340,7 @@ ${jsonencode({
                   )
                 }
                 plotType = "LINE"
-                legendTemplate = "{{target}} p95"
+                legendTemplate = "p95"
               },
               {
                 timeSeriesQuery = {
@@ -353,7 +350,7 @@ ${jsonencode({
                   )
                 }
                 plotType = "LINE"
-                legendTemplate = "{{target}} p99"
+                legendTemplate = "p99"
               }
             ]
           }
@@ -370,7 +367,7 @@ ${jsonencode({
                   )
                 }
                 plotType = "LINE"
-                legendTemplate = "{{target}} p50"
+                legendTemplate = "p50"
               },
               {
                 timeSeriesQuery = {
@@ -380,7 +377,7 @@ ${jsonencode({
                   )
                 }
                 plotType = "LINE"
-                legendTemplate = "{{target}} p95"
+                legendTemplate = "p95"
               },
               {
                 timeSeriesQuery = {
@@ -390,7 +387,7 @@ ${jsonencode({
                   )
                 }
                 plotType = "LINE"
-                legendTemplate = "{{target}} p99"
+                legendTemplate = "p99"
               }
             ]
           }
@@ -407,7 +404,7 @@ ${jsonencode({
                   )
                 }
                 plotType = "LINE"
-                legendTemplate = "{{target}} p50"
+                legendTemplate = "p50"
               },
               {
                 timeSeriesQuery = {
@@ -417,7 +414,7 @@ ${jsonencode({
                   )
                 }
                 plotType = "LINE"
-                legendTemplate = "{{target}} p95"
+                legendTemplate = "p95"
               },
               {
                 timeSeriesQuery = {
@@ -427,7 +424,7 @@ ${jsonencode({
                   )
                 }
                 plotType = "LINE"
-                legendTemplate = "{{target}} p99"
+                legendTemplate = "p99"
               }
             ]
           }
@@ -444,7 +441,7 @@ ${jsonencode({
                   )
                 }
                 plotType = "LINE"
-                legendTemplate = "{{target}} p50"
+                legendTemplate = "p50"
               },
               {
                 timeSeriesQuery = {
@@ -454,7 +451,7 @@ ${jsonencode({
                   )
                 }
                 plotType = "LINE"
-                legendTemplate = "{{target}} p95"
+                legendTemplate = "p95"
               },
               {
                 timeSeriesQuery = {
@@ -464,7 +461,7 @@ ${jsonencode({
                   )
                 }
                 plotType = "LINE"
-                legendTemplate = "{{target}} p99"
+                legendTemplate = "p99"
               }
             ]
           }
@@ -481,7 +478,7 @@ ${jsonencode({
                   )
                 }
                 plotType = "LINE"
-                legendTemplate = "{{target}} p50"
+                legendTemplate = "p50"
               },
               {
                 timeSeriesQuery = {
@@ -491,7 +488,7 @@ ${jsonencode({
                   )
                 }
                 plotType = "LINE"
-                legendTemplate = "{{target}} p95"
+                legendTemplate = "p95"
               },
               {
                 timeSeriesQuery = {
@@ -501,7 +498,7 @@ ${jsonencode({
                   )
                 }
                 plotType = "LINE"
-                legendTemplate = "{{target}} p99"
+                legendTemplate = "p99"
               }
             ]
           }
@@ -518,7 +515,7 @@ ${jsonencode({
                   )
                 }
                 plotType = "LINE"
-                legendTemplate = "{{target}} p50"
+                legendTemplate = "p50"
               },
               {
                 timeSeriesQuery = {
@@ -528,7 +525,7 @@ ${jsonencode({
                   )
                 }
                 plotType = "LINE"
-                legendTemplate = "{{target}} p95"
+                legendTemplate = "p95"
               },
               {
                 timeSeriesQuery = {
@@ -538,7 +535,7 @@ ${jsonencode({
                   )
                 }
                 plotType = "LINE"
-                legendTemplate = "{{target}} p99"
+                legendTemplate = "p99"
               }
             ]
           }
@@ -555,7 +552,7 @@ ${jsonencode({
                   )
                 }
                 plotType = "LINE"
-                legendTemplate = "{{target}} p50"
+                legendTemplate = "p50"
               },
               {
                 timeSeriesQuery = {
@@ -565,7 +562,7 @@ ${jsonencode({
                   )
                 }
                 plotType = "LINE"
-                legendTemplate = "{{target}} p95"
+                legendTemplate = "p95"
               },
               {
                 timeSeriesQuery = {
@@ -575,7 +572,7 @@ ${jsonencode({
                   )
                 }
                 plotType = "LINE"
-                legendTemplate = "{{target}} p99"
+                legendTemplate = "p99"
               }
             ]
           }
@@ -592,7 +589,7 @@ ${jsonencode({
                   )
                 }
                 plotType = "LINE"
-                legendTemplate = "{{target}} p50"
+                legendTemplate = "p50"
               },
               {
                 timeSeriesQuery = {
@@ -602,7 +599,7 @@ ${jsonencode({
                   )
                 }
                 plotType = "LINE"
-                legendTemplate = "{{target}} p95"
+                legendTemplate = "p95"
               },
               {
                 timeSeriesQuery = {
@@ -612,7 +609,7 @@ ${jsonencode({
                   )
                 }
                 plotType = "LINE"
-                legendTemplate = "{{target}} p99"
+                legendTemplate = "p99"
               }
             ]
           }
@@ -629,7 +626,7 @@ ${jsonencode({
                   )
                 }
                 plotType = "LINE"
-                legendTemplate = "{{target}} p50"
+                legendTemplate = "p50"
               },
               {
                 timeSeriesQuery = {
@@ -639,7 +636,7 @@ ${jsonencode({
                   )
                 }
                 plotType = "LINE"
-                legendTemplate = "{{target}} p95"
+                legendTemplate = "p95"
               },
               {
                 timeSeriesQuery = {
@@ -649,7 +646,7 @@ ${jsonencode({
                   )
                 }
                 plotType = "LINE"
-                legendTemplate = "{{target}} p99"
+                legendTemplate = "p99"
               }
             ]
           }
@@ -672,7 +669,6 @@ ${jsonencode({
                   )
                 }
                 plotType = "LINE"
-                legendTemplate = "{{target}} {{step}}"
               }
             ]
           }

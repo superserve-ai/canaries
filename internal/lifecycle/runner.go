@@ -59,6 +59,7 @@ type Client interface {
 	ResumeSandbox(context.Context, string) (canaryapi.ResumeResponse, error)
 	DeleteSandbox(context.Context, string) error
 	UpdateSandbox(context.Context, string, canaryapi.UpdateSandboxRequest) error
+	WriteFile(context.Context, string, string, string, []byte) error
 	Exec(context.Context, string, string, canaryapi.ExecRequest) (canaryapi.ExecResult, error)
 	PreviewURL(string, int) string
 }
@@ -145,7 +146,13 @@ func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) 
 
 	diskToken := "disk-" + uuid.NewString()
 	memoryToken := "mem-" + uuid.NewString()
-	backgroundCmd := fmt.Sprintf("sh -lc 'printf %%s %q >/tmp/canary-token && nohup python3 -c \"import time; token=%q; open(\\\"/tmp/canary-mem\\\",\\\"w\\\").write(token); time.sleep(3600)\" >/tmp/canary-bg.log 2>&1 & echo started'", diskToken, memoryToken)
+	if err := r.writeSandboxFile(ctx, sb.ID, sb.AccessToken, "/tmp/canary-token", []byte(diskToken)); err != nil {
+		res.Err = fmt.Errorf("seeding canary token: %w", err)
+		res.FailedStep = "seed_canary_token"
+		return res
+	}
+
+	backgroundCmd := fmt.Sprintf("sh -lc 'nohup python3 -c \"import time; time.sleep(3600)\" %q >/tmp/canary-bg.log 2>&1 & echo started'", memoryToken)
 	if _, err := r.execStep(ctx, sb.ID, sb.AccessToken, "initial_command", backgroundCmd); err != nil {
 		res.Err = fmt.Errorf("priming sandbox: %w", err)
 		res.FailedStep = "initial_command"
@@ -189,14 +196,14 @@ func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) 
 		return res
 	}
 
-	verifyDiskCmd := fmt.Sprintf("sh -lc 'CANARY_DISK_TOKEN=%q /tmp/verification-utilities/verify_disk.sh'", diskToken)
+	verifyDiskCmd := fmt.Sprintf("sh -lc 'CANARY_DISK_TOKEN=%q sh /tmp/verification-utilities/verify_disk.sh'", diskToken)
 	if _, err := r.execStep(ctx, sb.ID, resumeResp.AccessToken, "verify_disk", verifyDiskCmd); err != nil {
 		res.Err = fmt.Errorf("verifying disk state: %w", err)
 		res.FailedStep = "verify_disk"
 		return res
 	}
 
-	verifyMemoryCmd := fmt.Sprintf("sh -lc 'CANARY_MEMORY_TOKEN=%q /tmp/verification-utilities/verify_memory.py'", memoryToken)
+	verifyMemoryCmd := fmt.Sprintf("sh -lc 'CANARY_MEMORY_TOKEN=%q python3 /tmp/verification-utilities/verify_memory.py'", memoryToken)
 	if _, err := r.execStep(ctx, sb.ID, resumeResp.AccessToken, "verify_memory", verifyMemoryCmd); err != nil {
 		res.Err = fmt.Errorf("verifying memory state: %w", err)
 		res.FailedStep = "verify_memory"
@@ -204,7 +211,13 @@ func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) 
 	}
 
 	serveToken := "preview-" + runID
-	serveCmd := fmt.Sprintf("sh -lc 'mkdir -p /tmp/canary-preview && printf %%s %q >/tmp/canary-preview/index.html && nohup python3 -m http.server %d --directory /tmp/canary-preview >/tmp/canary-preview.log 2>&1 & sleep 1 && echo preview_started'", serveToken, r.Config.PreviewPort)
+	if err := r.writeSandboxFile(ctx, sb.ID, resumeResp.AccessToken, "/tmp/canary-preview/index.html", []byte(serveToken)); err != nil {
+		res.Err = fmt.Errorf("seeding preview page: %w", err)
+		res.FailedStep = "seed_preview_page"
+		return res
+	}
+
+	serveCmd := fmt.Sprintf("sh -lc 'mkdir -p /tmp/canary-preview && nohup python3 -m http.server %d --directory /tmp/canary-preview >/tmp/canary-preview.log 2>&1 & sleep 1 && echo preview_started'", r.Config.PreviewPort)
 	if _, err := r.execStep(ctx, sb.ID, resumeResp.AccessToken, "start_http_server", serveCmd); err != nil {
 		res.Err = fmt.Errorf("starting preview server: %w", err)
 		res.FailedStep = "start_http_server"
@@ -221,6 +234,13 @@ func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) 
 	}
 
 	return res
+}
+
+func (r Runner) writeSandboxFile(ctx context.Context, sandboxID, accessToken, path string, content []byte) error {
+	if err := r.Client.WriteFile(ctx, sandboxID, accessToken, path, content); err != nil {
+		return fmt.Errorf("writing %s: %w", path, err)
+	}
+	return nil
 }
 
 func (r Runner) execStep(ctx context.Context, sandboxID, accessToken, step, command string) (canaryapi.ExecResult, error) {
