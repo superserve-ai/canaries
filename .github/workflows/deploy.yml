@@ -32,6 +32,10 @@ jobs:
     runs-on: ubuntu-latest
     environment: staging
     needs: build
+    env:
+      # GitHub Environment variable names are uppercase; Terraform's input
+      # variable name is lowercase and must match the TF_VAR_ convention.
+      TF_VAR_notification_channel_ids: ${{ vars.TF_VAR_NOTIFICATION_CHANNEL_IDS }}
     permissions:
       contents: read
       id-token: write
@@ -42,7 +46,7 @@ jobs:
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ vars.GCP_SERVICE_ACCOUNT_DEV }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
 
       - uses: google-github-actions/setup-gcloud@v2
 
@@ -85,6 +89,10 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
     needs: [build, deploy-staging]
+    env:
+      # GitHub Environment variable names are uppercase; Terraform's input
+      # variable name is lowercase and must match the TF_VAR_ convention.
+      TF_VAR_notification_channel_ids: ${{ vars.TF_VAR_NOTIFICATION_CHANNEL_IDS }}
     permissions:
       contents: read
       id-token: write
@@ -95,7 +103,7 @@ jobs:
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ vars.GCP_SERVICE_ACCOUNT_PROD }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
 
       - uses: google-github-actions/setup-gcloud@v2
 
