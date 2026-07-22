@@ -209,8 +209,9 @@ resource "google_monitoring_alert_policy" "two_failures" {
     display_name = "Two failed lifecycle runs in 11m without success"
 
     condition_prometheus_query_language {
-      query    = "increase(superserve_canary_run_total{target=\"${var.target_name}\",scenario=\"lifecycle\",result=\"failure\"}[11m]) >= 2 and increase(superserve_canary_run_total{target=\"${var.target_name}\",scenario=\"lifecycle\",result=\"success\"}[11m]) == 0"
-      duration = "0s"
+      query                     = "increase(superserve_canary_run_total{target=\"${var.target_name}\",scenario=\"lifecycle\",result=\"failure\"}[11m]) >= 2 and increase(superserve_canary_run_total{target=\"${var.target_name}\",scenario=\"lifecycle\",result=\"success\"}[11m]) == 0"
+      duration                  = "0s"
+      disable_metric_validation = true
     }
   }
 
@@ -237,8 +238,9 @@ resource "google_monitoring_alert_policy" "missing_runs" {
     display_name = "No lifecycle success or failure metric in 15m"
 
     condition_prometheus_query_language {
-      query    = "increase(superserve_canary_run_total{target=\"${var.target_name}\",scenario=\"lifecycle\",result=~\"success|failure\"}[15m]) == 0"
-      duration = "0s"
+      query                     = "increase(superserve_canary_run_total{target=\"${var.target_name}\",scenario=\"lifecycle\",result=~\"success|failure\"}[15m]) == 0"
+      duration                  = "0s"
+      disable_metric_validation = true
     }
   }
 

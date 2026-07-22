@@ -188,8 +188,9 @@ resource "google_monitoring_alert_policy" "janitor_failure_24hours" {
   conditions {
     display_name = "Janitor failures in 24h"
     condition_prometheus_query_language {
-      query    = "increase(superserve_canary_run_total{target=\"${var.target_name}\",scenario=\"janitor\",result=\"failure\"}[24h]) > 0"
-      duration = "0s"
+      query                     = "increase(superserve_canary_run_total{target=\"${var.target_name}\",scenario=\"janitor\",result=\"failure\"}[24h]) > 0"
+      duration                  = "0s"
+      disable_metric_validation = true
     }
   }
 
