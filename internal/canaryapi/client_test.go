@@ -77,3 +77,46 @@ func TestUnexpectedStatusIncludesMethodAndPath(t *testing.T) {
 		t.Fatalf("expected status in error, got %q", err.Error())
 	}
 }
+
+func TestWriteFileUsesSandboxTokenAndPathQuery(t *testing.T) {
+	t.Parallel()
+
+	httpClient := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Method != http.MethodPost {
+			return nil, fmt.Errorf("unexpected method %s", req.Method)
+		}
+		if req.URL.Path != "/files" {
+			return nil, fmt.Errorf("unexpected path %s", req.URL.Path)
+		}
+		if got := req.URL.Query().Get("path"); got != "/tmp/verification-utilities/verify_disk.sh" {
+			return nil, fmt.Errorf("unexpected query path %q", got)
+		}
+		if got := req.Header.Get("X-Access-Token"); got != "sandbox-token" {
+			return nil, fmt.Errorf("unexpected access token %q", got)
+		}
+		if got := req.Header.Get("X-Superserve-Sandbox-Id"); got != "sb-123" {
+			return nil, fmt.Errorf("unexpected sandbox id %q", got)
+		}
+		if got := req.Header.Get("Content-Type"); got != "application/octet-stream" {
+			return nil, fmt.Errorf("unexpected content type %q", got)
+		}
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
+		if string(body) != "echo hi" {
+			return nil, fmt.Errorf("unexpected body %q", string(body))
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"path":"/tmp/verification-utilities/verify_disk.sh"}`)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})}
+	client := NewClient(httpClient, "https://api.example", "api-key", "preview.example")
+
+	if err := client.WriteFile(context.Background(), "sb-123", "sandbox-token", "/tmp/verification-utilities/verify_disk.sh", []byte("echo hi")); err != nil {
+		t.Fatalf("WriteFile returned %v", err)
+	}
+}

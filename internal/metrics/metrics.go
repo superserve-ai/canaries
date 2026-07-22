@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/url"
 	"sync/atomic"
 	"time"
 
@@ -13,6 +15,8 @@ import (
 	"go.opentelemetry.io/otel/exporters/stdout/stdoutmetric"
 	"go.opentelemetry.io/otel/metric"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"google.golang.org/api/option"
+	"google.golang.org/api/transport"
 
 	"github.com/superserve-ai/canaries/internal/config"
 )
@@ -78,10 +82,15 @@ func NewProvider(ctx context.Context, cfg config.Config) (Provider, func(context
 		if cfg.OTELExporterOTLPMetricsEndpoint == "" {
 			return nil, nil, errors.New("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT is required when CANARY_METRICS_EXPORTER=otlp")
 		}
+		httpClient, err := otlpHTTPClient(ctx, cfg.OTELExporterOTLPMetricsEndpoint)
+		if err != nil {
+			return nil, nil, err
+		}
 		exporter, err := otlpmetrichttp.New(
 			ctx,
 			otlpmetrichttp.WithEndpointURL(cfg.OTELExporterOTLPMetricsEndpoint),
 			otlpmetrichttp.WithURLPath("/v1/metrics"),
+			otlpmetrichttp.WithHTTPClient(httpClient),
 		)
 		if err != nil {
 			return nil, nil, err
@@ -90,6 +99,21 @@ func NewProvider(ctx context.Context, cfg config.Config) (Provider, func(context
 	default:
 		return nil, nil, fmt.Errorf("unsupported metrics exporter %q", cfg.MetricsExporter)
 	}
+}
+
+func otlpHTTPClient(ctx context.Context, endpoint string) (*http.Client, error) {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("invalid OTLP endpoint %q: %w", endpoint, err)
+	}
+	if u.Host != "telemetry.googleapis.com" {
+		return http.DefaultClient, nil
+	}
+	client, _, err := transport.NewHTTPClient(ctx, option.WithScopes("https://www.googleapis.com/auth/cloud-platform"))
+	if err != nil {
+		return nil, err
+	}
+	return client, nil
 }
 
 func newSDKProvider(_ context.Context, exporter sdkmetric.Exporter) (Provider, func(context.Context) error, error) {

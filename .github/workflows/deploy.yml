@@ -35,6 +35,11 @@ jobs:
     permissions:
       contents: read
       id-token: write
+    env:
+      # GitHub Environment variable names are uppercase; Terraform's input
+      # variable name is lowercase and must match the TF_VAR_ convention.
+      TF_VAR_notification_channel_ids: ${{ vars.TF_VAR_NOTIFICATION_CHANNEL_IDS }}
+      TF_VAR_deployment_service_account_email: ${{ vars.GCP_SERVICE_ACCOUNT }}
     steps:
       - uses: actions/checkout@v4
 
@@ -42,9 +47,31 @@ jobs:
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ vars.GCP_SERVICE_ACCOUNT_DEV }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
 
       - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Validate Terraform alerting inputs
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${TF_VAR_deployment_service_account_email:-}" ]]; then
+            echo "TF_VAR_deployment_service_account_email must be set"
+            exit 1
+          fi
+
+          case "${TF_VAR_notification_channel_ids:-}" in
+            "")
+              echo "TF_VAR_NOTIFICATION_CHANNEL_IDS must be set as a Terraform list literal, for example [\"projects/.../notificationChannels/123456789\"]"
+              exit 1
+              ;;
+            \[*\])
+              ;;
+            *)
+              echo "TF_VAR_NOTIFICATION_CHANNEL_IDS must be a Terraform list literal, not a plain string"
+              exit 1
+              ;;
+          esac
 
       - name: Download prebuilt canary image
         uses: actions/download-artifact@v4
@@ -88,6 +115,11 @@ jobs:
     permissions:
       contents: read
       id-token: write
+    env:
+      # GitHub Environment variable names are uppercase; Terraform's input
+      # variable name is lowercase and must match the TF_VAR_ convention.
+      TF_VAR_notification_channel_ids: ${{ vars.TF_VAR_NOTIFICATION_CHANNEL_IDS }}
+      TF_VAR_deployment_service_account_email: ${{ vars.GCP_SERVICE_ACCOUNT }}
     steps:
       - uses: actions/checkout@v4
 
@@ -95,9 +127,31 @@ jobs:
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ vars.GCP_SERVICE_ACCOUNT_PROD }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
 
       - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Validate Terraform alerting inputs
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${TF_VAR_deployment_service_account_email:-}" ]]; then
+            echo "TF_VAR_deployment_service_account_email must be set"
+            exit 1
+          fi
+
+          case "${TF_VAR_notification_channel_ids:-}" in
+            "")
+              echo "TF_VAR_NOTIFICATION_CHANNEL_IDS must be set as a Terraform list literal, for example [\"projects/.../notificationChannels/123456789\"]"
+              exit 1
+              ;;
+            \[*\])
+              ;;
+            *)
+              echo "TF_VAR_NOTIFICATION_CHANNEL_IDS must be a Terraform list literal, not a plain string"
+              exit 1
+              ;;
+          esac
 
       - name: Download prebuilt canary image
         uses: actions/download-artifact@v4
@@ -133,5 +187,13 @@ jobs:
         run: |
           set -euo pipefail
           cd infra/envs/production
+          terraform init -input=false
+          terraform apply             -input=false             -auto-approve             -var="image=${{ steps.image.outputs.image }}"
+
+      # East4 is isolated in its own root because it does not use VPC access.
+      - name: Apply production east
+        run: |
+          set -euo pipefail
+          cd infra/envs/production/us-east4
           terraform init -input=false
           terraform apply             -input=false             -auto-approve             -var="image=${{ steps.image.outputs.image }}"

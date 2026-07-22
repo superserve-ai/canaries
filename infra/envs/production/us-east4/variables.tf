@@ -1,11 +1,11 @@
 variable "project_id" {
   type    = string
-  default = "rayai-dev"
+  default = "rayai-prod"
 }
 
 variable "job_region" {
   type    = string
-  default = "us-central1"
+  default = "us-east4"
 }
 
 variable "image" {
@@ -20,6 +20,7 @@ variable "notification_channel_ids" {
   type    = list(string)
   default = []
 }
+
 variable "create_alerts" {
   description = "Whether to create monitoring alert policies"
   type        = bool

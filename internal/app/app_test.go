@@ -33,12 +33,15 @@ func TestCombineRunAndShutdownError(t *testing.T) {
 		}
 	})
 
-	t.Run("cloud-run success returns shutdown error", func(t *testing.T) {
+	t.Run("cloud-run success ignores shutdown error", func(t *testing.T) {
 		buf.Reset()
 		shutdownErr := errors.New("metrics failed")
 		got := combineRunAndShutdownError(nil, shutdownErr, config.RuntimeCloudRun)
-		if !errors.Is(got, shutdownErr) {
-			t.Fatalf("got %v, want shutdown error", got)
+		if got != nil {
+			t.Fatalf("got %v, want nil", got)
+		}
+		if !strings.Contains(buf.String(), "metrics shutdown failed") {
+			t.Fatalf("expected shutdown log, got %q", buf.String())
 		}
 	})
 

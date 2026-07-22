@@ -5,6 +5,7 @@ This repository deploys independent scheduled API lifecycle canaries for Superse
 Current targets:
 - `staging/us-central1`
 - `production/us-central1`
+- `production/us-east4`
 - `production/us-west2`
 
 Each target has its own:
@@ -46,7 +47,8 @@ Discovered from `sandbox`:
 | Target | Project | Region | API base URL | Preview domain |
 | --- | --- | --- | --- | --- |
 | staging | `rayai-dev` | `us-central1` | `https://api-staging.superserve.ai` | `staging-sandbox.superserve.ai` |
-| production central | `rayai-prod` | `us-central1` | `https://usc-api.superserve.ai` | `usc-sandbox.superserve.ai` |
+| production central | `rayai-prod` | `us-central1` | `https://api.superserve.ai` | `sandbox.superserve.ai` |
+| production east | `rayai-prod` | `us-east4` | `https://api.superserve.ai` | `use-sandbox.superserve.ai` |
 | production west | `rayai-prod` | `us-west2` | `https://usw-api.superserve.ai` | `usw-sandbox.superserve.ai` |
 
 ## Required Secrets
@@ -56,6 +58,7 @@ Terraform creates secret containers only. Populate versions manually after apply
 Expected secret names:
 - `api-canary-key-staging-us-central1`
 - `api-canary-key-production-us-central1`
+- `api-canary-key-production-us-east4`
 - `api-canary-key-production-us-west2`
 
 Each secret value must be a customer API key for a dedicated canary account or team.
@@ -238,6 +241,56 @@ Use `gcloud run jobs executions list` and `gcloud run jobs executions describe` 
 
 To manually clear retained sandboxes, rerun the janitor job after the retention TTL has elapsed.
 
+## Manual Production Runbook
+
+Production lifecycle canaries are scheduled automatically after the production Terraform roots have been applied and the production API key secrets have been populated.
+
+The east production region uses the public Google Telemetry API instead of the private collector path, so it does not need VPC access.
+
+Checklist:
+1. Confirm the production lifecycle and janitor jobs were created for all three regions.
+2. Populate the production Secret Manager secret versions with the canary API keys.
+3. Verify the scheduled lifecycle executions start after the secrets are populated.
+4. Inspect the job logs for the created run ID, sandbox ID, and cleanup outcome.
+5. If a run fails or leaves a resource behind, execute the matching janitor job.
+6. Retained sandboxes carry `retained_for_debug=true`, `failed_step`, `retained_at`, and `expires_at` metadata.
+
+Exact production job commands:
+
+```bash
+gcloud run jobs execute api-canary-production-us-central1 \
+  --project rayai-prod \
+  --region us-central1 \
+  --wait
+
+gcloud run jobs execute api-canary-janitor-production-us-central1 \
+  --project rayai-prod \
+  --region us-central1 \
+  --wait
+
+gcloud run jobs execute api-canary-production-us-east4 \
+  --project rayai-prod \
+  --region us-east4 \
+  --wait
+
+gcloud run jobs execute api-canary-janitor-production-us-east4 \
+  --project rayai-prod \
+  --region us-east4 \
+  --wait
+
+gcloud run jobs execute api-canary-production-us-west2 \
+  --project rayai-prod \
+  --region us-west2 \
+  --wait
+
+gcloud run jobs execute api-canary-janitor-production-us-west2 \
+  --project rayai-prod \
+  --region us-west2 \
+  --wait
+```
+
+Use `gcloud run jobs executions list` and `gcloud run jobs executions describe` to inspect status and logs after each run.
+
 ## Container Build
 
 Build locally:
@@ -251,23 +304,35 @@ docker build -t api-canary:local .
 Terraform roots:
 - [infra/envs/staging/us-central1](/home/lando/superserve-ai/canaries/infra/envs/staging/us-central1/main.tf:1)
 - [infra/envs/production](/home/lando/superserve-ai/canaries/infra/envs/production/main.tf:1)
+- [infra/envs/production/us-east4](/home/lando/superserve-ai/canaries/infra/envs/production/us-east4/main.tf:1)
 
 Backends follow the discovered sandbox convention:
 - staging bucket: `superserve-terraform-state`, prefix `canaries/staging/us-central1`
 - production bucket: `superserve-terraform-state-prod`, prefix `canaries/production`
+- production east bucket prefix: `canaries/production/us-east4`
 
 Apply order:
 1. apply staging
 2. populate staging secret
 3. manually run and validate staging job
 4. apply production
-5. populate production secrets
+5. apply production/us-east4
+6. populate production secrets before the first scheduled run window
+7. verify all production jobs run successfully after scheduling starts
 
 Cloud Run jobs set `CANARY_RUNTIME=cloud-run`, `CANARY_METRICS_EXPORTER=otlp`, and `CANARY_LOCK_BACKEND=gcs` explicitly, and pass the OTLP endpoint through Terraform locals instead of relying on application defaults. The deployment uses the standard `OTEL_EXPORTER_OTLP_ENDPOINT` path that the sandbox stack already uses.
+
+Production east4 points `OTEL_EXPORTER_OTLP_ENDPOINT` at `https://telemetry.googleapis.com` and grants the runtime service accounts `roles/monitoring.metricWriter` plus `roles/serviceusage.serviceUsageConsumer` so metrics can be exported without VPC connectivity.
 
 ## Metrics And Alerts
 
 Metrics are emitted over OTLP HTTP and intended to feed the existing GMP path.
+
+Alerting behavior:
+- staging enables the full canary alert set
+- production only creates the consecutive-failure lifecycle alert
+- the GitHub deploy service account must be granted the alert-management IAM roles in Terraform; the deploy workflow passes its service account email to Terraform as `deployment_service_account_email`
+- notification channel IDs are not managed here; pass the existing GMP/Slack channel resource names as a Terraform list literal via `TF_VAR_NOTIFICATION_CHANNEL_IDS`, for example `["projects/rayai-prod/notificationChannels/123456789"]`
 
 Runtime selectors:
 - `CANARY_RUNTIME=local`

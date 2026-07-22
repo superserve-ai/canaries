@@ -4,6 +4,12 @@ locals {
     managed_by  = "terraform"
   }
 
+  deployment_alerting_roles = toset([
+    "roles/logging.configWriter",
+    "roles/monitoring.alertPolicyEditor",
+    "roles/monitoring.notificationChannelEditor",
+  ])
+
   otlp_endpoints = {
     production-us-central1 = "http://10.0.0.3:4318"
     production-us-west2    = "http://10.1.0.2:4318"
@@ -16,12 +22,12 @@ locals {
     production-us-central1 = {
       target_region       = "us-central1"
       job_region          = "us-central1"
-      api_base_url        = "https://usc-api.superserve.ai"
-      preview_domain      = "usc-sandbox.superserve.ai"
+      api_base_url        = "https://api.superserve.ai"
+      preview_domain      = "sandbox.superserve.ai"
       api_key_secret_name = "api-canary-key-production-us-central1"
       otlp_endpoint       = local.otlp_endpoints.production-us-central1
       vpc_connector       = "projects/rayai-prod/locations/us-central1/connectors/superserve-prod-conn"
-      vpc_egress          = "ALL_TRAFFIC"
+      vpc_egress          = "PRIVATE_RANGES_ONLY"
     }
     production-us-west2 = {
       target_region       = "us-west2"
@@ -37,36 +43,15 @@ locals {
     }
   }
 
-  dashboard_targets = [
-    for name, cfg in local.lifecycle_targets : {
-      target = name
-      region = cfg.target_region
-    }
-  ]
-
   dashboards = {
-    canary_lifecycle = {
-      display_name = "production canary lifecycle"
-      definition = templatefile("${path.module}/../../dashboards/cloud-monitoring/canary-lifecycle.json.tftpl", {
-        project_id  = var.project_id
-        environment = local.labels.environment
-        targets     = local.dashboard_targets
-      })
-    }
-    canary_janitor = {
-      display_name = "production canary janitor"
-      definition = templatefile("${path.module}/../../dashboards/cloud-monitoring/canary-janitor.json.tftpl", {
-        project_id  = var.project_id
-        environment = local.labels.environment
-        targets     = local.dashboard_targets
-      })
-    }
-    canary_cleanup = {
-      display_name = "production canary cleanup"
-      definition = templatefile("${path.module}/../../dashboards/cloud-monitoring/canary-cleanup.json.tftpl", {
-        project_id  = var.project_id
-        environment = local.labels.environment
-        targets     = local.dashboard_targets
+    canary = {
+      display_name = "production canary dashboard"
+      definition = templatefile(abspath("${path.module}/../../dashboards/cloud-monitoring/canary-overview.json.tftpl"), {
+        project_id               = var.project_id
+        environment              = local.labels.environment
+        default_region           = "us-central1"
+        regions                  = ["us-central1", "us-west2", "us-east4"]
+        janitor_job_name_pattern = "api-canary-janitor-production-.*"
       })
     }
   }
@@ -97,14 +82,16 @@ module "lifecycle" {
   otlp_metrics_endpoint     = each.value.otlp_endpoint
   retain_failed_sandbox     = local.retain_failed_sandbox
   retain_failed_sandbox_ttl = local.retain_failed_sandbox_ttl
-  scheduler_enabled         = false
+  scheduler_enabled         = true
   notification_channel_ids  = var.notification_channel_ids
   labels                    = merge(local.labels, { region = each.value.target_region })
+  create_alerts             = var.create_alerts
   vpc_connector             = try(each.value.vpc_connector, null)
   vpc_egress                = try(each.value.vpc_egress, "ALL_TRAFFIC")
   vpc_network               = try(each.value.vpc_network, null)
   vpc_subnetwork            = try(each.value.vpc_subnetwork, null)
   vpc_tags                  = try(each.value.vpc_tags, [])
+  depends_on                = [google_project_iam_member.deployment_alerting]
 }
 
 module "janitor" {
@@ -125,11 +112,13 @@ module "janitor" {
   retain_failed_sandbox_ttl = local.retain_failed_sandbox_ttl
   notification_channel_ids  = var.notification_channel_ids
   labels                    = merge(local.labels, { region = each.value.target_region })
+  enable_alerts             = false
   vpc_connector             = try(each.value.vpc_connector, null)
   vpc_egress                = try(each.value.vpc_egress, "ALL_TRAFFIC")
   vpc_network               = try(each.value.vpc_network, null)
   vpc_subnetwork            = try(each.value.vpc_subnetwork, null)
   vpc_tags                  = try(each.value.vpc_tags, [])
+  depends_on                = [google_project_iam_member.deployment_alerting]
 }
 
 module "dashboard" {
@@ -137,4 +126,22 @@ module "dashboard" {
 
   project_id = var.project_id
   dashboards = local.dashboards
+}
+
+module "permissions" {
+  for_each = local.lifecycle_targets
+  source   = "../../modules/permissions"
+
+  project_id                              = var.project_id
+  lock_bucket_name                        = google_storage_bucket.locks.name
+  lifecycle_runtime_service_account_email = module.lifecycle[each.key].runtime_service_account_email
+  janitor_runtime_service_account_email   = module.janitor[each.key].runtime_service_account_email
+}
+
+resource "google_project_iam_member" "deployment_alerting" {
+  for_each = local.deployment_alerting_roles
+
+  project = var.project_id
+  role    = each.value
+  member  = "serviceAccount:${var.deployment_service_account_email}"
 }

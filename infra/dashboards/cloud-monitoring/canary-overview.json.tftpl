@@ -1,0 +1,496 @@
+${jsonencode({
+  displayName = "${environment} canary dashboard"
+  dashboardFilters = [
+    {
+      filterType   = "VALUE_ONLY"
+      templateVariable = "region"
+      valueType    = "STRING"
+      stringValue   = default_region
+      stringArray   = {
+        values = regions
+      }
+    }
+  ]
+  gridLayout = {
+    columns = 4
+    widgets = concat(
+      [
+        {
+          text = {
+            content = "# Canary Dashboard\nProject: ${project_id}\n\nEnvironment: ${environment}\n\nUse the `$region` selector in the toolbar to switch regions."
+            format  = "MARKDOWN"
+          }
+        }
+      ],
+      [
+        {
+          text = {
+            content = "## Lifecycle"
+            format  = "MARKDOWN"
+          }
+        },
+        {
+          title = "Last run"
+          scorecard = {
+            timeSeriesQuery = {
+              prometheusQuery = format(
+                "((max by (target) (max_over_time(superserve_canary_last_success_timestamp_seconds{environment=%q,region=~\"$${region}\",scenario=\"lifecycle\",result=\"success\"}[24h])) or label_replace(vector(0), \"target\", \"$${region}\", \"\", \"\")) + 5 >= bool (max by (target) (max_over_time(superserve_canary_last_completed_timestamp_seconds{environment=%q,region=~\"$${region}\",scenario=\"lifecycle\"}[24h])) or label_replace(vector(9999999999), \"target\", \"$${region}\", \"\", \"\")))",
+                environment,
+                environment
+              )
+            }
+            thresholds = [
+              {
+                color = "RED"
+                direction = "BELOW"
+                label = "Failure"
+                value = 0.5
+              }
+            ]
+          }
+        },
+        {
+          title = "End-to-end canary health"
+          xyChart = {
+            chartOptions = {
+              mode = "COLOR"
+            }
+            dataSets = [
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "increase(superserve_canary_run_total{environment=%q,region=~\"$${region}\",scenario=\"lifecycle\",result=\"success\"}[5m])",
+                    environment
+                  )
+                }
+                plotType = "STACKED_BAR"
+                legendTemplate = "Healthy runs"
+              },
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "-1 * increase(superserve_canary_run_total{environment=%q,region=~\"$${region}\",scenario=\"lifecycle\",result=\"failure\"}[5m])",
+                    environment
+                  )
+                }
+                plotType = "STACKED_BAR"
+                legendTemplate = "Failing"
+              }
+            ]
+          }
+        },
+        {
+          title = "Failures in last 15m"
+          scorecard = {
+            timeSeriesQuery = {
+              prometheusQuery = format(
+                "increase(superserve_canary_run_total{environment=%q,region=~\"$${region}\",scenario=\"lifecycle\",result=\"failure\"}[15m]) or vector(0)",
+                environment
+              )
+            }
+            sparkChartView = {
+              sparkChartType = "SPARK_LINE"
+            }
+            thresholds = [
+              {
+                color = "RED"
+                direction = "ABOVE"
+                label = "Any failures"
+                value = 0.5
+              }
+            ]
+          }
+        },
+        {
+          title = "Time since last successful run (s)"
+          scorecard = {
+            timeSeriesQuery = {
+              prometheusQuery = format(
+                "(time() - max_over_time(superserve_canary_last_success_timestamp_seconds{environment=%q,region=~\"$${region}\",scenario=\"lifecycle\",result=\"success\"}[24h]))",
+                environment
+              )
+            }
+            sparkChartView = {
+              sparkChartType = "SPARK_LINE"
+            }
+            thresholds = [
+              {
+                color = "RED"
+                direction = "ABOVE"
+                label = "Stale"
+                value = 720
+              },
+              {
+                color = "YELLOW"
+                direction = "ABOVE"
+                label = "Aging"
+                value = 420
+              }
+            ]
+          }
+        },
+        {
+          title = "Success rate (6h rolling) (%)"
+          scorecard = {
+            timeSeriesQuery = {
+              prometheusQuery = format(
+                "((100 * sum(increase(superserve_canary_run_total{environment=%q,region=~\"$${region}\",scenario=\"lifecycle\",result=\"success\"}[6h])) / clamp_min(sum(increase(superserve_canary_run_total{environment=%q,region=~\"$${region}\",scenario=\"lifecycle\"}[6h])), 0.000001)) or vector(0))",
+                environment,
+                environment
+              )
+            }
+            sparkChartView = {
+              sparkChartType = "SPARK_LINE"
+            }
+            thresholds = [
+              {
+                color = "RED"
+                direction = "BELOW"
+                label = "Below 80%"
+                value = 80
+              },
+              {
+                color = "YELLOW"
+                direction = "BELOW"
+                label = "Below 100%"
+                value = 100
+              }
+            ]
+          }
+        },
+        {
+          title = "Overlap skips"
+          scorecard = {
+            timeSeriesQuery = {
+              prometheusQuery = format(
+                "increase(superserve_canary_overlap_skipped_total{environment=%q,region=~\"$${region}\",scenario=\"lifecycle\"}[24h]) or vector(0)",
+                environment
+              )
+            }
+            sparkChartView = {
+              sparkChartType = "SPARK_LINE"
+            }
+            thresholds = [
+              {
+                color = "YELLOW"
+                direction = "ABOVE"
+                label = "Any skips"
+                value = 0.5
+              }
+            ]
+          }
+        },
+        {
+          title = "Failed runs retained for debugging"
+          scorecard = {
+            timeSeriesQuery = {
+              prometheusQuery = format(
+                "sum(increase(superserve_canary_retained_sandbox_total{environment=%q,region=~\"$${region}\",scenario=\"lifecycle\",result=\"retained\"}[24h])) or vector(0)",
+                environment
+              )
+            }
+            sparkChartView = {
+              sparkChartType = "SPARK_LINE"
+            }
+            thresholds = [
+              {
+                color = environment == "production" ? "RED" : "YELLOW"
+                direction = "ABOVE"
+                label = "Any retained runs"
+                value = 0.5
+              }
+            ]
+          }
+        },
+        {
+          title = "Running executions"
+          scorecard = {
+            timeSeriesQuery = {
+              prometheusQuery = format(
+                "superserve_canary_running_executions{environment=%q,region=~\"$${region}\",scenario=\"lifecycle\"} or vector(0)",
+                environment
+              )
+            }
+          }
+        },
+        {
+          text = {
+            content = "## Scheduler liveness"
+            format  = "MARKDOWN"
+          }
+        },
+        {
+          title = "Last lifecycle completion age (s)"
+          scorecard = {
+            timeSeriesQuery = {
+              prometheusQuery = format(
+                "(time() - max_over_time(superserve_canary_last_completed_timestamp_seconds{environment=%q,region=~\"$${region}\",scenario=\"lifecycle\"}[24h]))",
+                environment
+              )
+            }
+            thresholds = [
+              {
+                color = "RED"
+                direction = "ABOVE"
+                label = "Stale"
+                value = 720
+              },
+              {
+                color = "YELLOW"
+                direction = "ABOVE"
+                label = "Aging"
+                value = 420
+              }
+            ]
+          }
+        }
+      ],
+      [
+        {
+          text = {
+            content = "## Janitor"
+            format  = "MARKDOWN"
+          }
+        },
+        {
+          title = "Current orphaned sandboxes"
+          scorecard = {
+            timeSeriesQuery = {
+              prometheusQuery = format(
+                "superserve_canary_orphan_resources{environment=%q,region=~\"$${region}\",scenario=\"janitor\",result=\"observed\"}",
+                environment
+              )
+            }
+            sparkChartView = {
+              sparkChartType = "SPARK_LINE"
+            }
+          }
+        },
+        {
+          title = "Oldest orphan age (s)"
+          scorecard = {
+            timeSeriesQuery = {
+              prometheusQuery = format(
+                "superserve_canary_oldest_orphan_age_seconds{environment=%q,region=~\"$${region}\",scenario=\"janitor\",result=\"observed\"}",
+                environment
+              )
+            }
+            sparkChartView = {
+              sparkChartType = "SPARK_LINE"
+            }
+          }
+        },
+        {
+          title = "Resources examined"
+          scorecard = {
+            timeSeriesQuery = {
+              prometheusQuery = format(
+                "increase(superserve_canary_janitor_resources_examined_total{environment=%q,region=~\"$${region}\",scenario=\"janitor\",result=\"observed\"}[24h])",
+                environment
+              )
+            }
+            sparkChartView = {
+              sparkChartType = "SPARK_LINE"
+            }
+          }
+        },
+        {
+          title = "Resources deleted"
+          scorecard = {
+            timeSeriesQuery = {
+              prometheusQuery = format(
+                "increase(superserve_canary_janitor_resources_deleted_total{environment=%q,region=~\"$${region}\",scenario=\"janitor\",result=\"observed\"}[24h])",
+                environment
+              )
+            }
+            sparkChartView = {
+              sparkChartType = "SPARK_LINE"
+            }
+          }
+        },
+        {
+          title = "Delete failures"
+          scorecard = {
+            timeSeriesQuery = {
+              prometheusQuery = format(
+                "increase(superserve_canary_janitor_delete_failures_total{environment=%q,region=~\"$${region}\",scenario=\"janitor\",result=\"observed\"}[24h])",
+                environment
+              )
+            }
+            sparkChartView = {
+              sparkChartType = "SPARK_LINE"
+            }
+          }
+        },
+        {
+          title = "Successful janitor runs"
+          scorecard = {
+            timeSeriesQuery = {
+              prometheusQuery = format(
+                "increase(superserve_canary_run_total{environment=%q,region=~\"$${region}\",scenario=\"janitor\",result=\"success\"}[24h])",
+                environment
+              )
+            }
+            sparkChartView = {
+              sparkChartType = "SPARK_LINE"
+            }
+          }
+        },
+        {
+          title = "Failed janitor runs"
+          scorecard = {
+            timeSeriesQuery = {
+              prometheusQuery = format(
+                "increase(superserve_canary_run_total{environment=%q,region=~\"$${region}\",scenario=\"janitor\",result=\"failure\"}[24h])",
+                environment
+              )
+            }
+            sparkChartView = {
+              sparkChartType = "SPARK_LINE"
+            }
+          }
+        },
+        {
+          title = "Last janitor completion age (s)"
+          scorecard = {
+            timeSeriesQuery = {
+              prometheusQuery = format(
+                "time() - max by (target) (superserve_canary_last_completed_timestamp_seconds{environment=%q,region=~\"$${region}\",scenario=\"janitor\"})",
+                environment
+              )
+            }
+            sparkChartView = {
+              sparkChartType = "SPARK_LINE"
+            }
+          }
+        },
+        {
+          title = "Last successful janitor run age (s)"
+          scorecard = {
+            timeSeriesQuery = {
+              prometheusQuery = format(
+                "time() - max by (target) (superserve_canary_last_success_timestamp_seconds{environment=%q,region=~\"$${region}\",scenario=\"janitor\",result=\"success\"})",
+                environment
+              )
+            }
+            sparkChartView = {
+              sparkChartType = "SPARK_LINE"
+            }
+          }
+        },
+        {
+          title = "Janitor Cloud Run completions (15m)"
+          scorecard = {
+            timeSeriesQuery = {
+              prometheusQuery = format(
+                "increase({\"run.googleapis.com/job/completed_execution_count\", monitored_resource=\"cloud_run_job\", job_name=~%q, location=~\"$${region}\"}[15m])",
+                janitor_job_name_pattern
+              )
+            }
+            sparkChartView = {
+              sparkChartType = "SPARK_LINE"
+            }
+          }
+        }
+      ],
+      [
+        {
+          text = {
+            content = "## Cleanup"
+            format  = "MARKDOWN"
+          }
+        },
+        {
+          title = "Current retained sandbox count"
+          scorecard = {
+            timeSeriesQuery = {
+              prometheusQuery = format(
+                "superserve_canary_orphan_resources{environment=%q,region=~\"$${region}\",scenario=\"janitor\",result=\"observed\"}",
+                environment
+              )
+            }
+            sparkChartView = {
+              sparkChartType = "SPARK_LINE"
+            }
+          }
+        },
+        {
+          title = "Retained sandboxes"
+          scorecard = {
+            timeSeriesQuery = {
+              prometheusQuery = format(
+                "increase(superserve_canary_retained_sandbox_total{environment=%q,region=~\"$${region}\",scenario=\"lifecycle\",result=\"retained\"}[24h])",
+                environment
+              )
+            }
+            sparkChartView = {
+              sparkChartType = "SPARK_LINE"
+            }
+          }
+        },
+        {
+          title = "Cleanup successes"
+          scorecard = {
+            timeSeriesQuery = {
+              prometheusQuery = format(
+                "increase(superserve_canary_cleanup_total{environment=%q,region=~\"$${region}\",scenario=\"cleanup\",result=\"success\"}[24h])",
+                environment
+              )
+            }
+            sparkChartView = {
+              sparkChartType = "SPARK_LINE"
+            }
+          }
+        },
+        {
+          title = "Cleanup failures"
+          scorecard = {
+            timeSeriesQuery = {
+              prometheusQuery = format(
+                "increase(superserve_canary_cleanup_total{environment=%q,region=~\"$${region}\",scenario=\"cleanup\",result=\"failure\"}[24h])",
+                environment
+              )
+            }
+            sparkChartView = {
+              sparkChartType = "SPARK_LINE"
+            }
+          }
+        },
+        {
+          title = "Cleanup outcomes"
+          xyChart = {
+            dataSets = [
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "sum by (target) (increase(superserve_canary_cleanup_total{environment=%q,region=~\"$${region}\",scenario=\"cleanup\",result=\"success\"}[1h]))",
+                    environment
+                  )
+                }
+                plotType = "LINE"
+              },
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "sum by (target) (increase(superserve_canary_cleanup_total{environment=%q,region=~\"$${region}\",scenario=\"cleanup\",result=\"failure\"}[1h]))",
+                    environment
+                  )
+                }
+                plotType = "LINE"
+              },
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "sum by (target, step) (increase(superserve_canary_retained_sandbox_total{environment=%q,region=~\"$${region}\",scenario=\"lifecycle\",result=\"retained\"}[1h]))",
+                    environment
+                  )
+                }
+                plotType = "LINE"
+              }
+            ]
+          }
+        }
+      ]
+    )
+  }
+})}

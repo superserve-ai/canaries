@@ -43,17 +43,12 @@ resource "google_secret_manager_secret_iam_member" "runtime_accessor" {
   member    = "serviceAccount:${google_service_account.runtime.email}"
 }
 
-resource "google_storage_bucket_iam_member" "lock_admin" {
-  bucket = var.lock_bucket_name
-  role   = "roles/storage.objectAdmin"
-  member = "serviceAccount:${google_service_account.runtime.email}"
-}
-
 resource "google_cloud_run_v2_job" "lifecycle" {
-  project  = var.project_id
-  name     = local.lifecycle_job_name
-  location = var.job_region
-  labels   = local.labels
+  project             = var.project_id
+  name                = local.lifecycle_job_name
+  location            = var.job_region
+  labels              = local.labels
+  deletion_protection = false
   depends_on = [
     google_secret_manager_secret_iam_member.runtime_accessor
   ]
@@ -214,8 +209,9 @@ resource "google_monitoring_alert_policy" "two_failures" {
     display_name = "Two failed lifecycle runs in 11m without success"
 
     condition_prometheus_query_language {
-      query    = "increase(superserve_canary_run_total{target=\"${var.target_name}\",scenario=\"lifecycle\",result=\"failure\"}[11m]) >= 2 and increase(superserve_canary_run_total{target=\"${var.target_name}\",scenario=\"lifecycle\",result=\"success\"}[11m]) == 0"
-      duration = "0s"
+      query                     = "increase(superserve_canary_run_total{target=\"${var.target_name}\",scenario=\"lifecycle\",result=\"failure\"}[11m]) >= 2 and increase(superserve_canary_run_total{target=\"${var.target_name}\",scenario=\"lifecycle\",result=\"success\"}[11m]) == 0"
+      duration                  = "0s"
+      disable_metric_validation = true
     }
   }
 
@@ -242,8 +238,9 @@ resource "google_monitoring_alert_policy" "missing_runs" {
     display_name = "No lifecycle success or failure metric in 15m"
 
     condition_prometheus_query_language {
-      query    = "increase(superserve_canary_run_total{target=\"${var.target_name}\",scenario=\"lifecycle\",result=~\"success|failure\"}[15m]) == 0"
-      duration = "0s"
+      query                     = "increase(superserve_canary_run_total{target=\"${var.target_name}\",scenario=\"lifecycle\",result=~\"success|failure\"}[15m]) == 0"
+      duration                  = "0s"
+      disable_metric_validation = true
     }
   }
 
