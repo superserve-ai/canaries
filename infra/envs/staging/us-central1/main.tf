@@ -18,7 +18,7 @@ locals {
   dashboards = {
     canary = {
       display_name = "staging canary dashboard"
-      definition = templatefile("${path.module}/../../../dashboards/cloud-monitoring/canary-overview.json.tftpl", {
+      definition = templatefile(abspath("${path.module}/../../../dashboards/cloud-monitoring/canary-overview.json.tftpl"), {
         project_id               = var.project_id
         environment              = local.labels.environment
         default_region           = "us-central1"
