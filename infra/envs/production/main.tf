@@ -27,7 +27,7 @@ locals {
       api_key_secret_name = "api-canary-key-production-us-central1"
       otlp_endpoint       = local.otlp_endpoints.production-us-central1
       vpc_connector       = "projects/rayai-prod/locations/us-central1/connectors/superserve-prod-conn"
-      vpc_egress          = "ALL_TRAFFIC"
+      vpc_egress          = "PRIVATE_RANGES_ONLY"
     }
     production-us-west2 = {
       target_region       = "us-west2"
