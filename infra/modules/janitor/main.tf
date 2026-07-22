@@ -25,10 +25,11 @@ resource "google_secret_manager_secret_iam_member" "runtime_accessor" {
 }
 
 resource "google_cloud_run_v2_job" "janitor" {
-  project  = var.project_id
-  name     = local.job_name
-  location = var.job_region
-  labels   = local.labels
+  project             = var.project_id
+  name                = local.job_name
+  location            = var.job_region
+  labels              = local.labels
+  deletion_protection = false
   depends_on = [
     google_secret_manager_secret_iam_member.runtime_accessor
   ]
