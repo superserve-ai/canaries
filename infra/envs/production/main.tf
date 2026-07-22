@@ -4,10 +4,21 @@ locals {
     managed_by  = "terraform"
   }
 
-  deployment_alerting_roles = toset([
+  deployer_service_account_id = "superserve-canary-deployer"
+
+  deployer_roles = toset([
+    "roles/artifactregistry.writer",
+    "roles/cloudscheduler.admin",
+    "roles/iam.serviceAccountAdmin",
     "roles/logging.configWriter",
     "roles/monitoring.alertPolicyEditor",
     "roles/monitoring.notificationChannelEditor",
+    "roles/monitoring.dashboardEditor",
+    "roles/resourcemanager.projectIamAdmin",
+    "roles/run.admin",
+    "roles/secretmanager.admin",
+    "roles/serviceusage.serviceUsageAdmin",
+    "roles/storage.admin",
   ])
 
   otlp_endpoints = {
@@ -57,6 +68,26 @@ locals {
   }
 }
 
+resource "google_service_account" "deployer" {
+  project      = var.project_id
+  account_id   = local.deployer_service_account_id
+  display_name = "Superserve Canary Deployer (production)"
+}
+
+resource "google_service_account" "runner" {
+  for_each = local.lifecycle_targets
+
+  project      = var.project_id
+  account_id   = substr("apicn-${each.key}", 0, 30)
+  display_name = "API Canary ${each.key}"
+}
+
+resource "google_storage_bucket_iam_member" "terraform_state_deployer" {
+  bucket = "superserve-terraform-state-prod"
+  role   = "roles/storage.objectAdmin"
+  member = "serviceAccount:${google_service_account.deployer.email}"
+}
+
 resource "google_storage_bucket" "locks" {
   project                     = var.project_id
   name                        = "${var.project_id}-api-canary-locks"
@@ -69,56 +100,65 @@ module "lifecycle" {
   for_each = local.lifecycle_targets
   source   = "../../modules/canary_target"
 
-  project_id                = var.project_id
-  job_region                = each.value.job_region
-  target_name               = each.key
-  environment               = "production"
-  target_region             = each.value.target_region
-  api_base_url              = each.value.api_base_url
-  preview_domain            = each.value.preview_domain
-  image                     = var.image
-  api_key_secret_name       = each.value.api_key_secret_name
-  lock_bucket_name          = google_storage_bucket.locks.name
-  otlp_metrics_endpoint     = each.value.otlp_endpoint
-  retain_failed_sandbox     = local.retain_failed_sandbox
-  retain_failed_sandbox_ttl = local.retain_failed_sandbox_ttl
-  scheduler_enabled         = true
-  notification_channel_ids  = var.notification_channel_ids
-  labels                    = merge(local.labels, { region = each.value.target_region })
-  create_alerts             = var.create_alerts
-  vpc_connector             = try(each.value.vpc_connector, null)
-  vpc_egress                = try(each.value.vpc_egress, "ALL_TRAFFIC")
-  vpc_network               = try(each.value.vpc_network, null)
-  vpc_subnetwork            = try(each.value.vpc_subnetwork, null)
-  vpc_tags                  = try(each.value.vpc_tags, [])
-  depends_on                = [google_project_iam_member.deployment_alerting]
+  project_id                     = var.project_id
+  job_region                     = each.value.job_region
+  target_name                    = each.key
+  environment                    = "production"
+  target_region                  = each.value.target_region
+  api_base_url                   = each.value.api_base_url
+  preview_domain                 = each.value.preview_domain
+  image                          = var.image
+  api_key_secret_name            = each.value.api_key_secret_name
+  lock_bucket_name               = google_storage_bucket.locks.name
+  otlp_metrics_endpoint          = each.value.otlp_endpoint
+  retain_failed_sandbox          = local.retain_failed_sandbox
+  retain_failed_sandbox_ttl      = local.retain_failed_sandbox_ttl
+  scheduler_enabled              = true
+  notification_channel_ids       = var.notification_channel_ids
+  labels                         = merge(local.labels, { region = each.value.target_region })
+  create_alerts                  = var.create_alerts
+  runtime_service_account_email  = google_service_account.runner[each.key].email
+  deployer_service_account_email = google_service_account.deployer.email
+  vpc_connector                  = try(each.value.vpc_connector, null)
+  vpc_egress                     = try(each.value.vpc_egress, "ALL_TRAFFIC")
+  vpc_network                    = try(each.value.vpc_network, null)
+  vpc_subnetwork                 = try(each.value.vpc_subnetwork, null)
+  vpc_tags                       = try(each.value.vpc_tags, [])
+  depends_on = [
+    google_service_account_iam_member.runner_user,
+    google_project_iam_member.deployer,
+  ]
 }
 
 module "janitor" {
   for_each = local.lifecycle_targets
   source   = "../../modules/janitor"
 
-  project_id                = var.project_id
-  job_region                = each.value.job_region
-  target_name               = each.key
-  environment               = "production"
-  api_base_url              = each.value.api_base_url
-  preview_domain            = each.value.preview_domain
-  image                     = var.image
-  api_key_secret_name       = each.value.api_key_secret_name
-  lock_bucket_name          = google_storage_bucket.locks.name
-  otlp_metrics_endpoint     = each.value.otlp_endpoint
-  retain_failed_sandbox     = local.retain_failed_sandbox
-  retain_failed_sandbox_ttl = local.retain_failed_sandbox_ttl
-  notification_channel_ids  = var.notification_channel_ids
-  labels                    = merge(local.labels, { region = each.value.target_region })
-  enable_alerts             = false
-  vpc_connector             = try(each.value.vpc_connector, null)
-  vpc_egress                = try(each.value.vpc_egress, "ALL_TRAFFIC")
-  vpc_network               = try(each.value.vpc_network, null)
-  vpc_subnetwork            = try(each.value.vpc_subnetwork, null)
-  vpc_tags                  = try(each.value.vpc_tags, [])
-  depends_on                = [google_project_iam_member.deployment_alerting]
+  project_id                    = var.project_id
+  job_region                    = each.value.job_region
+  target_name                   = each.key
+  environment                   = "production"
+  api_base_url                  = each.value.api_base_url
+  preview_domain                = each.value.preview_domain
+  image                         = var.image
+  api_key_secret_name           = each.value.api_key_secret_name
+  lock_bucket_name              = google_storage_bucket.locks.name
+  otlp_metrics_endpoint         = each.value.otlp_endpoint
+  retain_failed_sandbox         = local.retain_failed_sandbox
+  retain_failed_sandbox_ttl     = local.retain_failed_sandbox_ttl
+  notification_channel_ids      = var.notification_channel_ids
+  labels                        = merge(local.labels, { region = each.value.target_region })
+  enable_alerts                 = false
+  runtime_service_account_email = google_service_account.runner[each.key].email
+  vpc_connector                 = try(each.value.vpc_connector, null)
+  vpc_egress                    = try(each.value.vpc_egress, "ALL_TRAFFIC")
+  vpc_network                   = try(each.value.vpc_network, null)
+  vpc_subnetwork                = try(each.value.vpc_subnetwork, null)
+  vpc_tags                      = try(each.value.vpc_tags, [])
+  depends_on = [
+    google_service_account_iam_member.runner_user,
+    google_project_iam_member.deployer,
+  ]
 }
 
 module "dashboard" {
@@ -132,16 +172,33 @@ module "permissions" {
   for_each = local.lifecycle_targets
   source   = "../../modules/permissions"
 
-  project_id                              = var.project_id
-  lock_bucket_name                        = google_storage_bucket.locks.name
-  lifecycle_runtime_service_account_email = module.lifecycle[each.key].runtime_service_account_email
-  janitor_runtime_service_account_email   = module.janitor[each.key].runtime_service_account_email
+  project_id                    = var.project_id
+  lock_bucket_name              = google_storage_bucket.locks.name
+  runtime_service_account_email = google_service_account.runner[each.key].email
 }
 
-resource "google_project_iam_member" "deployment_alerting" {
-  for_each = local.deployment_alerting_roles
+resource "google_service_account_iam_member" "runner_user" {
+  for_each = local.lifecycle_targets
+
+  service_account_id = google_service_account.runner[each.key].name
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:${google_service_account.deployer.email}"
+}
+
+resource "google_project_iam_member" "deployer" {
+  for_each = local.deployer_roles
 
   project = var.project_id
   role    = each.value
-  member  = "serviceAccount:${var.deployment_service_account_email}"
+  member  = "serviceAccount:${google_service_account.deployer.email}"
+}
+
+moved {
+  from = module.lifecycle["production-us-central1"].google_service_account.runtime
+  to   = google_service_account.runner["production-us-central1"]
+}
+
+moved {
+  from = module.lifecycle["production-us-west2"].google_service_account.runtime
+  to   = google_service_account.runner["production-us-west2"]
 }

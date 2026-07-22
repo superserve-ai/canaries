@@ -11,7 +11,7 @@ Current targets:
 Each target has its own:
 - Cloud Run Job
 - Cloud Scheduler trigger
-- runtime service account
+- runner service account
 - Secret Manager secret reference
 - target labels
 - target-scoped lock
@@ -322,7 +322,7 @@ Apply order:
 
 Cloud Run jobs set `CANARY_RUNTIME=cloud-run`, `CANARY_METRICS_EXPORTER=otlp`, and `CANARY_LOCK_BACKEND=gcs` explicitly, and pass the OTLP endpoint through Terraform locals instead of relying on application defaults. The deployment uses the standard `OTEL_EXPORTER_OTLP_ENDPOINT` path that the sandbox stack already uses.
 
-Production east4 points `OTEL_EXPORTER_OTLP_ENDPOINT` at `https://telemetry.googleapis.com` and grants the runtime service accounts `roles/monitoring.metricWriter` plus `roles/serviceusage.serviceUsageConsumer` so metrics can be exported without VPC connectivity.
+Production east4 points `OTEL_EXPORTER_OTLP_ENDPOINT` at `https://telemetry.googleapis.com` and grants the runner service accounts `roles/monitoring.metricWriter` plus `roles/serviceusage.serviceUsageConsumer` so metrics can be exported without VPC connectivity.
 
 ## Metrics And Alerts
 
@@ -331,7 +331,7 @@ Metrics are emitted over OTLP HTTP and intended to feed the existing GMP path.
 Alerting behavior:
 - staging enables the full canary alert set
 - production only creates the consecutive-failure lifecycle alert
-- the GitHub deploy service account must be granted the alert-management IAM roles in Terraform; the deploy workflow passes its service account email to Terraform as `deployment_service_account_email`
+- the GitHub deploy service account should point at the Terraform-managed deployer account for the environment; Terraform grants that account the alert-management IAM roles and the workflow authenticates with `GCP_SERVICE_ACCOUNT`
 - notification channel IDs are not managed here; pass the existing GMP/Slack channel resource names as a Terraform list literal via `TF_VAR_NOTIFICATION_CHANNEL_IDS`, for example `["projects/rayai-prod/notificationChannels/123456789"]`
 
 Runtime selectors:

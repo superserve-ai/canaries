@@ -12,10 +12,6 @@ variable "image" {
   type = string
 }
 
-variable "deployment_service_account_email" {
-  type = string
-}
-
 variable "notification_channel_ids" {
   type    = list(string)
   default = []

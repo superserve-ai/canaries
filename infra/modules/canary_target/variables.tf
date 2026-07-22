@@ -30,6 +30,14 @@ variable "image" {
   type = string
 }
 
+variable "runtime_service_account_email" {
+  type = string
+}
+
+variable "deployer_service_account_email" {
+  type = string
+}
+
 variable "api_key_secret_name" {
   type = string
 }

@@ -11,17 +11,11 @@ locals {
   })
 }
 
-resource "google_service_account" "runtime" {
-  project      = var.project_id
-  account_id   = substr("apicnjan-${var.target_name}", 0, 30)
-  display_name = "API Canary Janitor ${var.target_name}"
-}
-
 resource "google_secret_manager_secret_iam_member" "runtime_accessor" {
   project   = var.project_id
   secret_id = var.api_key_secret_name
   role      = "roles/secretmanager.secretAccessor"
-  member    = "serviceAccount:${google_service_account.runtime.email}"
+  member    = "serviceAccount:${var.runtime_service_account_email}"
 }
 
 resource "google_cloud_run_v2_job" "janitor" {
@@ -38,7 +32,7 @@ resource "google_cloud_run_v2_job" "janitor" {
     labels = local.labels
 
     template {
-      service_account = google_service_account.runtime.email
+      service_account = var.runtime_service_account_email
       timeout         = "600s"
       max_retries     = 0
       dynamic "vpc_access" {
