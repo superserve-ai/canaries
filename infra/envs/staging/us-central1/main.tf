@@ -15,38 +15,15 @@ locals {
   retain_failed_sandbox     = true
   retain_failed_sandbox_ttl = "2h"
 
-  lifecycle_dashboard_targets = [
-    {
-      target = "staging-us-central1"
-      region = "us-central1"
-    }
-  ]
-
-  janitor_dashboard_targets = local.lifecycle_dashboard_targets
-
   dashboards = {
-    canary_lifecycle = {
-      display_name = "staging canary lifecycle"
-      definition = templatefile("${path.module}/../../../dashboards/cloud-monitoring/canary-lifecycle.json.tftpl", {
-        project_id  = var.project_id
-        environment = local.labels.environment
-        targets     = local.lifecycle_dashboard_targets
-      })
-    }
-    canary_janitor = {
-      display_name = "staging canary janitor"
-      definition = templatefile("${path.module}/../../../dashboards/cloud-monitoring/canary-janitor.json.tftpl", {
-        project_id  = var.project_id
-        environment = local.labels.environment
-        targets     = local.janitor_dashboard_targets
-      })
-    }
-    canary_cleanup = {
-      display_name = "staging canary cleanup"
-      definition = templatefile("${path.module}/../../../dashboards/cloud-monitoring/canary-cleanup.json.tftpl", {
-        project_id  = var.project_id
-        environment = local.labels.environment
-        targets     = local.janitor_dashboard_targets
+    canary = {
+      display_name = "staging canary dashboard"
+      definition = templatefile("${path.module}/../../../dashboards/cloud-monitoring/canary-overview.json.tftpl", {
+        project_id               = var.project_id
+        environment              = local.labels.environment
+        default_region           = "us-central1"
+        regions                  = ["us-central1"]
+        janitor_job_name_pattern = "api-canary-janitor-staging-us-central1"
       })
     }
   }

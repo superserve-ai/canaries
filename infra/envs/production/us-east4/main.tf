@@ -16,46 +16,7 @@ locals {
   retain_failed_sandbox     = false
   retain_failed_sandbox_ttl = "2h"
 
-  lifecycle_dashboard_targets = [
-    {
-      target = "production-us-east4"
-      region = "us-east4"
-    }
-  ]
-
-  janitor_dashboard_targets = [
-    {
-      target = "production-us-east4"
-      region = "us-east4"
-    }
-  ]
-
-  dashboards = {
-    canary_lifecycle = {
-      display_name = "production east canary lifecycle"
-      definition = templatefile("${path.module}/../../../dashboards/cloud-monitoring/canary-lifecycle.json.tftpl", {
-        project_id  = var.project_id
-        environment = local.labels.environment
-        targets     = local.lifecycle_dashboard_targets
-      })
-    }
-    canary_janitor = {
-      display_name = "production east canary janitor"
-      definition = templatefile("${path.module}/../../../dashboards/cloud-monitoring/canary-janitor.json.tftpl", {
-        project_id  = var.project_id
-        environment = local.labels.environment
-        targets     = local.janitor_dashboard_targets
-      })
-    }
-    canary_cleanup = {
-      display_name = "production east canary cleanup"
-      definition = templatefile("${path.module}/../../../dashboards/cloud-monitoring/canary-cleanup.json.tftpl", {
-        project_id  = var.project_id
-        environment = local.labels.environment
-        targets     = local.janitor_dashboard_targets
-      })
-    }
-  }
+  dashboards = {}
 }
 
 resource "google_project_service" "telemetry" {

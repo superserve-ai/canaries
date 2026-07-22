@@ -43,36 +43,15 @@ locals {
     }
   }
 
-  dashboard_targets = [
-    for name, cfg in local.lifecycle_targets : {
-      target = name
-      region = cfg.target_region
-    }
-  ]
-
   dashboards = {
-    canary_lifecycle = {
-      display_name = "production canary lifecycle"
-      definition = templatefile("${path.module}/../../dashboards/cloud-monitoring/canary-lifecycle.json.tftpl", {
-        project_id  = var.project_id
-        environment = local.labels.environment
-        targets     = local.dashboard_targets
-      })
-    }
-    canary_janitor = {
-      display_name = "production canary janitor"
-      definition = templatefile("${path.module}/../../dashboards/cloud-monitoring/canary-janitor.json.tftpl", {
-        project_id  = var.project_id
-        environment = local.labels.environment
-        targets     = local.dashboard_targets
-      })
-    }
-    canary_cleanup = {
-      display_name = "production canary cleanup"
-      definition = templatefile("${path.module}/../../dashboards/cloud-monitoring/canary-cleanup.json.tftpl", {
-        project_id  = var.project_id
-        environment = local.labels.environment
-        targets     = local.dashboard_targets
+    canary = {
+      display_name = "production canary dashboard"
+      definition = templatefile("${path.module}/../../dashboards/cloud-monitoring/canary-overview.json.tftpl", {
+        project_id               = var.project_id
+        environment              = local.labels.environment
+        default_region           = "us-central1"
+        regions                  = ["us-central1", "us-west2", "us-east4"]
+        janitor_job_name_pattern = "api-canary-janitor-production-.*"
       })
     }
   }
