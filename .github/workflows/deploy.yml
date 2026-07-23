@@ -39,7 +39,6 @@ jobs:
       # GitHub Environment variable names are uppercase; Terraform's input
       # variable name is lowercase and must match the TF_VAR_ convention.
       TF_VAR_notification_channel_ids: ${{ vars.TF_VAR_NOTIFICATION_CHANNEL_IDS }}
-      TF_VAR_deployment_service_account_email: ${{ vars.GCP_SERVICE_ACCOUNT }}
     steps:
       - uses: actions/checkout@v4
 
@@ -54,11 +53,6 @@ jobs:
       - name: Validate Terraform alerting inputs
         run: |
           set -euo pipefail
-
-          if [[ -z "${TF_VAR_deployment_service_account_email:-}" ]]; then
-            echo "TF_VAR_deployment_service_account_email must be set"
-            exit 1
-          fi
 
           case "${TF_VAR_notification_channel_ids:-}" in
             "")
@@ -119,7 +113,6 @@ jobs:
       # GitHub Environment variable names are uppercase; Terraform's input
       # variable name is lowercase and must match the TF_VAR_ convention.
       TF_VAR_notification_channel_ids: ${{ vars.TF_VAR_NOTIFICATION_CHANNEL_IDS }}
-      TF_VAR_deployment_service_account_email: ${{ vars.GCP_SERVICE_ACCOUNT }}
     steps:
       - uses: actions/checkout@v4
 
@@ -134,11 +127,6 @@ jobs:
       - name: Validate Terraform alerting inputs
         run: |
           set -euo pipefail
-
-          if [[ -z "${TF_VAR_deployment_service_account_email:-}" ]]; then
-            echo "TF_VAR_deployment_service_account_email must be set"
-            exit 1
-          fi
 
           case "${TF_VAR_notification_channel_ids:-}" in
             "")

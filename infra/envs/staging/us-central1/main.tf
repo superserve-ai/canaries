@@ -5,11 +5,7 @@ locals {
     managed_by  = "terraform"
   }
 
-  deployment_alerting_roles = toset([
-    "roles/logging.configWriter",
-    "roles/monitoring.alertPolicyEditor",
-    "roles/monitoring.notificationChannelEditor",
-  ])
+  deployer_service_account_id = "superserve-canary-deployer"
 
   otlp_endpoint             = "http://10.0.0.2:4318"
   retain_failed_sandbox     = true
@@ -29,6 +25,24 @@ locals {
   }
 }
 
+resource "google_service_account" "deployer" {
+  project      = var.project_id
+  account_id   = local.deployer_service_account_id
+  display_name = "Superserve Canary Deployer (staging)"
+}
+
+resource "google_service_account" "runner" {
+  project      = var.project_id
+  account_id   = "apicn-staging-us-central1"
+  display_name = "API Canary staging-us-central1"
+}
+
+resource "google_storage_bucket_iam_member" "terraform_state_deployer" {
+  bucket = "superserve-terraform-state"
+  role   = "roles/storage.objectAdmin"
+  member = "serviceAccount:${google_service_account.deployer.email}"
+}
+
 resource "google_storage_bucket" "locks" {
   project                     = var.project_id
   name                        = "${var.project_id}-api-canary-locks"
@@ -40,49 +54,80 @@ resource "google_storage_bucket" "locks" {
 module "lifecycle" {
   source = "../../../modules/canary_target"
 
-  project_id                = var.project_id
-  job_region                = var.job_region
-  target_name               = "staging-us-central1"
-  environment               = "staging"
-  target_region             = "us-central1"
-  api_base_url              = "https://api-staging.superserve.ai"
-  preview_domain            = "staging-sandbox.superserve.ai"
-  image                     = var.image
-  api_key_secret_name       = "api-canary-key-staging-us-central1"
-  lock_bucket_name          = google_storage_bucket.locks.name
-  otlp_metrics_endpoint     = local.otlp_endpoint
-  retain_failed_sandbox     = local.retain_failed_sandbox
-  retain_failed_sandbox_ttl = local.retain_failed_sandbox_ttl
-  manual_staging_opt_in     = true
-  notification_channel_ids  = var.notification_channel_ids
-  labels                    = local.labels
-  create_alerts             = var.create_alerts
-  vpc_connector             = "projects/rayai-dev/locations/us-central1/connectors/ss-vpc-conn-f1b3552"
-  vpc_egress                = "ALL_TRAFFIC"
-  depends_on                = [google_project_iam_member.deployment_alerting]
+  project_id                     = var.project_id
+  job_region                     = var.job_region
+  target_name                    = "staging-us-central1"
+  environment                    = "staging"
+  target_region                  = "us-central1"
+  api_base_url                   = "https://api-staging.superserve.ai"
+  preview_domain                 = "staging-sandbox.superserve.ai"
+  image                          = var.image
+  api_key_secret_name            = "api-canary-key-staging-us-central1"
+  lock_bucket_name               = google_storage_bucket.locks.name
+  otlp_metrics_endpoint          = local.otlp_endpoint
+  retain_failed_sandbox          = local.retain_failed_sandbox
+  retain_failed_sandbox_ttl      = local.retain_failed_sandbox_ttl
+  manual_staging_opt_in          = true
+  notification_channel_ids       = var.notification_channel_ids
+  labels                         = local.labels
+  create_alerts                  = var.create_alerts
+  runtime_service_account_email  = google_service_account.runner.email
+  deployer_service_account_email = google_service_account.deployer.email
+  vpc_connector                  = "projects/rayai-dev/locations/us-central1/connectors/ss-vpc-conn-f1b3552"
+  vpc_egress                     = "ALL_TRAFFIC"
+  depends_on = [
+    google_service_account_iam_member.runner_user,
+    google_project_iam_member.deployer_artifact_registry_writer,
+    google_project_iam_member.deployer_cloud_scheduler_admin,
+    google_project_iam_member.deployer_iam_admin,
+    google_project_iam_member.deployer_logging_config_writer,
+    google_project_iam_member.deployer_monitoring_alert_policy_editor,
+    google_project_iam_member.deployer_monitoring_notification_channel_editor,
+    google_project_iam_member.deployer_monitoring_dashboard_editor,
+    google_project_iam_member.deployer_resourcemanager_project_iam_admin,
+    google_project_iam_member.deployer_run_admin,
+    google_project_iam_member.deployer_secret_manager_admin,
+    google_project_iam_member.deployer_service_usage_admin,
+    google_project_iam_member.deployer_storage_admin,
+  ]
 }
 
 module "janitor" {
   source = "../../../modules/janitor"
 
-  project_id                = var.project_id
-  job_region                = var.job_region
-  target_name               = "staging-us-central1"
-  environment               = "staging"
-  api_base_url              = "https://api-staging.superserve.ai"
-  preview_domain            = "staging-sandbox.superserve.ai"
-  image                     = var.image
-  api_key_secret_name       = "api-canary-key-staging-us-central1"
-  lock_bucket_name          = google_storage_bucket.locks.name
-  otlp_metrics_endpoint     = local.otlp_endpoint
-  retain_failed_sandbox     = local.retain_failed_sandbox
-  retain_failed_sandbox_ttl = local.retain_failed_sandbox_ttl
-  notification_channel_ids  = var.notification_channel_ids
-  labels                    = local.labels
-  create_alerts             = var.create_alerts
-  vpc_connector             = "projects/rayai-dev/locations/us-central1/connectors/ss-vpc-conn-f1b3552"
-  vpc_egress                = "ALL_TRAFFIC"
-  depends_on                = [google_project_iam_member.deployment_alerting]
+  project_id                    = var.project_id
+  job_region                    = var.job_region
+  target_name                   = "staging-us-central1"
+  environment                   = "staging"
+  api_base_url                  = "https://api-staging.superserve.ai"
+  preview_domain                = "staging-sandbox.superserve.ai"
+  image                         = var.image
+  api_key_secret_name           = "api-canary-key-staging-us-central1"
+  lock_bucket_name              = google_storage_bucket.locks.name
+  otlp_metrics_endpoint         = local.otlp_endpoint
+  retain_failed_sandbox         = local.retain_failed_sandbox
+  retain_failed_sandbox_ttl     = local.retain_failed_sandbox_ttl
+  notification_channel_ids      = var.notification_channel_ids
+  labels                        = local.labels
+  create_alerts                 = var.create_alerts
+  runtime_service_account_email = google_service_account.runner.email
+  vpc_connector                 = "projects/rayai-dev/locations/us-central1/connectors/ss-vpc-conn-f1b3552"
+  vpc_egress                    = "ALL_TRAFFIC"
+  depends_on = [
+    google_service_account_iam_member.runner_user,
+    google_project_iam_member.deployer_artifact_registry_writer,
+    google_project_iam_member.deployer_cloud_scheduler_admin,
+    google_project_iam_member.deployer_iam_admin,
+    google_project_iam_member.deployer_logging_config_writer,
+    google_project_iam_member.deployer_monitoring_alert_policy_editor,
+    google_project_iam_member.deployer_monitoring_notification_channel_editor,
+    google_project_iam_member.deployer_monitoring_dashboard_editor,
+    google_project_iam_member.deployer_resourcemanager_project_iam_admin,
+    google_project_iam_member.deployer_run_admin,
+    google_project_iam_member.deployer_secret_manager_admin,
+    google_project_iam_member.deployer_service_usage_admin,
+    google_project_iam_member.deployer_storage_admin,
+  ]
 }
 
 module "dashboard" {
@@ -95,18 +140,92 @@ module "dashboard" {
 module "permissions" {
   source = "../../../modules/permissions"
 
-  project_id                              = var.project_id
-  lock_bucket_name                        = google_storage_bucket.locks.name
-  lifecycle_runtime_service_account_email = module.lifecycle.runtime_service_account_email
-  janitor_runtime_service_account_email   = module.janitor.runtime_service_account_email
+  project_id                    = var.project_id
+  lock_bucket_name              = google_storage_bucket.locks.name
+  runtime_service_account_email = google_service_account.runner.email
 }
 
-resource "google_project_iam_member" "deployment_alerting" {
-  for_each = local.deployment_alerting_roles
+resource "google_service_account_iam_member" "runner_user" {
+  service_account_id = google_service_account.runner.name
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:${google_service_account.deployer.email}"
+}
 
+resource "google_project_iam_member" "deployer_artifact_registry_writer" {
   project = var.project_id
-  role    = each.value
-  member  = "serviceAccount:${var.deployment_service_account_email}"
+  role    = "roles/artifactregistry.writer"
+  member  = "serviceAccount:${google_service_account.deployer.email}"
+}
+
+resource "google_project_iam_member" "deployer_cloud_scheduler_admin" {
+  project = var.project_id
+  role    = "roles/cloudscheduler.admin"
+  member  = "serviceAccount:${google_service_account.deployer.email}"
+}
+
+resource "google_project_iam_member" "deployer_iam_admin" {
+  project = var.project_id
+  role    = "roles/iam.serviceAccountAdmin"
+  member  = "serviceAccount:${google_service_account.deployer.email}"
+}
+
+resource "google_project_iam_member" "deployer_logging_config_writer" {
+  project = var.project_id
+  role    = "roles/logging.configWriter"
+  member  = "serviceAccount:${google_service_account.deployer.email}"
+}
+
+resource "google_project_iam_member" "deployer_monitoring_alert_policy_editor" {
+  project = var.project_id
+  role    = "roles/monitoring.alertPolicyEditor"
+  member  = "serviceAccount:${google_service_account.deployer.email}"
+}
+
+resource "google_project_iam_member" "deployer_monitoring_notification_channel_editor" {
+  project = var.project_id
+  role    = "roles/monitoring.notificationChannelEditor"
+  member  = "serviceAccount:${google_service_account.deployer.email}"
+}
+
+resource "google_project_iam_member" "deployer_monitoring_dashboard_editor" {
+  project = var.project_id
+  role    = "roles/monitoring.dashboardEditor"
+  member  = "serviceAccount:${google_service_account.deployer.email}"
+}
+
+resource "google_project_iam_member" "deployer_resourcemanager_project_iam_admin" {
+  project = var.project_id
+  role    = "roles/resourcemanager.projectIamAdmin"
+  member  = "serviceAccount:${google_service_account.deployer.email}"
+}
+
+resource "google_project_iam_member" "deployer_run_admin" {
+  project = var.project_id
+  role    = "roles/run.admin"
+  member  = "serviceAccount:${google_service_account.deployer.email}"
+}
+
+resource "google_project_iam_member" "deployer_secret_manager_admin" {
+  project = var.project_id
+  role    = "roles/secretmanager.admin"
+  member  = "serviceAccount:${google_service_account.deployer.email}"
+}
+
+resource "google_project_iam_member" "deployer_service_usage_admin" {
+  project = var.project_id
+  role    = "roles/serviceusage.serviceUsageAdmin"
+  member  = "serviceAccount:${google_service_account.deployer.email}"
+}
+
+resource "google_project_iam_member" "deployer_storage_admin" {
+  project = var.project_id
+  role    = "roles/storage.admin"
+  member  = "serviceAccount:${google_service_account.deployer.email}"
+}
+
+moved {
+  from = module.lifecycle.google_service_account.runtime
+  to   = google_service_account.runner
 }
 
 resource "google_monitoring_alert_policy" "metrics_shutdown_failed" {
@@ -116,7 +235,7 @@ resource "google_monitoring_alert_policy" "metrics_shutdown_failed" {
   combiner              = "OR"
   enabled               = true
   notification_channels = var.notification_channel_ids
-  depends_on            = [google_project_iam_member.deployment_alerting]
+  depends_on            = [google_project_iam_member.deployer_logging_config_writer, google_project_iam_member.deployer_monitoring_alert_policy_editor, google_project_iam_member.deployer_monitoring_notification_channel_editor]
 
   lifecycle {
     precondition {

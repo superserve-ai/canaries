@@ -11,8 +11,6 @@ jobs:
     environment: staging
     permissions:
       contents: read
-    env:
-      TF_VAR_deployment_service_account_email: ${{ vars.GCP_SERVICE_ACCOUNT }}
     steps:
       - uses: actions/checkout@v4
 
@@ -88,7 +86,6 @@ jobs:
       id-token: write
     env:
       TF_VAR_notification_channel_ids: ${{ vars.TF_VAR_NOTIFICATION_CHANNEL_IDS || '[]' }}
-      TF_VAR_deployment_service_account_email: ${{ vars.GCP_SERVICE_ACCOUNT }}
     strategy:
       fail-fast: false
       matrix:

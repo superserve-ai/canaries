@@ -13,12 +13,6 @@ locals {
   })
 }
 
-resource "google_service_account" "runtime" {
-  project      = var.project_id
-  account_id   = substr("apicn-${var.target_name}", 0, 30)
-  display_name = "API Canary ${var.target_name}"
-}
-
 resource "google_service_account" "scheduler" {
   project      = var.project_id
   account_id   = substr("apicns-${var.target_name}", 0, 30)
@@ -40,7 +34,13 @@ resource "google_secret_manager_secret_iam_member" "runtime_accessor" {
   project   = var.project_id
   secret_id = google_secret_manager_secret.api_key.secret_id
   role      = "roles/secretmanager.secretAccessor"
-  member    = "serviceAccount:${google_service_account.runtime.email}"
+  member    = "serviceAccount:${var.runtime_service_account_email}"
+}
+
+resource "google_service_account_iam_member" "scheduler_user" {
+  service_account_id = google_service_account.scheduler.name
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:${var.deployer_service_account_email}"
 }
 
 resource "google_cloud_run_v2_job" "lifecycle" {
@@ -50,14 +50,15 @@ resource "google_cloud_run_v2_job" "lifecycle" {
   labels              = local.labels
   deletion_protection = false
   depends_on = [
-    google_secret_manager_secret_iam_member.runtime_accessor
+    google_secret_manager_secret_iam_member.runtime_accessor,
+    google_service_account_iam_member.scheduler_user,
   ]
 
   template {
     labels = local.labels
 
     template {
-      service_account = google_service_account.runtime.email
+      service_account = var.runtime_service_account_email
       timeout         = "600s"
       max_retries     = 0
       dynamic "vpc_access" {
