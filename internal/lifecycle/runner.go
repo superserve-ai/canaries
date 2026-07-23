@@ -43,6 +43,12 @@ type StepError struct {
 	Err  error
 }
 
+func logStep(step string) {
+	log.Info().
+		Str("step", step).
+		Msg("canary step started")
+}
+
 func (e StepError) Error() string {
 	if e.Err == nil {
 		return e.Step
@@ -91,13 +97,39 @@ func (r Runner) Run(ctx context.Context) error {
 	runID := fmt.Sprintf("%s-%s-%d-%s", r.Config.Environment, r.Config.Region, r.Clock().Unix(), uuid.NewString()[:8])
 	start := r.Clock()
 	result := "failure"
+
+	log.Info().
+		Str("run_id", runID).
+		Str("target", r.Config.Target).
+		Str("environment", r.Config.Environment).
+		Str("region", r.Config.Region).
+		Msg("lifecycle canary started")
+
 	runResult := r.runLifecycle(ctx, runID)
 	err = runResult.Err
 	if err == nil {
 		result = "success"
 	}
-	r.Metrics.RecordRun(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", result, r.Clock().Sub(start))
-	return err
+	duration := r.Clock().Sub(start)
+	r.Metrics.RecordRun(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", result, duration)
+
+	if err != nil {
+		log.Error().
+			Err(err).
+			Str("run_id", runID).
+			Str("result", result).
+			Str("failed_step", runResult.FailedStep).
+			Dur("duration", duration).
+			Msg("lifecycle canary completed")
+		return err
+	}
+
+	log.Info().
+		Str("run_id", runID).
+		Str("result", result).
+		Dur("duration", duration).
+		Msg("lifecycle canary completed")
+	return nil
 }
 
 func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) {
@@ -120,6 +152,7 @@ func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) 
 		"run_id":        runID,
 	}
 	createStart := r.Clock()
+	logStep("create_request")
 	sb, err := r.Client.CreateSandbox(ctx, canaryapi.CreateSandboxRequest{
 		Name:              sandboxName(r.Config.Target, runID),
 		FromTemplate:      r.Config.SandboxTemplate,
@@ -136,6 +169,7 @@ func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) 
 	}
 	resources.SandboxID = sb.ID
 
+	logStep("create_wait_active")
 	if err := r.waitForStatusTimed(ctx, sb.ID, "active", "create_wait_active"); err != nil {
 		r.Metrics.RecordStep(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", "create_total", result(err), r.Clock().Sub(createStart))
 		res.Err = fmt.Errorf("waiting for sandbox to become active: %w", err)
@@ -154,6 +188,7 @@ func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) 
 		Str("sandbox_id", sb.ID).
 		Str("access_token_prefix", accessTokenPrefix).
 		Msg("writing canary token")
+	logStep("seed_canary_token")
 	if err := r.writeSandboxFile(ctx, sb.ID, sb.AccessToken, "/tmp/canary-token", []byte(diskToken)); err != nil {
 		res.Err = fmt.Errorf("seeding canary token: %w", err)
 		res.FailedStep = "seed_canary_token"
@@ -161,6 +196,7 @@ func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) 
 	}
 
 	backgroundCmd := fmt.Sprintf("sh -lc 'nohup python3 -c \"import time; time.sleep(3600)\" %q >/tmp/canary-bg.log 2>&1 & echo started'", memoryToken)
+	logStep("initial_command")
 	if _, err := r.execStep(ctx, sb.ID, sb.AccessToken, "initial_command", backgroundCmd); err != nil {
 		res.Err = fmt.Errorf("priming sandbox: %w", err)
 		res.FailedStep = "initial_command"
@@ -168,12 +204,14 @@ func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) 
 	}
 
 	pauseStart := r.Clock()
+	logStep("pause_request")
 	if err := r.pause(ctx, sb.ID); err != nil {
 		r.Metrics.RecordStep(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", "pause_total", result(err), r.Clock().Sub(pauseStart))
 		res.Err = fmt.Errorf("pausing sandbox: %w", err)
 		res.FailedStep = "pause_request"
 		return res
 	}
+	logStep("pause_wait_paused")
 	if err := r.waitForStatusTimed(ctx, sb.ID, "paused", "pause_wait_paused"); err != nil {
 		r.Metrics.RecordStep(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", "pause_total", result(err), r.Clock().Sub(pauseStart))
 		res.Err = fmt.Errorf("waiting for sandbox to pause: %w", err)
@@ -183,6 +221,7 @@ func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) 
 	r.Metrics.RecordStep(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", "pause_total", "success", r.Clock().Sub(pauseStart))
 
 	resumeStart := r.Clock()
+	logStep("resume_request")
 	resumeResp, err := r.resume(ctx, sb.ID)
 	if err != nil {
 		r.Metrics.RecordStep(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", "resume_total", result(err), r.Clock().Sub(resumeStart))
@@ -190,6 +229,7 @@ func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) 
 		res.FailedStep = "resume_request"
 		return res
 	}
+	logStep("resume_wait_active")
 	if err := r.waitForStatusTimed(ctx, sb.ID, "active", "resume_wait_active"); err != nil {
 		r.Metrics.RecordStep(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", "resume_total", result(err), r.Clock().Sub(resumeStart))
 		res.Err = fmt.Errorf("waiting for sandbox to resume: %w", err)
@@ -198,6 +238,7 @@ func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) 
 	}
 	r.Metrics.RecordStep(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", "resume_total", "success", r.Clock().Sub(resumeStart))
 
+	logStep("prepare_verification_utilities")
 	if err := r.uploadVerificationUtilities(ctx, sb.ID, resumeResp.AccessToken); err != nil {
 		res.Err = err
 		res.FailedStep = "prepare_verification_utilities"
@@ -205,6 +246,7 @@ func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) 
 	}
 
 	verifyDiskCmd := fmt.Sprintf("sh -lc 'CANARY_DISK_TOKEN=%q sh /tmp/verification-utilities/verify_disk.sh'", diskToken)
+	logStep("verify_disk")
 	if _, err := r.execStep(ctx, sb.ID, resumeResp.AccessToken, "verify_disk", verifyDiskCmd); err != nil {
 		res.Err = fmt.Errorf("verifying disk state: %w", err)
 		res.FailedStep = "verify_disk"
@@ -212,6 +254,7 @@ func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) 
 	}
 
 	verifyMemoryCmd := fmt.Sprintf("sh -lc 'CANARY_MEMORY_TOKEN=%q python3 /tmp/verification-utilities/verify_memory.py'", memoryToken)
+	logStep("verify_memory")
 	if _, err := r.execStep(ctx, sb.ID, resumeResp.AccessToken, "verify_memory", verifyMemoryCmd); err != nil {
 		res.Err = fmt.Errorf("verifying memory state: %w", err)
 		res.FailedStep = "verify_memory"
@@ -219,6 +262,7 @@ func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) 
 	}
 
 	serveToken := "preview-" + runID
+	logStep("seed_preview_page")
 	if err := r.writeSandboxFile(ctx, sb.ID, resumeResp.AccessToken, "/tmp/canary-preview/index.html", []byte(serveToken)); err != nil {
 		res.Err = fmt.Errorf("seeding preview page: %w", err)
 		res.FailedStep = "seed_preview_page"
@@ -226,11 +270,13 @@ func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) 
 	}
 
 	serveCmd := fmt.Sprintf("sh -lc 'mkdir -p /tmp/canary-preview && nohup python3 -m http.server %d --directory /tmp/canary-preview >/tmp/canary-preview.log 2>&1 & sleep 1 && echo preview_started'", r.Config.PreviewPort)
+	logStep("start_http_server")
 	if _, err := r.execStep(ctx, sb.ID, resumeResp.AccessToken, "start_http_server", serveCmd); err != nil {
 		res.Err = fmt.Errorf("starting preview server: %w", err)
 		res.FailedStep = "start_http_server"
 		return res
 	}
+	logStep("check_preview_url")
 	if err := r.verifyPreview(ctx, sb.ID, serveToken); err != nil {
 		res.Err = fmt.Errorf("verifying preview URL: %w", err)
 		res.FailedStep = "check_preview_url"
@@ -447,6 +493,7 @@ func (r Runner) retainSandbox(ctx context.Context, resources RunResources, res R
 
 func (r Runner) deleteSandboxBestEffort(ctx context.Context, sandboxID string) error {
 	start := r.Clock()
+	logStep("delete_request")
 	ctx, cancel := context.WithTimeout(ctx, r.Config.DeleteTimeout)
 	defer cancel()
 	err := r.Client.DeleteSandbox(ctx, sandboxID)
