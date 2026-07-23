@@ -146,6 +146,14 @@ func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) 
 
 	diskToken := "disk-" + uuid.NewString()
 	memoryToken := "mem-" + uuid.NewString()
+	accessTokenPrefix := sb.AccessToken
+	if len(accessTokenPrefix) > 8 {
+		accessTokenPrefix = accessTokenPrefix[:8]
+	}
+	log.Info().
+		Str("sandbox_id", sb.ID).
+		Str("access_token_prefix", accessTokenPrefix).
+		Msg("writing canary token")
 	if err := r.writeSandboxFile(ctx, sb.ID, sb.AccessToken, "/tmp/canary-token", []byte(diskToken)); err != nil {
 		res.Err = fmt.Errorf("seeding canary token: %w", err)
 		res.FailedStep = "seed_canary_token"

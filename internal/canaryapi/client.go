@@ -165,7 +165,7 @@ func (c *Client) Exec(ctx context.Context, sandboxID, accessToken string, req Ex
 }
 
 func (c *Client) WriteFile(ctx context.Context, sandboxID, accessToken, path string, content []byte) error {
-	target, err := url.Parse(c.baseURL + "/files")
+	target, err := url.Parse("https://" + c.previewDomain + "/files")
 	if err != nil {
 		return err
 	}
