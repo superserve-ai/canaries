@@ -82,6 +82,9 @@ func TestWriteFileUsesSandboxTokenAndPathQuery(t *testing.T) {
 	t.Parallel()
 
 	httpClient := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Scheme != "https" || req.URL.Host != "preview.example" {
+			return nil, fmt.Errorf("unexpected URL %s", req.URL)
+		}
 		if req.Method != http.MethodPost {
 			return nil, fmt.Errorf("unexpected method %s", req.Method)
 		}
