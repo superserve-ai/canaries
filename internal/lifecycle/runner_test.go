@@ -83,6 +83,87 @@ func TestUploadVerificationUtilitiesUsesRepoAssets(t *testing.T) {
 	}
 }
 
+func TestWriteSandboxFileWithRetryRetriesTransientProxyErrors(t *testing.T) {
+	attempts := 0
+	client := &fakeClient{
+		writeFileFn: func(context.Context, string, string, string, []byte) error {
+			attempts++
+			if attempts == 1 {
+				return &canaryapi.HTTPStatusError{
+					Method:     http.MethodPost,
+					Path:       "/files",
+					StatusCode: http.StatusServiceUnavailable,
+					Body:       "proxy not ready",
+				}
+			}
+			return nil
+		},
+	}
+	r := Runner{
+		Client: client,
+	}
+
+	if err := r.writeSandboxFileWithRetry(context.Background(), "sb-1", "tok", "/tmp/canary-token", []byte("token")); err != nil {
+		t.Fatalf("writeSandboxFileWithRetry returned %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("expected 2 attempts, got %d", attempts)
+	}
+}
+
+func TestWriteSandboxFileWithRetryRetriesTransientTransportEOF(t *testing.T) {
+	attempts := 0
+	client := &fakeClient{
+		writeFileFn: func(context.Context, string, string, string, []byte) error {
+			attempts++
+			if attempts == 1 {
+				return io.EOF
+			}
+			return nil
+		},
+	}
+	r := Runner{
+		Client: client,
+	}
+
+	if err := r.writeSandboxFileWithRetry(context.Background(), "sb-1", "tok", "/tmp/canary-token", []byte("token")); err != nil {
+		t.Fatalf("writeSandboxFileWithRetry returned %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("expected 2 attempts, got %d", attempts)
+	}
+}
+
+func TestUploadVerificationUtilitiesRetriesTransientWrites(t *testing.T) {
+	attempts := 0
+	client := &fakeClient{
+		writeFileFn: func(context.Context, string, string, string, []byte) error {
+			attempts++
+			if attempts == 1 {
+				return &canaryapi.HTTPStatusError{
+					Method:     http.MethodPost,
+					Path:       "/files",
+					StatusCode: http.StatusGatewayTimeout,
+					Body:       "gateway timeout",
+				}
+			}
+			return nil
+		},
+	}
+	r := Runner{
+		Client:  client,
+		Metrics: metrics.NoopProvider{},
+		Clock:   time.Now,
+	}
+
+	if err := r.uploadVerificationUtilities(context.Background(), "sb-1", "tok"); err != nil {
+		t.Fatalf("uploadVerificationUtilities returned %v", err)
+	}
+	if attempts != 3 {
+		t.Fatalf("expected 3 attempts total, got %d", attempts)
+	}
+}
+
 func TestCleanupPreservesPrimaryFailure(t *testing.T) {
 	deleteCalled := false
 	client := &fakeClient{
