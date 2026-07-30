@@ -123,3 +123,62 @@ func TestWriteFileUsesSandboxTokenAndPathQuery(t *testing.T) {
 		t.Fatalf("WriteFile returned %v", err)
 	}
 }
+
+func TestPublishPreviewPortUsesPreviewPortEndpoint(t *testing.T) {
+	t.Parallel()
+
+	httpClient := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Method != http.MethodPost {
+			return nil, fmt.Errorf("unexpected method %s", req.Method)
+		}
+		if req.URL.Path != "/sandboxes/sb-123/preview-ports" {
+			return nil, fmt.Errorf("unexpected path %s", req.URL.Path)
+		}
+		if got := req.Header.Get("X-API-Key"); got != "api-key" {
+			return nil, fmt.Errorf("unexpected api key %q", got)
+		}
+		if got := req.Header.Get("Content-Type"); got != "application/json" {
+			return nil, fmt.Errorf("unexpected content type %q", got)
+		}
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
+		if string(body) != `{"port":18080,"access":"public"}` {
+			return nil, fmt.Errorf("unexpected body %q", string(body))
+		}
+		return &http.Response{
+			StatusCode: http.StatusCreated,
+			Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})}
+	client := NewClient(httpClient, "https://api.example", "api-key", "preview.example")
+
+	if err := client.PublishPreviewPort(context.Background(), "sb-123", PublishPreviewPortRequest{Port: 18080, Access: "public"}); err != nil {
+		t.Fatalf("PublishPreviewPort returned %v", err)
+	}
+}
+
+func TestPublishPreviewPortRejectsUnexpectedStatus(t *testing.T) {
+	t.Parallel()
+
+	httpClient := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusInternalServerError,
+			Body:       io.NopCloser(strings.NewReader("boom")),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})}
+	client := NewClient(httpClient, "https://api.example", "api-key", "preview.example")
+
+	err := client.PublishPreviewPort(context.Background(), "sb-123", PublishPreviewPortRequest{Port: 18080, Access: "public"})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if got := err.Error(); !strings.Contains(got, "unexpected status 500") {
+		t.Fatalf("unexpected error %q", got)
+	}
+}

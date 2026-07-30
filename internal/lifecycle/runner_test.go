@@ -166,6 +166,10 @@ func TestRunLifecycleRecordsTotalDurations(t *testing.T) {
 			clock.Advance(17 * time.Second)
 			return canaryapi.ResumeResponse{ID: "sb-1", Status: "active", AccessToken: "resume-token"}, nil
 		},
+		publishPreviewPortFn: func(context.Context, string, canaryapi.PublishPreviewPortRequest) error {
+			clock.Advance(39 * time.Second)
+			return nil
+		},
 		previewURLFn: func(string, int) string { return "https://preview.example.test" },
 		writeFileFn: func(_ context.Context, sandboxID, _ string, path string, _ []byte) error {
 			if sandboxID != "sb-1" {
@@ -247,6 +251,7 @@ func TestRunLifecycleRecordsTotalDurations(t *testing.T) {
 		"verify_disk":                    29 * time.Second,
 		"verify_memory":                  31 * time.Second,
 		"start_http_server":              37 * time.Second,
+		"publish_preview_port":           39 * time.Second,
 		"preview":                        41 * time.Second,
 		"delete_request":                 43 * time.Second,
 	}
@@ -254,6 +259,156 @@ func TestRunLifecycleRecordsTotalDurations(t *testing.T) {
 		if got := metrics.durations[step]; got != want {
 			t.Fatalf("%s duration = %s, want %s", step, got, want)
 		}
+	}
+}
+
+func TestRunLifecyclePublishesPreviewPortBeforeCheckingPreviewURL(t *testing.T) {
+	order := []string{}
+	status := "active"
+	client := &fakeClient{
+		createSandboxFn: func(context.Context, canaryapi.CreateSandboxRequest) (canaryapi.Sandbox, error) {
+			return canaryapi.Sandbox{ID: "sb-1", Status: "active", AccessToken: "tok"}, nil
+		},
+		getSandboxFn: func(context.Context, string) (canaryapi.Sandbox, error) {
+			return canaryapi.Sandbox{ID: "sb-1", Status: status, AccessToken: "tok"}, nil
+		},
+		pauseSandboxFn: func(context.Context, string) error {
+			status = "paused"
+			return nil
+		},
+		resumeSandboxFn: func(context.Context, string) (canaryapi.ResumeResponse, error) {
+			status = "active"
+			return canaryapi.ResumeResponse{ID: "sb-1", Status: "active", AccessToken: "resume-token"}, nil
+		},
+		publishPreviewPortFn: func(context.Context, string, canaryapi.PublishPreviewPortRequest) error {
+			order = append(order, "publish_preview_port")
+			return nil
+		},
+		writeFileFn: func(context.Context, string, string, string, []byte) error { return nil },
+		execFn: func(_ context.Context, _ string, _ string, req canaryapi.ExecRequest) (canaryapi.ExecResult, error) {
+			switch {
+			case strings.Contains(req.Command, "time.sleep(3600)"):
+				return canaryapi.ExecResult{ExitCode: 0}, nil
+			case strings.Contains(req.Command, "http.server"):
+				return canaryapi.ExecResult{ExitCode: 0}, nil
+			case strings.Contains(req.Command, "verify_disk.sh"):
+				return canaryapi.ExecResult{ExitCode: 0}, nil
+			case strings.Contains(req.Command, "verify_memory.py"):
+				return canaryapi.ExecResult{ExitCode: 0}, nil
+			default:
+				t.Fatalf("unexpected exec command: %s", req.Command)
+				return canaryapi.ExecResult{}, nil
+			}
+		},
+		previewURLFn: func(string, int) string {
+			order = append(order, "preview_url")
+			return "https://preview.example.test"
+		},
+		deleteSandboxFn: func(context.Context, string) error { return nil },
+	}
+	r := Runner{
+		Config: config.Config{
+			Target:                 "staging-us-central1",
+			Environment:            "staging",
+			Region:                 "us-central1",
+			ResourceTTL:            time.Hour,
+			PollInterval:           time.Millisecond,
+			CommandTimeout:         20 * time.Millisecond,
+			DeleteTimeout:          20 * time.Millisecond,
+			PreviewPort:            18080,
+			PreviewTimeout:         20 * time.Millisecond,
+			RetainFailedSandbox:    false,
+			RetainFailedSandboxTTL: 2 * time.Hour,
+		},
+		Client:  client,
+		Locker:  lock.NoopLock{},
+		Metrics: metrics.NoopProvider{},
+		Clock:   time.Now,
+		HTTP: &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader("preview-run-1")),
+					Header:     make(http.Header),
+					Request:    req,
+				}, nil
+			}),
+		},
+	}
+
+	if result := r.runLifecycle(context.Background(), "run-1"); result.Err != nil {
+		t.Fatalf("runLifecycle returned %v", result.Err)
+	}
+	if len(order) != 2 {
+		t.Fatalf("expected 2 calls, got %v", order)
+	}
+	if order[0] != "publish_preview_port" || order[1] != "preview_url" {
+		t.Fatalf("unexpected call order %v", order)
+	}
+}
+
+func TestRunLifecycleFailsWhenPreviewPortPublicationFails(t *testing.T) {
+	status := "active"
+	client := &fakeClient{
+		createSandboxFn: func(context.Context, canaryapi.CreateSandboxRequest) (canaryapi.Sandbox, error) {
+			return canaryapi.Sandbox{ID: "sb-1", Status: "active", AccessToken: "tok"}, nil
+		},
+		getSandboxFn: func(context.Context, string) (canaryapi.Sandbox, error) {
+			return canaryapi.Sandbox{ID: "sb-1", Status: status, AccessToken: "tok"}, nil
+		},
+		pauseSandboxFn: func(context.Context, string) error {
+			status = "paused"
+			return nil
+		},
+		resumeSandboxFn: func(context.Context, string) (canaryapi.ResumeResponse, error) {
+			status = "active"
+			return canaryapi.ResumeResponse{ID: "sb-1", Status: "active", AccessToken: "resume-token"}, nil
+		},
+		publishPreviewPortFn: func(context.Context, string, canaryapi.PublishPreviewPortRequest) error {
+			return errors.New("unexpected status 500")
+		},
+		writeFileFn: func(context.Context, string, string, string, []byte) error { return nil },
+		execFn: func(_ context.Context, _ string, _ string, req canaryapi.ExecRequest) (canaryapi.ExecResult, error) {
+			switch {
+			case strings.Contains(req.Command, "time.sleep(3600)"):
+				return canaryapi.ExecResult{ExitCode: 0}, nil
+			case strings.Contains(req.Command, "http.server"):
+				return canaryapi.ExecResult{ExitCode: 0}, nil
+			default:
+				return canaryapi.ExecResult{ExitCode: 0}, nil
+			}
+		},
+		deleteSandboxFn: func(context.Context, string) error { return nil },
+	}
+	r := Runner{
+		Config: config.Config{
+			Target:                 "staging-us-central1",
+			Environment:            "staging",
+			Region:                 "us-central1",
+			ResourceTTL:            time.Hour,
+			PollInterval:           time.Millisecond,
+			CommandTimeout:         20 * time.Millisecond,
+			DeleteTimeout:          20 * time.Millisecond,
+			PreviewPort:            18080,
+			PreviewTimeout:         20 * time.Millisecond,
+			RetainFailedSandbox:    false,
+			RetainFailedSandboxTTL: 2 * time.Hour,
+		},
+		Client:  client,
+		Locker:  lock.NoopLock{},
+		Metrics: metrics.NoopProvider{},
+		Clock:   time.Now,
+	}
+
+	result := r.runLifecycle(context.Background(), "run-1")
+	if result.Err == nil {
+		t.Fatal("expected error")
+	}
+	if result.FailedStep != "publish_preview_port" {
+		t.Fatalf("failed step = %q", result.FailedStep)
+	}
+	if got := result.Err.Error(); !strings.Contains(got, "publishing preview port") {
+		t.Fatalf("unexpected error %q", got)
 	}
 }
 
@@ -693,15 +848,16 @@ func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 type fakeClient struct {
-	createSandboxFn func(context.Context, canaryapi.CreateSandboxRequest) (canaryapi.Sandbox, error)
-	getSandboxFn    func(context.Context, string) (canaryapi.Sandbox, error)
-	pauseSandboxFn  func(context.Context, string) error
-	resumeSandboxFn func(context.Context, string) (canaryapi.ResumeResponse, error)
-	deleteSandboxFn func(context.Context, string) error
-	updateSandboxFn func(context.Context, string, canaryapi.UpdateSandboxRequest) error
-	writeFileFn     func(context.Context, string, string, string, []byte) error
-	execFn          func(context.Context, string, string, canaryapi.ExecRequest) (canaryapi.ExecResult, error)
-	previewURLFn    func(string, int) string
+	createSandboxFn      func(context.Context, canaryapi.CreateSandboxRequest) (canaryapi.Sandbox, error)
+	getSandboxFn         func(context.Context, string) (canaryapi.Sandbox, error)
+	pauseSandboxFn       func(context.Context, string) error
+	resumeSandboxFn      func(context.Context, string) (canaryapi.ResumeResponse, error)
+	deleteSandboxFn      func(context.Context, string) error
+	updateSandboxFn      func(context.Context, string, canaryapi.UpdateSandboxRequest) error
+	writeFileFn          func(context.Context, string, string, string, []byte) error
+	execFn               func(context.Context, string, string, canaryapi.ExecRequest) (canaryapi.ExecResult, error)
+	publishPreviewPortFn func(context.Context, string, canaryapi.PublishPreviewPortRequest) error
+	previewURLFn         func(string, int) string
 }
 
 func (f *fakeClient) CreateSandbox(ctx context.Context, req canaryapi.CreateSandboxRequest) (canaryapi.Sandbox, error) {
@@ -738,6 +894,13 @@ func (f *fakeClient) UpdateSandbox(ctx context.Context, id string, req canaryapi
 		return nil
 	}
 	return f.updateSandboxFn(ctx, id, req)
+}
+
+func (f *fakeClient) PublishPreviewPort(ctx context.Context, id string, req canaryapi.PublishPreviewPortRequest) error {
+	if f.publishPreviewPortFn == nil {
+		return nil
+	}
+	return f.publishPreviewPortFn(ctx, id, req)
 }
 
 func (f *fakeClient) WriteFile(ctx context.Context, sandboxID, accessToken, path string, content []byte) error {

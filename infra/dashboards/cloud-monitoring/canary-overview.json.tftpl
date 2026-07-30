@@ -59,22 +59,36 @@ ${jsonencode({
               {
                 timeSeriesQuery = {
                   prometheusQuery = format(
-                    "increase(superserve_canary_run_total{environment=%q,region=~\"$${region}\",scenario=\"lifecycle\",result=\"success\"}[5m])",
+                    "((sum(increase(superserve_canary_run_total{environment=%q,region=~\"$${region}\",scenario=\"lifecycle\",result=~\"success|failure\"}[15m])) or vector(0)) > bool 0) * (((max_over_time(superserve_canary_last_success_timestamp_seconds{environment=%q,region=~\"$${region}\",scenario=\"lifecycle\",result=\"success\"}[15m]) or vector(0)) + 5) >= bool (max_over_time(superserve_canary_last_completed_timestamp_seconds{environment=%q,region=~\"$${region}\",scenario=\"lifecycle\"}[15m]) or vector(0)))",
+                    environment,
+                    environment,
                     environment
                   )
                 }
                 plotType = "STACKED_BAR"
-                legendTemplate = "Healthy runs"
+                legendTemplate = "Healthy"
               },
               {
                 timeSeriesQuery = {
                   prometheusQuery = format(
-                    "-1 * increase(superserve_canary_run_total{environment=%q,region=~\"$${region}\",scenario=\"lifecycle\",result=\"failure\"}[5m])",
+                    "((sum(increase(superserve_canary_run_total{environment=%q,region=~\"$${region}\",scenario=\"lifecycle\",result=~\"success|failure\"}[15m])) or vector(0)) > bool 0) * (1 - (((max_over_time(superserve_canary_last_success_timestamp_seconds{environment=%q,region=~\"$${region}\",scenario=\"lifecycle\",result=\"success\"}[15m]) or vector(0)) + 5) >= bool (max_over_time(superserve_canary_last_completed_timestamp_seconds{environment=%q,region=~\"$${region}\",scenario=\"lifecycle\"}[15m]) or vector(0))))",
+                    environment,
+                    environment,
                     environment
                   )
                 }
                 plotType = "STACKED_BAR"
                 legendTemplate = "Failing"
+              },
+              {
+                timeSeriesQuery = {
+                  prometheusQuery = format(
+                    "1 - ((sum(increase(superserve_canary_run_total{environment=%q,region=~\"$${region}\",scenario=\"lifecycle\",result=~\"success|failure\"}[15m])) or vector(0)) > bool 0)",
+                    environment
+                  )
+                }
+                plotType = "STACKED_BAR"
+                legendTemplate = "No recent completed run"
               }
             ]
           }

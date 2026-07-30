@@ -65,6 +65,7 @@ type Client interface {
 	ResumeSandbox(context.Context, string) (canaryapi.ResumeResponse, error)
 	DeleteSandbox(context.Context, string) error
 	UpdateSandbox(context.Context, string, canaryapi.UpdateSandboxRequest) error
+	PublishPreviewPort(context.Context, string, canaryapi.PublishPreviewPortRequest) error
 	WriteFile(context.Context, string, string, string, []byte) error
 	Exec(context.Context, string, string, canaryapi.ExecRequest) (canaryapi.ExecResult, error)
 	PreviewURL(string, int) string
@@ -276,6 +277,15 @@ func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) 
 		res.FailedStep = "start_http_server"
 		return res
 	}
+	logStep("publish_preview_port")
+	publishStart := r.Clock()
+	err = r.publishPreviewPort(ctx, sb.ID)
+	r.Metrics.RecordStep(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", "publish_preview_port", result(err), r.Clock().Sub(publishStart))
+	if err != nil {
+		res.Err = fmt.Errorf("publishing preview port: %w", err)
+		res.FailedStep = "publish_preview_port"
+		return res
+	}
 	logStep("check_preview_url")
 	if err := r.verifyPreview(ctx, sb.ID, serveToken); err != nil {
 		res.Err = fmt.Errorf("verifying preview URL: %w", err)
@@ -288,6 +298,16 @@ func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) 
 	}
 
 	return res
+}
+
+func (r Runner) publishPreviewPort(ctx context.Context, sandboxID string) error {
+	if err := r.Client.PublishPreviewPort(ctx, sandboxID, canaryapi.PublishPreviewPortRequest{
+		Port:   r.Config.PreviewPort,
+		Access: "public",
+	}); err != nil {
+		return fmt.Errorf("publishing preview port %d: %w", r.Config.PreviewPort, err)
+	}
+	return nil
 }
 
 func (r Runner) writeSandboxFile(ctx context.Context, sandboxID, accessToken, path string, content []byte) error {

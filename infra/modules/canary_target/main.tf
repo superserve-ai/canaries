@@ -200,16 +200,16 @@ resource "google_cloud_scheduler_job" "lifecycle" {
 resource "google_monitoring_alert_policy" "two_failures" {
   count                 = var.create_alerts ? 1 : 0
   project               = var.project_id
-  display_name          = "API Canary ${var.target_name}: two consecutive failures"
+  display_name          = "API Canary ${var.target_name}: two failures in 15m without success"
   combiner              = "OR"
   enabled               = true
   notification_channels = var.notification_channel_ids
 
   conditions {
-    display_name = "Two failed lifecycle runs in 11m without success"
+    display_name = "Two failed lifecycle runs in 15m without success"
 
     condition_prometheus_query_language {
-      query                     = "increase(superserve_canary_run_total{target=\"${var.target_name}\",scenario=\"lifecycle\",result=\"failure\"}[11m]) >= 2 and increase(superserve_canary_run_total{target=\"${var.target_name}\",scenario=\"lifecycle\",result=\"success\"}[11m]) == 0"
+      query                     = "sum(increase(superserve_canary_run_total{target=\"${var.target_name}\",scenario=\"lifecycle\",result=\"failure\"}[15m])) >= 2 and (sum(increase(superserve_canary_run_total{target=\"${var.target_name}\",scenario=\"lifecycle\",result=\"success\"}[15m])) or vector(0)) == 0"
       duration                  = "0s"
       disable_metric_validation = true
     }
@@ -238,7 +238,7 @@ resource "google_monitoring_alert_policy" "missing_runs" {
     display_name = "No lifecycle success or failure metric in 15m"
 
     condition_prometheus_query_language {
-      query                     = "increase(superserve_canary_run_total{target=\"${var.target_name}\",scenario=\"lifecycle\",result=~\"success|failure\"}[15m]) == 0"
+      query                     = "((sum(increase(superserve_canary_run_total{target=\"${var.target_name}\",scenario=\"lifecycle\",result=~\"success|failure\"}[15m])) or vector(0)) == 0)"
       duration                  = "0s"
       disable_metric_validation = true
     }

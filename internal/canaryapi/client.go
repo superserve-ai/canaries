@@ -54,6 +54,11 @@ type UpdateSandboxRequest struct {
 	TimeoutSeconds    *int              `json:"timeout_seconds,omitempty"`
 }
 
+type PublishPreviewPortRequest struct {
+	Port   int    `json:"port"`
+	Access string `json:"access"`
+}
+
 type ExecRequest struct {
 	Command    string `json:"command"`
 	WorkingDir string `json:"working_dir,omitempty"`
@@ -134,6 +139,25 @@ func (c *Client) ResumeSandbox(ctx context.Context, id string) (ResumeResponse, 
 
 func (c *Client) UpdateSandbox(ctx context.Context, id string, req UpdateSandboxRequest) error {
 	return c.doPatch(ctx, "/sandboxes/"+url.PathEscape(id), req)
+}
+
+func (c *Client) PublishPreviewPort(ctx context.Context, sandboxID string, req PublishPreviewPortRequest) error {
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return err
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/sandboxes/"+url.PathEscape(sandboxID)+"/preview-ports", bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	httpReq.Header.Set("X-API-Key", c.apiKey)
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return require2xx(http.MethodPost, "/sandboxes/"+url.PathEscape(sandboxID)+"/preview-ports", resp)
 }
 
 func (c *Client) Exec(ctx context.Context, sandboxID, accessToken string, req ExecRequest) (ExecResult, error) {
@@ -288,6 +312,13 @@ func requireStatus(method, path string, resp *http.Response, allowed ...int) err
 		return fmt.Errorf("%s %s: %w", method, path, ErrNotFound)
 	}
 	return fmt.Errorf("%s %s: unexpected status %d: %s", method, path, resp.StatusCode, strings.TrimSpace(string(body)))
+}
+
+func require2xx(method, path string, resp *http.Response) error {
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return nil
+	}
+	return requireStatus(method, path, resp)
 }
 
 var ErrNotFound = errors.New("resource not found")

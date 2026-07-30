@@ -32,7 +32,7 @@ locals {
     production-us-west2 = {
       target_region       = "us-west2"
       job_region          = "us-west2"
-      api_base_url        = "https://usw-api.superserve.ai"
+      api_base_url        = "https://api-usw.superserve.ai"
       preview_domain      = "usw-sandbox.superserve.ai"
       api_key_secret_name = "api-canary-key-production-us-west2"
       otlp_endpoint       = local.otlp_endpoints.production-us-west2
