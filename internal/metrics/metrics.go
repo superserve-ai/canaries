@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -15,6 +17,7 @@ import (
 	"go.opentelemetry.io/otel/exporters/stdout/stdoutmetric"
 	"go.opentelemetry.io/otel/metric"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/resource"
 	"google.golang.org/api/option"
 	"google.golang.org/api/transport"
 
@@ -77,7 +80,7 @@ func NewProvider(ctx context.Context, cfg config.Config) (Provider, func(context
 		if err != nil {
 			return nil, nil, err
 		}
-		return newSDKProvider(ctx, exporter)
+		return newSDKProvider(ctx, exporter, cfg)
 	case config.MetricsExporterOTLP:
 		if cfg.OTELExporterOTLPMetricsEndpoint == "" {
 			return nil, nil, errors.New("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT is required when CANARY_METRICS_EXPORTER=otlp")
@@ -95,7 +98,7 @@ func NewProvider(ctx context.Context, cfg config.Config) (Provider, func(context
 		if err != nil {
 			return nil, nil, err
 		}
-		return newSDKProvider(ctx, exporter)
+		return newSDKProvider(ctx, exporter, cfg)
 	default:
 		return nil, nil, fmt.Errorf("unsupported metrics exporter %q", cfg.MetricsExporter)
 	}
@@ -116,9 +119,16 @@ func otlpHTTPClient(ctx context.Context, endpoint string) (*http.Client, error) 
 	return client, nil
 }
 
-func newSDKProvider(_ context.Context, exporter sdkmetric.Exporter) (Provider, func(context.Context) error, error) {
+func newSDKProvider(_ context.Context, exporter sdkmetric.Exporter, cfg config.Config) (Provider, func(context.Context) error, error) {
+	res, err := metricResource(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
 	reader := sdkmetric.NewPeriodicReader(exporter, sdkmetric.WithInterval(15*time.Second))
-	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	mp := sdkmetric.NewMeterProvider(
+		sdkmetric.WithReader(reader),
+		sdkmetric.WithResource(res),
+	)
 	otel.SetMeterProvider(mp)
 	meter := mp.Meter("github.com/superserve-ai/canaries")
 
@@ -156,6 +166,24 @@ func newSDKProvider(_ context.Context, exporter sdkmetric.Exporter) (Provider, f
 		lastCompleted:            lastCompleted,
 		lastSuccess:              lastSuccess,
 	}, mp.Shutdown, nil
+}
+
+func metricResource(cfg config.Config) (*resource.Resource, error) {
+	custom := resource.NewSchemaless(
+		attribute.String("service.name", cfg.Metrics.ServiceName),
+		attribute.String("service.instance.id", serviceInstanceID()),
+	)
+	return resource.Merge(resource.Default(), custom)
+}
+
+func serviceInstanceID() string {
+	if v := strings.TrimSpace(os.Getenv("CLOUD_RUN_EXECUTION")); v != "" {
+		return v
+	}
+	if v := strings.TrimSpace(os.Getenv("HOSTNAME")); v != "" {
+		return v
+	}
+	return "unknown"
 }
 
 func (p *recorder) attrs(environment, region, target, scenario, step, result string) []attribute.KeyValue {

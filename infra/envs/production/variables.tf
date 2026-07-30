@@ -5,7 +5,7 @@ variable "project_id" {
 
 variable "job_region" {
   type    = string
-  default = "us-central1"
+  default = "us-east4"
 }
 
 variable "image" {

@@ -72,3 +72,32 @@ func TestNewProvider(t *testing.T) {
 		}
 	})
 }
+
+func TestServiceInstanceID(t *testing.T) {
+	t.Run("prefers cloud run execution", func(t *testing.T) {
+		t.Setenv("CLOUD_RUN_EXECUTION", "execution-123")
+		t.Setenv("HOSTNAME", "hostname-ignored")
+
+		if got, want := serviceInstanceID(), "execution-123"; got != want {
+			t.Fatalf("serviceInstanceID() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("falls back to hostname", func(t *testing.T) {
+		t.Setenv("CLOUD_RUN_EXECUTION", "")
+		t.Setenv("HOSTNAME", "host-456")
+
+		if got, want := serviceInstanceID(), "host-456"; got != want {
+			t.Fatalf("serviceInstanceID() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("uses unknown when unset", func(t *testing.T) {
+		t.Setenv("CLOUD_RUN_EXECUTION", "")
+		t.Setenv("HOSTNAME", "")
+
+		if got, want := serviceInstanceID(), "unknown"; got != want {
+			t.Fatalf("serviceInstanceID() = %q, want %q", got, want)
+		}
+	})
+}

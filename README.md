@@ -4,7 +4,6 @@ This repository deploys independent scheduled API lifecycle canaries for Superse
 
 Current targets:
 - `staging/us-central1`
-- `production/us-central1`
 - `production/us-east4`
 - `production/us-west2`
 
@@ -47,8 +46,7 @@ Discovered from `sandbox`:
 | Target | Project | Region | API base URL | Preview domain |
 | --- | --- | --- | --- | --- |
 | staging | `rayai-dev` | `us-central1` | `https://api-staging.superserve.ai` | `staging-sandbox.superserve.ai` |
-| production central | `rayai-prod` | `us-central1` | `https://api.superserve.ai` | `sandbox.superserve.ai` |
-| production east | `rayai-prod` | `us-east4` | `https://api.superserve.ai` | `use-sandbox.superserve.ai` |
+| production east | `rayai-prod` | `us-east4` | `https://api.superserve.ai` | `sandbox.superserve.ai` |
 | production west | `rayai-prod` | `us-west2` | `https://usw-api.superserve.ai` | `usw-sandbox.superserve.ai` |
 
 ## Required Secrets
@@ -57,7 +55,6 @@ Terraform creates secret containers only. Populate versions manually after apply
 
 Expected secret names:
 - `api-canary-key-staging-us-central1`
-- `api-canary-key-production-us-central1`
 - `api-canary-key-production-us-east4`
 - `api-canary-key-production-us-west2`
 
@@ -248,27 +245,17 @@ Production lifecycle canaries are scheduled automatically after the production T
 The east production region uses the public Google Telemetry API instead of the private collector path, so it does not need VPC access.
 
 Checklist:
-1. Confirm the production lifecycle and janitor jobs were created for all three regions.
+1. Confirm the production lifecycle and janitor jobs were created for both active regions.
 2. Populate the production Secret Manager secret versions with the canary API keys.
 3. Verify the scheduled lifecycle executions start after the secrets are populated.
 4. Inspect the job logs for the created run ID, sandbox ID, and cleanup outcome.
-5. If a run fails or leaves a resource behind, execute the matching janitor job.
+5. If a run fails or leaves a resource behind, execute the matching janitor job for that region.
 6. Retained sandboxes carry `retained_for_debug=true`, `failed_step`, `retained_at`, and `expires_at` metadata.
 
 Exact production job commands:
 
 ```bash
-gcloud run jobs execute api-canary-production-us-central1 \
-  --project rayai-prod \
-  --region us-central1 \
-  --wait
-
-gcloud run jobs execute api-canary-janitor-production-us-central1 \
-  --project rayai-prod \
-  --region us-central1 \
-  --wait
-
-gcloud run jobs execute api-canary-production-us-east4 \
+ gcloud run jobs execute api-canary-production-us-east4 \
   --project rayai-prod \
   --region us-east4 \
   --wait
