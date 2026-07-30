@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -264,7 +265,7 @@ func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) 
 
 	serveToken := "preview-" + runID
 	logStep("seed_preview_page")
-	if err := r.writeSandboxFile(ctx, sb.ID, resumeResp.AccessToken, "/tmp/canary-preview/index.html", []byte(serveToken)); err != nil {
+	if err := r.writeSandboxFileWithRetry(ctx, sb.ID, resumeResp.AccessToken, "/tmp/canary-preview/index.html", []byte(serveToken)); err != nil {
 		res.Err = fmt.Errorf("seeding preview page: %w", err)
 		res.FailedStep = "seed_preview_page"
 		return res
@@ -318,17 +319,16 @@ func (r Runner) writeSandboxFile(ctx context.Context, sandboxID, accessToken, pa
 }
 
 func (r Runner) writeSandboxFileWithRetry(ctx context.Context, sandboxID, accessToken, path string, content []byte) error {
-	const maxAttempts = 3
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
+	delays := []time.Duration{250 * time.Millisecond, 500 * time.Millisecond, 1 * time.Second, 2 * time.Second}
+	for attempt := 0; attempt <= len(delays); attempt++ {
 		err := r.writeSandboxFile(ctx, sandboxID, accessToken, path, content)
 		if err == nil {
 			return nil
 		}
-		if !isTransientWriteFileError(err) || attempt == maxAttempts {
+		if !isTransientWriteFileError(err) || attempt == len(delays) {
 			return err
 		}
-		delay := time.Duration(attempt) * 250 * time.Millisecond
-		timer := time.NewTimer(delay)
+		timer := time.NewTimer(delays[attempt])
 		select {
 		case <-ctx.Done():
 			timer.Stop()
@@ -342,7 +342,25 @@ func (r Runner) writeSandboxFileWithRetry(ctx context.Context, sandboxID, access
 func isTransientWriteFileError(err error) bool {
 	var statusErr *canaryapi.HTTPStatusError
 	if !errors.As(err, &statusErr) {
-		return false
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return true
+		}
+		var netErr net.Error
+		if errors.As(err, &netErr) && (netErr.Timeout() || netErr.Temporary()) {
+			return true
+		}
+		lower := strings.ToLower(err.Error())
+		switch {
+		case strings.Contains(lower, "connection reset by peer"),
+			strings.Contains(lower, "connection refused"),
+			strings.Contains(lower, "broken pipe"),
+			strings.Contains(lower, "use of closed network connection"),
+			strings.Contains(lower, "eof"),
+			strings.Contains(lower, "timeout"):
+			return true
+		default:
+			return false
+		}
 	}
 	switch statusErr.StatusCode {
 	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:

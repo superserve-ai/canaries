@@ -24,7 +24,7 @@ func (r Runner) uploadVerificationUtilities(ctx context.Context, sandboxID, acce
 			break
 		}
 		target := filepath.Join("/tmp/verification-utilities", filepath.Base(name))
-		if writeErr := r.Client.WriteFile(ctx, sandboxID, accessToken, target, content); writeErr != nil {
+		if writeErr := r.writeSandboxFileWithRetry(ctx, sandboxID, accessToken, target, content); writeErr != nil {
 			err = fmt.Errorf("write verification utility %s: %w", name, writeErr)
 			break
 		}
