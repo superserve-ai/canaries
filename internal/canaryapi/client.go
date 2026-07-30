@@ -84,6 +84,17 @@ type ErrorResponse struct {
 	} `json:"error"`
 }
 
+type HTTPStatusError struct {
+	Method     string
+	Path       string
+	StatusCode int
+	Body       string
+}
+
+func (e *HTTPStatusError) Error() string {
+	return fmt.Sprintf("%s %s: unexpected status %d: %s", e.Method, e.Path, e.StatusCode, strings.TrimSpace(e.Body))
+}
+
 func (c *Client) CreateSandbox(ctx context.Context, req CreateSandboxRequest) (Sandbox, error) {
 	var out Sandbox
 	err := c.doJSON(ctx, http.MethodPost, "/sandboxes", req, &out)
@@ -311,7 +322,12 @@ func requireStatus(method, path string, resp *http.Response, allowed ...int) err
 	if resp.StatusCode == http.StatusNotFound {
 		return fmt.Errorf("%s %s: %w", method, path, ErrNotFound)
 	}
-	return fmt.Errorf("%s %s: unexpected status %d: %s", method, path, resp.StatusCode, strings.TrimSpace(string(body)))
+	return &HTTPStatusError{
+		Method:     method,
+		Path:       path,
+		StatusCode: resp.StatusCode,
+		Body:       string(body),
+	}
 }
 
 func require2xx(method, path string, resp *http.Response) error {

@@ -190,7 +190,7 @@ func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) 
 		Str("access_token_prefix", accessTokenPrefix).
 		Msg("writing canary token")
 	logStep("seed_canary_token")
-	if err := r.writeSandboxFile(ctx, sb.ID, sb.AccessToken, "/tmp/canary-token", []byte(diskToken)); err != nil {
+	if err := r.writeSandboxFileWithRetry(ctx, sb.ID, sb.AccessToken, "/tmp/canary-token", []byte(diskToken)); err != nil {
 		res.Err = fmt.Errorf("seeding canary token: %w", err)
 		res.FailedStep = "seed_canary_token"
 		return res
@@ -315,6 +315,41 @@ func (r Runner) writeSandboxFile(ctx context.Context, sandboxID, accessToken, pa
 		return fmt.Errorf("writing %s: %w", path, err)
 	}
 	return nil
+}
+
+func (r Runner) writeSandboxFileWithRetry(ctx context.Context, sandboxID, accessToken, path string, content []byte) error {
+	const maxAttempts = 3
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		err := r.writeSandboxFile(ctx, sandboxID, accessToken, path, content)
+		if err == nil {
+			return nil
+		}
+		if !isTransientWriteFileError(err) || attempt == maxAttempts {
+			return err
+		}
+		delay := time.Duration(attempt) * 250 * time.Millisecond
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return fmt.Errorf("writing %s: %w", path, ctx.Err())
+		case <-timer.C:
+		}
+	}
+	return nil
+}
+
+func isTransientWriteFileError(err error) bool {
+	var statusErr *canaryapi.HTTPStatusError
+	if !errors.As(err, &statusErr) {
+		return false
+	}
+	switch statusErr.StatusCode {
+	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
+	}
 }
 
 func (r Runner) execStep(ctx context.Context, sandboxID, accessToken, step, command string) (canaryapi.ExecResult, error) {

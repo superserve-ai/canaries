@@ -83,6 +83,34 @@ func TestUploadVerificationUtilitiesUsesRepoAssets(t *testing.T) {
 	}
 }
 
+func TestWriteSandboxFileWithRetryRetriesTransientProxyErrors(t *testing.T) {
+	attempts := 0
+	client := &fakeClient{
+		writeFileFn: func(context.Context, string, string, string, []byte) error {
+			attempts++
+			if attempts == 1 {
+				return &canaryapi.HTTPStatusError{
+					Method:     http.MethodPost,
+					Path:       "/files",
+					StatusCode: http.StatusServiceUnavailable,
+					Body:       "proxy not ready",
+				}
+			}
+			return nil
+		},
+	}
+	r := Runner{
+		Client: client,
+	}
+
+	if err := r.writeSandboxFileWithRetry(context.Background(), "sb-1", "tok", "/tmp/canary-token", []byte("token")); err != nil {
+		t.Fatalf("writeSandboxFileWithRetry returned %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("expected 2 attempts, got %d", attempts)
+	}
+}
+
 func TestCleanupPreservesPrimaryFailure(t *testing.T) {
 	deleteCalled := false
 	client := &fakeClient{
