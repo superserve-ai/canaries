@@ -147,6 +147,14 @@ resource "google_cloud_run_v2_job" "lifecycle" {
           value = var.environment
         }
         env {
+          name = "OTEL_RESOURCE_ATTRIBUTES"
+          value = join(",", [
+            "gcp.project_id=${var.project_id}",
+            "cloud.region=${var.target_region}",
+            "deployment.environment.name=${var.environment}",
+          ])
+        }
+        env {
           name  = "OTEL_EXPORTER_OTLP_ENDPOINT"
           value = var.otlp_metrics_endpoint
         }
