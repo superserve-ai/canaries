@@ -205,6 +205,45 @@ resource "google_cloud_scheduler_job" "lifecycle" {
   }
 }
 
+resource "google_monitoring_alert_policy" "cloud_run_job_failed" {
+  count                 = var.create_alerts ? 1 : 0
+  project               = var.project_id
+  display_name          = "API Canary ${var.target_name}: Cloud Run job failed"
+  combiner              = "OR"
+  enabled               = true
+  notification_channels = var.notification_channel_ids
+
+  conditions {
+    display_name = "Cloud Run canary execution failed"
+
+    condition_matched_log {
+      filter = <<-EOT
+        resource.type="cloud_run_job"
+        AND resource.labels.job_name="${google_cloud_run_v2_job.lifecycle.name}"
+        AND severity>=ERROR
+        AND protoPayload.serviceName="run.googleapis.com"
+        AND protoPayload.methodName="/Jobs.RunJob"
+        AND protoPayload.status.code=10
+      EOT
+    }
+  }
+
+  alert_strategy {
+    notification_rate_limit {
+      period = "300s"
+    }
+
+    auto_close = "1800s"
+  }
+
+  documentation {
+    content   = "Cloud Run reported a failed execution for API canary target ${var.target_name}. Investigate the Cloud Run Job execution and logs. This alert does not depend on canary OTLP metrics."
+    mime_type = "text/markdown"
+  }
+
+  user_labels = local.labels
+}
+
 resource "google_monitoring_alert_policy" "two_failures" {
   count                 = var.create_alerts ? 1 : 0
   project               = var.project_id
