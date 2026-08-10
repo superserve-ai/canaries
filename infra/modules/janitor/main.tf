@@ -17,6 +17,38 @@ resource "google_service_account" "runtime" {
   display_name = "API Canary Janitor ${var.target_name}"
 }
 
+resource "google_service_account" "scheduler" {
+  project      = var.project_id
+  account_id   = substr("apicnjs-${var.target_name}", 0, 30)
+  display_name = "API Canary Janitor Scheduler ${var.target_name}"
+}
+
+resource "google_cloud_run_v2_job_iam_member" "scheduler_invoker" {
+  project  = var.project_id
+  location = var.job_region
+  name     = google_cloud_run_v2_job.janitor.name
+  role     = "roles/run.invoker"
+  member   = "serviceAccount:${google_service_account.scheduler.email}"
+}
+
+resource "google_cloud_scheduler_job" "janitor" {
+  project   = var.project_id
+  region    = var.job_region
+  name      = "api-canary-janitor-schedule-${var.target_name}"
+  schedule  = "*/15 * * * *"
+  time_zone = "Etc/UTC"
+
+  http_target {
+    uri         = "https://run.googleapis.com/v2/projects/${var.project_id}/locations/${var.job_region}/jobs/${google_cloud_run_v2_job.janitor.name}:run"
+    http_method = "POST"
+
+    oauth_token {
+      service_account_email = google_service_account.scheduler.email
+      scope                 = "https://www.googleapis.com/auth/cloud-platform"
+    }
+  }
+}
+
 resource "google_secret_manager_secret_iam_member" "runtime_accessor" {
   project   = var.project_id
   secret_id = var.api_key_secret_name
@@ -200,6 +232,45 @@ resource "google_monitoring_alert_policy" "janitor_failure_24hours" {
       duration                  = "0s"
       disable_metric_validation = true
     }
+  }
+
+  user_labels = local.labels
+}
+
+resource "google_monitoring_alert_policy" "janitor_run_failed" {
+  count                 = var.create_alerts ? 1 : 0
+  project               = var.project_id
+  display_name          = "Canary Janitor ${var.target_name}: Cloud Run job failed"
+  combiner              = "OR"
+  enabled               = true
+  notification_channels = var.notification_channel_ids
+
+  conditions {
+    display_name = "Janitor execution failed"
+
+    condition_matched_log {
+      filter = <<-EOT
+        resource.type="cloud_run_job"
+        AND resource.labels.job_name="${google_cloud_run_v2_job.janitor.name}"
+        AND severity>=ERROR
+        AND protoPayload.serviceName="run.googleapis.com"
+        AND protoPayload.methodName="/Jobs.RunJob"
+        AND protoPayload.status.code=10
+      EOT
+    }
+  }
+
+  alert_strategy {
+    notification_rate_limit {
+      period = "300s"
+    }
+
+    auto_close = "1800s"
+  }
+
+  documentation {
+    content   = "Cloud Run reported a failed execution for janitor target ${var.target_name}. Investigate the Cloud Run Job execution and logs. This alert does not depend on canary OTLP metrics."
+    mime_type = "text/markdown"
   }
 
   user_labels = local.labels
