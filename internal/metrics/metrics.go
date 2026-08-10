@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"sync/atomic"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"go.opentelemetry.io/otel/exporters/stdout/stdoutmetric"
 	"go.opentelemetry.io/otel/metric"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/resource"
 	"google.golang.org/api/option"
 	"google.golang.org/api/transport"
 
@@ -117,8 +119,34 @@ func otlpHTTPClient(ctx context.Context, endpoint string) (*http.Client, error) 
 }
 
 func newSDKProvider(_ context.Context, exporter sdkmetric.Exporter) (Provider, func(context.Context) error, error) {
-	reader := sdkmetric.NewPeriodicReader(exporter, sdkmetric.WithInterval(15*time.Second))
-	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	reader := sdkmetric.NewPeriodicReader(
+		exporter,
+		sdkmetric.WithInterval(15*time.Second),
+	)
+
+	instanceID := os.Getenv("CLOUD_RUN_EXECUTION")
+	if instanceID == "" {
+		instanceID = os.Getenv("HOSTNAME")
+	}
+	if instanceID == "" {
+		instanceID = "local"
+	}
+
+	res, err := resource.Merge(
+		resource.Default(),
+		resource.NewSchemaless(
+			attribute.String("service.instance.id", instanceID),
+		),
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("create OTEL resource: %w", err)
+	}
+
+	mp := sdkmetric.NewMeterProvider(
+		sdkmetric.WithReader(reader),
+		sdkmetric.WithResource(res),
+	)
+
 	otel.SetMeterProvider(mp)
 	meter := mp.Meter("github.com/superserve-ai/canaries")
 
