@@ -34,7 +34,7 @@ module "lifecycle" {
   environment               = "production"
   target_region             = "us-east4"
   api_base_url              = "https://api.superserve.ai"
-  preview_domain            = "use-sandbox.superserve.ai"
+  preview_domain            = "sandbox.superserve.ai"
   image                     = var.image
   api_key_secret_name       = "api-canary-key-production-us-east4"
   lock_bucket_name          = "${var.project_id}-api-canary-locks"
@@ -57,7 +57,7 @@ module "janitor" {
   target_name               = "production-us-east4"
   environment               = "production"
   api_base_url              = "https://api.superserve.ai"
-  preview_domain            = "use-sandbox.superserve.ai"
+  preview_domain            = "sandbox.superserve.ai"
   image                     = var.image
   api_key_secret_name       = "api-canary-key-production-us-east4"
   lock_bucket_name          = "${var.project_id}-api-canary-locks"
