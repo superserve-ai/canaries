@@ -10,32 +10,17 @@ locals {
     "roles/monitoring.notificationChannelEditor",
   ])
 
-  otlp_endpoints = {
-    production-us-central1 = "http://10.0.0.3:4318"
-    production-us-west2    = "http://10.1.0.2:4318"
-  }
-
   retain_failed_sandbox     = false
   retain_failed_sandbox_ttl = "2h"
 
   lifecycle_targets = {
-    production-us-central1 = {
-      target_region       = "us-central1"
-      job_region          = "us-central1"
-      api_base_url        = "https://api.superserve.ai"
-      preview_domain      = "sandbox.superserve.ai"
-      api_key_secret_name = "api-canary-key-production-us-central1"
-      otlp_endpoint       = local.otlp_endpoints.production-us-central1
-      vpc_connector       = "projects/rayai-prod/locations/us-central1/connectors/superserve-prod-conn"
-      vpc_egress          = "PRIVATE_RANGES_ONLY"
-    }
     production-us-west2 = {
       target_region       = "us-west2"
       job_region          = "us-west2"
       api_base_url        = "https://api-usw.superserve.ai"
       preview_domain      = "usw-sandbox.superserve.ai"
       api_key_secret_name = "api-canary-key-production-us-west2"
-      otlp_endpoint       = local.otlp_endpoints.production-us-west2
+      otlp_endpoint       = "https://telemetry.googleapis.com"
       vpc_network         = "superserve-production-vpc"
       vpc_subnetwork      = "superserve-usw2-cr-subnet"
       vpc_tags            = ["cr-usw2"]
@@ -49,8 +34,8 @@ locals {
       definition = templatefile(abspath("${path.module}/../../dashboards/cloud-monitoring/canary-overview.json.tftpl"), {
         project_id               = var.project_id
         environment              = local.labels.environment
-        default_region           = "us-central1"
-        regions                  = ["us-central1", "us-west2", "us-east4"]
+        default_region           = "us-east4"
+        regions                  = ["us-west2", "us-east4"]
         janitor_job_name_pattern = "api-canary-janitor-production-.*"
       })
     }
