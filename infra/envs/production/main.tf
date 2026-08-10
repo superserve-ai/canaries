@@ -20,7 +20,7 @@ locals {
       api_base_url        = "https://api-usw.superserve.ai"
       preview_domain      = "usw-sandbox.superserve.ai"
       api_key_secret_name = "api-canary-key-production-us-west2"
-      otlp_endpoint       = "https://telemetry.googleapis.com" 
+      otlp_endpoint       = "https://telemetry.googleapis.com"
       vpc_network         = "superserve-production-vpc"
       vpc_subnetwork      = "superserve-usw2-cr-subnet"
       vpc_tags            = ["cr-usw2"]
@@ -34,8 +34,8 @@ locals {
       definition = templatefile(abspath("${path.module}/../../dashboards/cloud-monitoring/canary-overview.json.tftpl"), {
         project_id               = var.project_id
         environment              = local.labels.environment
-        default_region           = "us-central1"
-        regions                  = ["us-central1", "us-west2", "us-east4"]
+        default_region           = "us-east4"
+        regions                  = ["us-west2", "us-east4"]
         janitor_job_name_pattern = "api-canary-janitor-production-.*"
       })
     }
