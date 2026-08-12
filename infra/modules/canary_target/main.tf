@@ -4,6 +4,14 @@ locals {
 
   lifecycle_job_name = "api-canary-${var.target_name}"
   scheduler_name     = "api-canary-schedule-${var.target_name}"
+  lifecycle_run_logs_query = format(
+    "resource.type%%3D%%22cloud_run_job%%22%%0Aresource.labels.job_name%%3D%%22%s%%22%%0Alabels.execution_name%%3D%%22$${log.extracted_label.execution_name}%%22",
+    google_cloud_run_v2_job.lifecycle.name,
+  )
+  lifecycle_job_logs_query = format(
+    "resource.type%%3D%%22cloud_run_job%%22%%0Aresource.labels.job_name%%3D%%22%s%%22",
+    google_cloud_run_v2_job.lifecycle.name,
+  )
   labels = merge(var.labels, {
     environment = var.environment
     region      = var.target_region
@@ -208,23 +216,28 @@ resource "google_cloud_scheduler_job" "lifecycle" {
 resource "google_monitoring_alert_policy" "cloud_run_job_failed" {
   count                 = var.create_alerts ? 1 : 0
   project               = var.project_id
-  display_name          = "API Canary ${var.target_name}: Cloud Run job failed"
+  display_name          = "API Canary ${var.target_name}: lifecycle failed"
   combiner              = "OR"
   enabled               = true
   notification_channels = var.notification_channel_ids
 
   conditions {
-    display_name = "Cloud Run canary execution failed"
+    display_name = "Lifecycle terminal failure log"
 
     condition_matched_log {
       filter = <<-EOT
         resource.type="cloud_run_job"
         AND resource.labels.job_name="${google_cloud_run_v2_job.lifecycle.name}"
         AND severity>=ERROR
-        AND protoPayload.serviceName="run.googleapis.com"
-        AND protoPayload.methodName="/Jobs.RunJob"
-        AND protoPayload.status.code=10
+        AND jsonPayload.message="lifecycle canary completed"
+        AND jsonPayload.result="failure"
       EOT
+
+      label_extractors = {
+        execution_name = "EXTRACT(labels.execution_name)"
+        failed_step    = "EXTRACT(jsonPayload.failed_step)"
+        sandbox_id     = "EXTRACT(jsonPayload.sandbox_id)"
+      }
     }
   }
 
@@ -237,28 +250,67 @@ resource "google_monitoring_alert_policy" "cloud_run_job_failed" {
   }
 
   documentation {
-    content   = "Cloud Run reported a failed execution for API canary target ${var.target_name}. Investigate the Cloud Run Job execution and logs. This alert does not depend on canary OTLP metrics."
+    content   = <<-EOT
+      API Canary ${var.target_name} failed
+
+      Region: ${var.target_region}
+      Sandbox: $${log.extracted_label.sandbox_id}
+      Failed step: $${log.extracted_label.failed_step}
+
+      [View canary run logs](https://console.cloud.google.com/logs/query;query=${local.lifecycle_run_logs_query};project=${var.project_id})
+      EOT
     mime_type = "text/markdown"
   }
 
   user_labels = local.labels
 }
 
-resource "google_monitoring_alert_policy" "two_failures" {
+resource "google_monitoring_alert_policy" "cloud_run_job_runtime_failure" {
   count                 = var.create_alerts ? 1 : 0
   project               = var.project_id
-  display_name          = "API Canary ${var.target_name}: two failures in 15m without success"
+  display_name          = "API Canary ${var.target_name}: Cloud Run job failed before terminal log"
   combiner              = "OR"
   enabled               = true
   notification_channels = var.notification_channel_ids
 
   conditions {
-    display_name = "Two failed lifecycle runs in 15m without success"
+    display_name = "Cloud Run failed without a terminal canary log"
 
-    condition_prometheus_query_language {
-      query                     = "sum(increase(superserve_canary_run_total{target=\"${var.target_name}\",scenario=\"lifecycle\",result=\"failure\"}[15m])) >= 2 and (sum(increase(superserve_canary_run_total{target=\"${var.target_name}\",scenario=\"lifecycle\",result=\"success\"}[15m])) or vector(0)) == 0"
-      duration                  = "0s"
-      disable_metric_validation = true
+    condition_sql {
+      query = <<-EOT
+        SELECT
+          JSON_VALUE(labels.execution_name) AS execution_name,
+          COUNTIF(
+            proto_payload.service_name = "run.googleapis.com"
+            AND proto_payload.method_name = "/Jobs.RunJob"
+            AND proto_payload.status.code IS NOT NULL
+            AND proto_payload.status.code != 10
+          ) AS run_failed_count,
+          COUNTIF(
+            JSON_VALUE(json_payload.message) = "lifecycle canary completed"
+            AND JSON_VALUE(json_payload.result) = "failure"
+          ) AS terminal_failure_count
+        FROM
+          `${var.project_id}.global._Default._AllLogs`
+        WHERE
+          resource.type = "cloud_run_job"
+          AND JSON_VALUE(resource.labels.job_name) = "${google_cloud_run_v2_job.lifecycle.name}"
+          AND JSON_VALUE(labels.execution_name) IS NOT NULL
+        GROUP BY
+          execution_name
+        HAVING
+          run_failed_count > 0
+          AND terminal_failure_count = 0
+      EOT
+
+      minutes {
+        periodicity = 10
+      }
+
+      row_count_test {
+        comparison = "COMPARISON_GT"
+        threshold  = "0"
+      }
     }
   }
 
@@ -267,7 +319,96 @@ resource "google_monitoring_alert_policy" "two_failures" {
   }
 
   documentation {
-    content = "Investigate the Cloud Run Job logs for target ${var.target_name}. Cleanup failures are logged separately."
+    content   = <<-EOT
+      Cloud Run reported a failure for API canary target ${var.target_name} before the canary emitted its terminal structured failure log.
+
+      This alert covers startup, configuration, panic, OOM, and other runtime failures.
+
+      [View Cloud Run job logs](https://console.cloud.google.com/logs/query;query=${local.lifecycle_job_logs_query};project=${var.project_id})
+      EOT
+    mime_type = "text/markdown"
+  }
+
+  user_labels = local.labels
+}
+
+resource "google_monitoring_alert_policy" "cloud_run_job_aborted_twice" {
+  count                 = var.create_alerts ? 1 : 0
+  project               = var.project_id
+  display_name          = "API Canary ${var.target_name}: execution aborted twice in a row"
+  combiner              = "OR"
+  enabled               = true
+  notification_channels = var.notification_channel_ids
+
+  conditions {
+    display_name = "Two consecutive aborted scheduled invocations"
+
+    condition_sql {
+      query = <<-EOT
+        SELECT
+          COUNTIF(
+            proto_payload.service_name = "run.googleapis.com"
+            AND proto_payload.method_name = "/Jobs.RunJob"
+            AND proto_payload.status.code = 10
+          ) >= 2
+          AND (
+            MAX(
+              IF(
+                JSON_VALUE(json_payload.message) = "lifecycle canary completed"
+                AND JSON_VALUE(json_payload.result) = "success",
+                timestamp,
+                NULL
+              )
+            ) IS NULL
+            OR TIMESTAMP_DIFF(
+              MAX(
+                IF(
+                  proto_payload.service_name = "run.googleapis.com"
+                  AND proto_payload.method_name = "/Jobs.RunJob"
+                  AND proto_payload.status.code = 10,
+                  timestamp,
+                  NULL
+                )
+              ),
+              MAX(
+                IF(
+                  JSON_VALUE(json_payload.message) = "lifecycle canary completed"
+                  AND JSON_VALUE(json_payload.result) = "success",
+                  timestamp,
+                  NULL
+                )
+              ),
+              MINUTE
+            ) > 9
+          ) AS notify
+        FROM
+          `${var.project_id}.global._Default._AllLogs`
+        WHERE
+          resource.type = "cloud_run_job"
+          AND JSON_VALUE(resource.labels.job_name) = "${google_cloud_run_v2_job.lifecycle.name}"
+      EOT
+
+      minutes {
+        periodicity = 10
+      }
+
+      boolean_test {
+        column = "notify"
+      }
+    }
+  }
+
+  alert_strategy {
+    auto_close = "1800s"
+  }
+
+  documentation {
+    content   = <<-EOT
+      Two consecutive scheduled invocations for API canary target ${var.target_name} were aborted by Cloud Run, which usually means a previous execution is still running.
+
+      [View Cloud Run job logs](https://console.cloud.google.com/logs/query;query=${local.lifecycle_job_logs_query};project=${var.project_id})
+      EOT
+    mime_type = "text/markdown"
   }
 
   user_labels = local.labels
