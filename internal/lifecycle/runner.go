@@ -37,6 +37,7 @@ type RunResources struct {
 type RunResult struct {
 	Err        error
 	FailedStep string
+	SandboxID  string
 }
 
 type StepError struct {
@@ -119,6 +120,7 @@ func (r Runner) Run(ctx context.Context) error {
 		log.Error().
 			Err(err).
 			Str("run_id", runID).
+			Str("sandbox_id", runResult.SandboxID).
 			Str("result", result).
 			Str("failed_step", runResult.FailedStep).
 			Dur("duration", duration).
@@ -170,6 +172,7 @@ func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) 
 		return res
 	}
 	resources.SandboxID = sb.ID
+	res.SandboxID = sb.ID
 
 	logStep("create_wait_active")
 	if err := r.waitForStatusTimed(ctx, sb.ID, "active", "create_wait_active"); err != nil {

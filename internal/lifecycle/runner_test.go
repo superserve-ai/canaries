@@ -1,6 +1,7 @@
 package lifecycle
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -8,6 +9,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 
 	"github.com/superserve-ai/canaries/internal/canaryapi"
 	"github.com/superserve-ai/canaries/internal/config"
@@ -211,6 +215,65 @@ func TestCleanupPreservesPrimaryFailure(t *testing.T) {
 	}
 	if !deleteCalled {
 		t.Fatal("expected delete attempt")
+	}
+}
+
+func TestRunLogsSandboxAndFailedStepOnFailure(t *testing.T) {
+	var buf bytes.Buffer
+	orig := log.Logger
+	log.Logger = zerolog.New(&buf)
+	t.Cleanup(func() {
+		log.Logger = orig
+	})
+
+	client := &fakeClient{
+		createSandboxFn: func(context.Context, canaryapi.CreateSandboxRequest) (canaryapi.Sandbox, error) {
+			return canaryapi.Sandbox{ID: "sb-1", Status: "active", AccessToken: "tok"}, nil
+		},
+		getSandboxFn: func(context.Context, string) (canaryapi.Sandbox, error) {
+			return canaryapi.Sandbox{ID: "sb-1", Status: "active", AccessToken: "tok"}, nil
+		},
+		writeFileFn: func(context.Context, string, string, string, []byte) error {
+			return nil
+		},
+		execFn: func(context.Context, string, string, canaryapi.ExecRequest) (canaryapi.ExecResult, error) {
+			return canaryapi.ExecResult{}, errors.New("exec failed")
+		},
+		deleteSandboxFn: func(context.Context, string) error {
+			return nil
+		},
+	}
+	r := Runner{
+		Config: config.Config{
+			Target:         "staging-us-central1",
+			Environment:    "staging",
+			Region:         "us-central1",
+			ResourceTTL:    time.Hour,
+			PollInterval:   time.Millisecond,
+			CommandTimeout: 20 * time.Millisecond,
+			DeleteTimeout:  20 * time.Millisecond,
+			PreviewPort:    18080,
+			RunTimeout:     time.Second,
+			LockTTL:        time.Minute,
+		},
+		Client:  client,
+		Locker:  lock.NoopLock{},
+		Metrics: metrics.NoopProvider{},
+		Clock:   time.Now,
+	}
+
+	if err := r.Run(context.Background()); err == nil {
+		t.Fatal("expected error")
+	}
+	got := buf.String()
+	if !strings.Contains(got, "\"message\":\"lifecycle canary completed\"") {
+		t.Fatalf("missing terminal log entry: %q", got)
+	}
+	if !strings.Contains(got, "\"sandbox_id\":\"sb-1\"") {
+		t.Fatalf("missing sandbox_id in terminal log entry: %q", got)
+	}
+	if !strings.Contains(got, "\"failed_step\":\"initial_command\"") {
+		t.Fatalf("missing failed_step in terminal log entry: %q", got)
 	}
 }
 
