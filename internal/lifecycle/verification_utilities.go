@@ -10,7 +10,7 @@ import (
 //go:embed verification-utilities/*
 var verificationUtilitiesFS embed.FS
 
-func (r Runner) uploadVerificationUtilities(ctx context.Context, sandboxID, accessToken string) error {
+func (r Runner) UploadVerificationUtilities(ctx context.Context, sandboxID, accessToken string) error {
 	files := []string{
 		"verification-utilities/verify_disk.sh",
 		"verification-utilities/verify_memory.py",
@@ -24,7 +24,7 @@ func (r Runner) uploadVerificationUtilities(ctx context.Context, sandboxID, acce
 			break
 		}
 		target := filepath.Join("/tmp/verification-utilities", filepath.Base(name))
-		if writeErr := r.writeSandboxFileWithRetry(ctx, sandboxID, accessToken, target, content); writeErr != nil {
+		if writeErr := r.WriteSandboxFileWithRetry(ctx, sandboxID, accessToken, target, content); writeErr != nil {
 			err = fmt.Errorf("write verification utility %s: %w", name, writeErr)
 			break
 		}

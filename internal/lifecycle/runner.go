@@ -40,6 +40,11 @@ type RunResult struct {
 	SandboxID  string
 }
 
+type ExecValidationError struct {
+	ExitCode int
+	Stderr   string
+}
+
 type StepError struct {
 	Step string
 	Err  error
@@ -56,6 +61,10 @@ func (e StepError) Error() string {
 		return e.Step
 	}
 	return e.Err.Error()
+}
+
+func (e ExecValidationError) Error() string {
+	return fmt.Sprintf("command failed: exit=%d stderr=%s", e.ExitCode, strings.TrimSpace(e.Stderr))
 }
 
 func (e StepError) Unwrap() error { return e.Err }
@@ -136,52 +145,28 @@ func (r Runner) Run(ctx context.Context) error {
 	return nil
 }
 
+func (r Runner) RunLifecycle(ctx context.Context, runID string) RunResult {
+	return r.runLifecycle(ctx, runID)
+}
+
 func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) {
 	resources := RunResources{RunID: runID, CreatedAt: r.Clock().UTC()}
 	defer func() {
 		if resources.SandboxID == "" {
 			return
 		}
-		res.Err = r.finalizeSandbox(context.Background(), resources, res)
+		res.Err = r.FinalizeSandbox(context.Background(), resources, res)
 	}()
 
-	expiresAt := resources.CreatedAt.Add(r.retentionTTL()).UTC().Format(time.RFC3339)
-	metadata := map[string]string{
-		"managed_by":    "api-canary",
-		"environment":   r.Config.Environment,
-		"region":        r.Config.Region,
-		"canary_target": r.Config.Target,
-		"created_at":    resources.CreatedAt.Format(time.RFC3339),
-		"expires_at":    expiresAt,
-		"run_id":        runID,
-	}
-	createStart := r.Clock()
-	logStep("create_request")
-	sb, err := r.Client.CreateSandbox(ctx, canaryapi.CreateSandboxRequest{
-		Name:              sandboxName(r.Config.Target, runID),
-		FromTemplate:      r.Config.SandboxTemplate,
-		TimeoutSeconds:    int(r.Config.RunTimeout.Seconds()),
-		AutoDeleteSeconds: int(r.retentionTTL().Seconds()),
-		Metadata:          metadata,
-	})
-	r.Metrics.RecordStep(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", "create_request", result(err), r.Clock().Sub(createStart))
+	createdResources, sb, err := r.CreateSandbox(ctx, runID)
+	resources = createdResources
 	if err != nil {
-		r.Metrics.RecordStep(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", "create_total", result(err), r.Clock().Sub(createStart))
-		res.Err = fmt.Errorf("creating sandbox: %w", err)
-		res.FailedStep = "create_request"
+		res.Err = err
+		res.FailedStep = failedStepFromError(err, "create_request")
+		res.SandboxID = resources.SandboxID
 		return res
 	}
-	resources.SandboxID = sb.ID
 	res.SandboxID = sb.ID
-
-	logStep("create_wait_active")
-	if err := r.waitForStatusTimed(ctx, sb.ID, "active", "create_wait_active"); err != nil {
-		r.Metrics.RecordStep(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", "create_total", result(err), r.Clock().Sub(createStart))
-		res.Err = fmt.Errorf("waiting for sandbox to become active: %w", err)
-		res.FailedStep = "create_wait_active"
-		return res
-	}
-	r.Metrics.RecordStep(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", "create_total", "success", r.Clock().Sub(createStart))
 
 	diskToken := "disk-" + uuid.NewString()
 	memoryToken := "mem-" + uuid.NewString()
@@ -194,7 +179,7 @@ func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) 
 		Str("access_token_prefix", accessTokenPrefix).
 		Msg("writing canary token")
 	logStep("seed_canary_token")
-	if err := r.writeSandboxFileWithRetry(ctx, sb.ID, sb.AccessToken, "/tmp/canary-token", []byte(diskToken)); err != nil {
+	if err := r.WriteSandboxFileWithRetry(ctx, sb.ID, sb.AccessToken, "/tmp/canary-token", []byte(diskToken)); err != nil {
 		res.Err = fmt.Errorf("seeding canary token: %w", err)
 		res.FailedStep = "seed_canary_token"
 		return res
@@ -202,7 +187,7 @@ func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) 
 
 	backgroundCmd := fmt.Sprintf("sh -lc 'nohup python3 -c \"import time; time.sleep(3600)\" %q >/tmp/canary-bg.log 2>&1 & echo started'", memoryToken)
 	logStep("initial_command")
-	if _, err := r.execStep(ctx, sb.ID, sb.AccessToken, "initial_command", backgroundCmd); err != nil {
+	if _, err := r.ExecStep(ctx, sb.ID, sb.AccessToken, "initial_command", backgroundCmd); err != nil {
 		res.Err = fmt.Errorf("priming sandbox: %w", err)
 		res.FailedStep = "initial_command"
 		return res
@@ -210,14 +195,14 @@ func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) 
 
 	pauseStart := r.Clock()
 	logStep("pause_request")
-	if err := r.pause(ctx, sb.ID); err != nil {
+	if err := r.Pause(ctx, sb.ID); err != nil {
 		r.Metrics.RecordStep(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", "pause_total", result(err), r.Clock().Sub(pauseStart))
 		res.Err = fmt.Errorf("pausing sandbox: %w", err)
 		res.FailedStep = "pause_request"
 		return res
 	}
 	logStep("pause_wait_paused")
-	if err := r.waitForStatusTimed(ctx, sb.ID, "paused", "pause_wait_paused"); err != nil {
+	if err := r.WaitForStatusTimed(ctx, sb.ID, "paused", "pause_wait_paused"); err != nil {
 		r.Metrics.RecordStep(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", "pause_total", result(err), r.Clock().Sub(pauseStart))
 		res.Err = fmt.Errorf("waiting for sandbox to pause: %w", err)
 		res.FailedStep = "pause_wait_paused"
@@ -227,7 +212,7 @@ func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) 
 
 	resumeStart := r.Clock()
 	logStep("resume_request")
-	resumeResp, err := r.resume(ctx, sb.ID)
+	resumeResp, err := r.Resume(ctx, sb.ID)
 	if err != nil {
 		r.Metrics.RecordStep(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", "resume_total", result(err), r.Clock().Sub(resumeStart))
 		res.Err = fmt.Errorf("resuming sandbox: %w", err)
@@ -235,7 +220,7 @@ func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) 
 		return res
 	}
 	logStep("resume_wait_active")
-	if err := r.waitForStatusTimed(ctx, sb.ID, "active", "resume_wait_active"); err != nil {
+	if err := r.WaitForStatusTimed(ctx, sb.ID, "active", "resume_wait_active"); err != nil {
 		r.Metrics.RecordStep(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", "resume_total", result(err), r.Clock().Sub(resumeStart))
 		res.Err = fmt.Errorf("waiting for sandbox to resume: %w", err)
 		res.FailedStep = "resume_wait_active"
@@ -244,7 +229,7 @@ func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) 
 	r.Metrics.RecordStep(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", "resume_total", "success", r.Clock().Sub(resumeStart))
 
 	logStep("prepare_verification_utilities")
-	if err := r.uploadVerificationUtilities(ctx, sb.ID, resumeResp.AccessToken); err != nil {
+	if err := r.UploadVerificationUtilities(ctx, sb.ID, resumeResp.AccessToken); err != nil {
 		res.Err = err
 		res.FailedStep = "prepare_verification_utilities"
 		return res
@@ -252,7 +237,7 @@ func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) 
 
 	verifyDiskCmd := fmt.Sprintf("sh -lc 'CANARY_DISK_TOKEN=%q sh /tmp/verification-utilities/verify_disk.sh'", diskToken)
 	logStep("verify_disk")
-	if _, err := r.execStep(ctx, sb.ID, resumeResp.AccessToken, "verify_disk", verifyDiskCmd); err != nil {
+	if _, err := r.ExecStep(ctx, sb.ID, resumeResp.AccessToken, "verify_disk", verifyDiskCmd); err != nil {
 		res.Err = fmt.Errorf("verifying disk state: %w", err)
 		res.FailedStep = "verify_disk"
 		return res
@@ -260,7 +245,7 @@ func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) 
 
 	verifyMemoryCmd := fmt.Sprintf("sh -lc 'CANARY_MEMORY_TOKEN=%q python3 /tmp/verification-utilities/verify_memory.py'", memoryToken)
 	logStep("verify_memory")
-	if _, err := r.execStep(ctx, sb.ID, resumeResp.AccessToken, "verify_memory", verifyMemoryCmd); err != nil {
+	if _, err := r.ExecStep(ctx, sb.ID, resumeResp.AccessToken, "verify_memory", verifyMemoryCmd); err != nil {
 		res.Err = fmt.Errorf("verifying memory state: %w", err)
 		res.FailedStep = "verify_memory"
 		return res
@@ -268,7 +253,7 @@ func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) 
 
 	serveToken := "preview-" + runID
 	logStep("seed_preview_page")
-	if err := r.writeSandboxFileWithRetry(ctx, sb.ID, resumeResp.AccessToken, "/tmp/canary-preview/index.html", []byte(serveToken)); err != nil {
+	if err := r.WriteSandboxFileWithRetry(ctx, sb.ID, resumeResp.AccessToken, "/tmp/canary-preview/index.html", []byte(serveToken)); err != nil {
 		res.Err = fmt.Errorf("seeding preview page: %w", err)
 		res.FailedStep = "seed_preview_page"
 		return res
@@ -276,14 +261,14 @@ func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) 
 
 	serveCmd := fmt.Sprintf("sh -lc 'mkdir -p /tmp/canary-preview && nohup python3 -m http.server %d --directory /tmp/canary-preview >/tmp/canary-preview.log 2>&1 & sleep 1 && echo preview_started'", r.Config.PreviewPort)
 	logStep("start_http_server")
-	if _, err := r.execStep(ctx, sb.ID, resumeResp.AccessToken, "start_http_server", serveCmd); err != nil {
+	if _, err := r.ExecStep(ctx, sb.ID, resumeResp.AccessToken, "start_http_server", serveCmd); err != nil {
 		res.Err = fmt.Errorf("starting preview server: %w", err)
 		res.FailedStep = "start_http_server"
 		return res
 	}
 	logStep("publish_preview_port")
 	publishStart := r.Clock()
-	err = r.publishPreviewPort(ctx, sb.ID)
+	err = r.PublishPreviewPort(ctx, sb.ID)
 	r.Metrics.RecordStep(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", "publish_preview_port", result(err), r.Clock().Sub(publishStart))
 	if err != nil {
 		res.Err = fmt.Errorf("publishing preview port: %w", err)
@@ -291,7 +276,7 @@ func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) 
 		return res
 	}
 	logStep("check_preview_url")
-	if err := r.verifyPreview(ctx, sb.ID, serveToken); err != nil {
+	if err := r.VerifyPreview(ctx, sb.ID, serveToken); err != nil {
 		res.Err = fmt.Errorf("verifying preview URL: %w", err)
 		res.FailedStep = "check_preview_url"
 		var stepErr StepError
@@ -304,7 +289,43 @@ func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) 
 	return res
 }
 
-func (r Runner) publishPreviewPort(ctx context.Context, sandboxID string) error {
+func (r Runner) CreateSandbox(ctx context.Context, runID string) (RunResources, canaryapi.Sandbox, error) {
+	resources := RunResources{
+		RunID:     runID,
+		CreatedAt: r.Clock().UTC(),
+	}
+	createStart := r.Clock()
+	logStep("create_request")
+	sb, err := r.Client.CreateSandbox(ctx, canaryapi.CreateSandboxRequest{
+		Name:              sandboxName(r.Config.Target, runID),
+		FromTemplate:      r.Config.SandboxTemplate,
+		TimeoutSeconds:    int(r.Config.RunTimeout.Seconds()),
+		AutoDeleteSeconds: int(r.retentionTTL().Seconds()),
+		Metadata:          r.lifecycleMetadata(resources),
+	})
+	r.Metrics.RecordStep(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", "create_request", result(err), r.Clock().Sub(createStart))
+	if err != nil {
+		r.Metrics.RecordStep(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", "create_total", result(err), r.Clock().Sub(createStart))
+		return resources, canaryapi.Sandbox{}, StepError{
+			Step: "create_request",
+			Err:  fmt.Errorf("creating sandbox: %w", err),
+		}
+	}
+	resources.SandboxID = sb.ID
+
+	logStep("create_wait_active")
+	if err := r.WaitForStatusTimed(ctx, sb.ID, "active", "create_wait_active"); err != nil {
+		r.Metrics.RecordStep(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", "create_total", result(err), r.Clock().Sub(createStart))
+		return resources, canaryapi.Sandbox{}, StepError{
+			Step: "create_wait_active",
+			Err:  fmt.Errorf("waiting for sandbox to become active: %w", err),
+		}
+	}
+	r.Metrics.RecordStep(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", "create_total", "success", r.Clock().Sub(createStart))
+	return resources, sb, nil
+}
+
+func (r Runner) PublishPreviewPort(ctx context.Context, sandboxID string) error {
 	if err := r.Client.PublishPreviewPort(ctx, sandboxID, canaryapi.PublishPreviewPortRequest{
 		Port:   r.Config.PreviewPort,
 		Access: "public",
@@ -314,17 +335,17 @@ func (r Runner) publishPreviewPort(ctx context.Context, sandboxID string) error 
 	return nil
 }
 
-func (r Runner) writeSandboxFile(ctx context.Context, sandboxID, accessToken, path string, content []byte) error {
+func (r Runner) WriteSandboxFile(ctx context.Context, sandboxID, accessToken, path string, content []byte) error {
 	if err := r.Client.WriteFile(ctx, sandboxID, accessToken, path, content); err != nil {
 		return fmt.Errorf("writing %s: %w", path, err)
 	}
 	return nil
 }
 
-func (r Runner) writeSandboxFileWithRetry(ctx context.Context, sandboxID, accessToken, path string, content []byte) error {
+func (r Runner) WriteSandboxFileWithRetry(ctx context.Context, sandboxID, accessToken, path string, content []byte) error {
 	delays := []time.Duration{250 * time.Millisecond, 500 * time.Millisecond, 1 * time.Second, 2 * time.Second}
 	for attempt := 0; attempt <= len(delays); attempt++ {
-		err := r.writeSandboxFile(ctx, sandboxID, accessToken, path, content)
+		err := r.WriteSandboxFile(ctx, sandboxID, accessToken, path, content)
 		if err == nil {
 			return nil
 		}
@@ -373,14 +394,22 @@ func isTransientWriteFileError(err error) bool {
 	}
 }
 
-func (r Runner) execStep(ctx context.Context, sandboxID, accessToken, step, command string) (canaryapi.ExecResult, error) {
+func (r Runner) Exec(ctx context.Context, sandboxID, accessToken string, req canaryapi.ExecRequest) (canaryapi.ExecResult, error) {
+	res, err := r.Client.Exec(ctx, sandboxID, accessToken, req)
+	if err != nil {
+		return res, err
+	}
+	return res, nil
+}
+
+func (r Runner) ExecStep(ctx context.Context, sandboxID, accessToken, step, command string) (canaryapi.ExecResult, error) {
 	start := r.Clock()
-	res, err := r.Client.Exec(ctx, sandboxID, accessToken, canaryapi.ExecRequest{
+	res, err := r.Exec(ctx, sandboxID, accessToken, canaryapi.ExecRequest{
 		Command:  command,
 		TimeoutS: int(r.Config.CommandTimeout.Seconds()),
 	})
 	if err == nil && res.ExitCode != 0 {
-		err = fmt.Errorf("command failed: exit=%d stderr=%s", res.ExitCode, strings.TrimSpace(res.Stderr))
+		err = ExecValidationError{ExitCode: res.ExitCode, Stderr: res.Stderr}
 	}
 	r.Metrics.RecordStep(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", step, result(err), r.Clock().Sub(start))
 	if err != nil {
@@ -389,7 +418,7 @@ func (r Runner) execStep(ctx context.Context, sandboxID, accessToken, step, comm
 	return res, err
 }
 
-func (r Runner) waitForStatus(ctx context.Context, sandboxID, want string) error {
+func (r Runner) WaitForStatus(ctx context.Context, sandboxID, want string) error {
 	deadline := r.Clock().Add(r.Config.CommandTimeout)
 	for {
 		sb, err := r.Client.GetSandbox(ctx, sandboxID)
@@ -413,14 +442,14 @@ func (r Runner) waitForStatus(ctx context.Context, sandboxID, want string) error
 	}
 }
 
-func (r Runner) waitForStatusTimed(ctx context.Context, sandboxID, want, step string) error {
+func (r Runner) WaitForStatusTimed(ctx context.Context, sandboxID, want, step string) error {
 	start := r.Clock()
-	err := r.waitForStatus(ctx, sandboxID, want)
+	err := r.WaitForStatus(ctx, sandboxID, want)
 	r.Metrics.RecordStep(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", step, result(err), r.Clock().Sub(start))
 	return err
 }
 
-func (r Runner) pause(ctx context.Context, sandboxID string) error {
+func (r Runner) Pause(ctx context.Context, sandboxID string) error {
 	start := r.Clock()
 	err := r.Client.PauseSandbox(ctx, sandboxID)
 	r.Metrics.RecordStep(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", "pause_request", result(err), r.Clock().Sub(start))
@@ -430,7 +459,7 @@ func (r Runner) pause(ctx context.Context, sandboxID string) error {
 	return err
 }
 
-func (r Runner) resume(ctx context.Context, sandboxID string) (canaryapi.ResumeResponse, error) {
+func (r Runner) Resume(ctx context.Context, sandboxID string) (canaryapi.ResumeResponse, error) {
 	start := r.Clock()
 	resp, err := r.Client.ResumeSandbox(ctx, sandboxID)
 	if err == nil && resp.Status != "active" {
@@ -443,7 +472,7 @@ func (r Runner) resume(ctx context.Context, sandboxID string) (canaryapi.ResumeR
 	return resp, err
 }
 
-func (r Runner) verifyPreview(ctx context.Context, sandboxID, expected string) error {
+func (r Runner) VerifyPreview(ctx context.Context, sandboxID, expected string) error {
 	start := r.Clock()
 	previewURL := r.Client.PreviewURL(sandboxID, r.Config.PreviewPort)
 	deadline := r.Clock().Add(r.Config.PreviewTimeout)
@@ -509,7 +538,7 @@ func (r Runner) retentionTTL() time.Duration {
 	return r.Config.ResourceTTL
 }
 
-func (r Runner) finalizeSandbox(ctx context.Context, resources RunResources, res RunResult) error {
+func (r Runner) FinalizeSandbox(ctx context.Context, resources RunResources, res RunResult) error {
 	if res.Err != nil && r.Config.RetainFailedSandbox {
 		if err := r.retainSandbox(ctx, resources, res); err != nil {
 			log.Warn().
@@ -521,7 +550,7 @@ func (r Runner) finalizeSandbox(ctx context.Context, resources RunResources, res
 		}
 		return res.Err
 	}
-	if err := r.deleteSandboxBestEffort(ctx, resources.SandboxID); err != nil {
+	if err := r.DeleteSandboxBestEffort(ctx, resources.SandboxID); err != nil {
 		if res.Err != nil {
 			log.Warn().Err(err).Str("sandbox_id", resources.SandboxID).Msg("sandbox delete failed")
 			return res.Err
@@ -567,7 +596,7 @@ func (r Runner) retainSandbox(ctx context.Context, resources RunResources, res R
 	return nil
 }
 
-func (r Runner) deleteSandboxBestEffort(ctx context.Context, sandboxID string) error {
+func (r Runner) DeleteSandboxBestEffort(ctx context.Context, sandboxID string) error {
 	start := r.Clock()
 	logStep("delete_request")
 	ctx, cancel := context.WithTimeout(ctx, r.Config.DeleteTimeout)
@@ -582,6 +611,27 @@ func (r Runner) deleteSandboxBestEffort(ctx context.Context, sandboxID string) e
 		return fmt.Errorf("deleting sandbox: %w", err)
 	}
 	return nil
+}
+
+func (r Runner) lifecycleMetadata(resources RunResources) map[string]string {
+	expiresAt := resources.CreatedAt.Add(r.retentionTTL()).UTC().Format(time.RFC3339)
+	return map[string]string{
+		"managed_by":    "api-canary",
+		"environment":   r.Config.Environment,
+		"region":        r.Config.Region,
+		"canary_target": r.Config.Target,
+		"created_at":    resources.CreatedAt.Format(time.RFC3339),
+		"expires_at":    expiresAt,
+		"run_id":        resources.RunID,
+	}
+}
+
+func failedStepFromError(err error, fallback string) string {
+	var stepErr StepError
+	if errors.As(err, &stepErr) && stepErr.Step != "" {
+		return stepErr.Step
+	}
+	return fallback
 }
 
 func sandboxName(target, runID string) string {
