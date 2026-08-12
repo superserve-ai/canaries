@@ -5,7 +5,7 @@ locals {
   lifecycle_job_name = "api-canary-${var.target_name}"
   scheduler_name     = "api-canary-schedule-${var.target_name}"
   lifecycle_run_logs_query = format(
-    "resource.type%%3D%%22cloud_run_job%%22%%0Aresource.labels.job_name%%3D%%22%s%%22%%0Alabels.execution_name%%3D%%22$${log.extracted_label.execution_name}%%22",
+    "resource.type%%3D%%22cloud_run_job%%22%%0Aresource.labels.job_name%%3D%%22%s%%22%%0Alabels.%%22run.googleapis.com/execution_name%%22%%3D%%22$${log.extracted_label.execution_name}%%22",
     google_cloud_run_v2_job.lifecycle.name,
   )
   lifecycle_job_logs_query = format(
@@ -234,7 +234,7 @@ resource "google_monitoring_alert_policy" "cloud_run_job_failed" {
       EOT
 
       label_extractors = {
-        execution_name = "EXTRACT(labels.execution_name)"
+        execution_name = "EXTRACT(labels.\"run.googleapis.com/execution_name\")"
         failed_step    = "EXTRACT(jsonPayload.failed_step)"
         sandbox_id     = "EXTRACT(jsonPayload.sandbox_id)"
       }
@@ -279,37 +279,30 @@ resource "google_monitoring_alert_policy" "cloud_run_job_runtime_failure" {
     condition_sql {
       query = <<-EOT
         SELECT
-          JSON_VALUE(labels.execution_name) AS execution_name,
           COUNTIF(
-            proto_payload.service_name = "run.googleapis.com"
-            AND proto_payload.method_name = "/Jobs.RunJob"
-            AND proto_payload.status.code IS NOT NULL
-            AND proto_payload.status.code != 10
-          ) AS run_failed_count,
-          COUNTIF(
-            JSON_VALUE(json_payload.message) = "lifecycle canary completed"
-            AND JSON_VALUE(json_payload.result) = "failure"
-          ) AS terminal_failure_count
+            proto_payload.audit_log.service_name = "run.googleapis.com"
+            AND proto_payload.audit_log.method_name = "/Jobs.RunJob"
+            AND proto_payload.audit_log.status.code IS NOT NULL
+            AND proto_payload.audit_log.status.code != 10
+          ) > 0
+          AND COUNTIF(
+            json_payload.message = "lifecycle canary completed"
+            AND json_payload.result = "failure"
+          ) = 0 AS notify
         FROM
           `${var.project_id}.global._Default._AllLogs`
         WHERE
           resource.type = "cloud_run_job"
-          AND JSON_VALUE(resource.labels.job_name) = "${google_cloud_run_v2_job.lifecycle.name}"
-          AND JSON_VALUE(labels.execution_name) IS NOT NULL
-        GROUP BY
-          execution_name
-        HAVING
-          run_failed_count > 0
-          AND terminal_failure_count = 0
+          AND resource.labels.job_name = "${google_cloud_run_v2_job.lifecycle.name}"
+          AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 15 MINUTE)
       EOT
 
       minutes {
         periodicity = 10
       }
 
-      row_count_test {
-        comparison = "COMPARISON_GT"
-        threshold  = "0"
+      boolean_test {
+        column = "notify"
       }
     }
   }
@@ -347,45 +340,20 @@ resource "google_monitoring_alert_policy" "cloud_run_job_aborted_twice" {
       query = <<-EOT
         SELECT
           COUNTIF(
-            proto_payload.service_name = "run.googleapis.com"
-            AND proto_payload.method_name = "/Jobs.RunJob"
-            AND proto_payload.status.code = 10
+            proto_payload.audit_log.service_name = "run.googleapis.com"
+            AND proto_payload.audit_log.method_name = "/Jobs.RunJob"
+            AND proto_payload.audit_log.status.code = 10
           ) >= 2
-          AND (
-            MAX(
-              IF(
-                JSON_VALUE(json_payload.message) = "lifecycle canary completed"
-                AND JSON_VALUE(json_payload.result) = "success",
-                timestamp,
-                NULL
-              )
-            ) IS NULL
-            OR TIMESTAMP_DIFF(
-              MAX(
-                IF(
-                  proto_payload.service_name = "run.googleapis.com"
-                  AND proto_payload.method_name = "/Jobs.RunJob"
-                  AND proto_payload.status.code = 10,
-                  timestamp,
-                  NULL
-                )
-              ),
-              MAX(
-                IF(
-                  JSON_VALUE(json_payload.message) = "lifecycle canary completed"
-                  AND JSON_VALUE(json_payload.result) = "success",
-                  timestamp,
-                  NULL
-                )
-              ),
-              MINUTE
-            ) > 9
-          ) AS notify
+          AND COUNTIF(
+            json_payload.message = "lifecycle canary completed"
+            AND json_payload.result = "success"
+          ) = 0 AS notify
         FROM
           `${var.project_id}.global._Default._AllLogs`
         WHERE
           resource.type = "cloud_run_job"
-          AND JSON_VALUE(resource.labels.job_name) = "${google_cloud_run_v2_job.lifecycle.name}"
+          AND resource.labels.job_name = "${google_cloud_run_v2_job.lifecycle.name}"
+          AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 15 MINUTE)
       EOT
 
       minutes {
