@@ -41,7 +41,7 @@ func TestWaitForStatusTerminalFailure(t *testing.T) {
 		Clock:  time.Now,
 	}
 
-	err := r.waitForStatus(context.Background(), "sb-1", "active")
+	err := r.WaitForStatus(context.Background(), "sb-1", "active")
 	if err == nil || !strings.Contains(err.Error(), `sandbox entered terminal state "failed"`) {
 		t.Fatalf("waitForStatus error = %v", err)
 	}
@@ -70,7 +70,7 @@ func TestUploadVerificationUtilitiesUsesRepoAssets(t *testing.T) {
 		Clock:   time.Now,
 	}
 
-	if err := r.uploadVerificationUtilities(context.Background(), "sb-1", "tok"); err != nil {
+	if err := r.UploadVerificationUtilities(context.Background(), "sb-1", "tok"); err != nil {
 		t.Fatal(err)
 	}
 	if len(writes) != 2 {
@@ -107,7 +107,7 @@ func TestWriteSandboxFileWithRetryRetriesTransientProxyErrors(t *testing.T) {
 		Client: client,
 	}
 
-	if err := r.writeSandboxFileWithRetry(context.Background(), "sb-1", "tok", "/tmp/canary-token", []byte("token")); err != nil {
+	if err := r.WriteSandboxFileWithRetry(context.Background(), "sb-1", "tok", "/tmp/canary-token", []byte("token")); err != nil {
 		t.Fatalf("writeSandboxFileWithRetry returned %v", err)
 	}
 	if attempts != 2 {
@@ -130,7 +130,7 @@ func TestWriteSandboxFileWithRetryRetriesTransientTransportEOF(t *testing.T) {
 		Client: client,
 	}
 
-	if err := r.writeSandboxFileWithRetry(context.Background(), "sb-1", "tok", "/tmp/canary-token", []byte("token")); err != nil {
+	if err := r.WriteSandboxFileWithRetry(context.Background(), "sb-1", "tok", "/tmp/canary-token", []byte("token")); err != nil {
 		t.Fatalf("writeSandboxFileWithRetry returned %v", err)
 	}
 	if attempts != 2 {
@@ -160,7 +160,7 @@ func TestUploadVerificationUtilitiesRetriesTransientWrites(t *testing.T) {
 		Clock:   time.Now,
 	}
 
-	if err := r.uploadVerificationUtilities(context.Background(), "sb-1", "tok"); err != nil {
+	if err := r.UploadVerificationUtilities(context.Background(), "sb-1", "tok"); err != nil {
 		t.Fatalf("uploadVerificationUtilities returned %v", err)
 	}
 	if attempts != 3 {
@@ -781,7 +781,7 @@ func TestVerifyPreviewRequiresExactToken(t *testing.T) {
 		},
 	}
 
-	err := r.verifyPreview(context.Background(), "sb-1", "expected-token")
+	err := r.VerifyPreview(context.Background(), "sb-1", "expected-token")
 	if err == nil || !strings.Contains(err.Error(), "preview response mismatch") {
 		t.Fatalf("verifyPreview error = %v", err)
 	}
@@ -826,7 +826,7 @@ func TestVerifyPreviewRetriesTransientSandboxUnreachable(t *testing.T) {
 		},
 	}
 
-	if err := r.verifyPreview(context.Background(), "sb-1", "preview-token"); err != nil {
+	if err := r.VerifyPreview(context.Background(), "sb-1", "preview-token"); err != nil {
 		t.Fatalf("verifyPreview returned %v", err)
 	}
 	if attempts != 2 {
@@ -863,7 +863,7 @@ func TestVerifyPreviewWrapsProxyUnreachableWithURL(t *testing.T) {
 		},
 	}
 
-	err := r.verifyPreview(context.Background(), "sb-1", "preview-token")
+	err := r.VerifyPreview(context.Background(), "sb-1", "preview-token")
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -898,7 +898,7 @@ func TestVerifyPreviewCreationFailureRecordsResolveStep(t *testing.T) {
 		Clock:   time.Now,
 	}
 
-	err := r.verifyPreview(context.Background(), "sb-1", "preview-token")
+	err := r.VerifyPreview(context.Background(), "sb-1", "preview-token")
 	if err == nil {
 		t.Fatal("expected error")
 	}
