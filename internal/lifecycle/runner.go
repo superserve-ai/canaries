@@ -15,6 +15,7 @@ import (
 	"github.com/superserve-ai/canaries/internal/config"
 	"github.com/superserve-ai/canaries/internal/lock"
 	"github.com/superserve-ai/canaries/internal/metrics"
+	"github.com/superserve-ai/canaries/internal/sandboxmetadata"
 )
 
 type Runner struct {
@@ -388,6 +389,8 @@ func (r Runner) FinalizeSandbox(ctx context.Context, resources RunResources, res
 	if !(res.Err != nil && r.Config.RetainFailedSandbox) {
 		logStep("delete_request")
 	}
+	retainedAt := r.Clock().UTC()
+	retainExpiresAt := retainedAt.Add(r.Config.RetainFailedSandboxTTL).UTC()
 
 	outcome, err := r.operations().FinalizeSandbox(ctx, resources, res, FinalizeOptions{
 		Delete: DeleteSandboxOptions{
@@ -396,7 +399,7 @@ func (r Runner) FinalizeSandbox(ctx context.Context, resources RunResources, res
 		},
 		Retain: RetentionOptions{
 			Enabled:           r.Config.RetainFailedSandbox,
-			Metadata:          r.canaryRetainMetadata(resources, res),
+			Metadata:          sandboxmetadata.LegacyCanaryRetentionMetadata(r.Config.Environment, r.Config.Region, r.Config.Target, resources.RunID, res.FailedStep, resources.CreatedAt, retainedAt, retainExpiresAt),
 			AutoDeleteSeconds: func() *int { v := int(r.Config.RetainFailedSandboxTTL.Seconds()); return &v }(),
 		},
 		Telemetry: telemetry,
@@ -413,8 +416,6 @@ func (r Runner) FinalizeSandbox(ctx context.Context, resources RunResources, res
 		log.Warn().Err(outcome.DeleteError).Str("sandbox_id", resources.SandboxID).Msg("sandbox delete failed")
 	}
 	if outcome.Retained {
-		retainedAt := r.Clock().UTC()
-		expiresAt := retainedAt.Add(r.Config.RetainFailedSandboxTTL).UTC()
 		log.Info().
 			Str("event", "canary_sandbox_retained").
 			Str("target", r.Config.Target).
@@ -424,49 +425,20 @@ func (r Runner) FinalizeSandbox(ctx context.Context, resources RunResources, res
 			Str("sandbox_id", resources.SandboxID).
 			Str("failed_step", res.FailedStep).
 			Str("retained_at", retainedAt.Format(time.RFC3339)).
-			Str("expires_at", expiresAt.Format(time.RFC3339)).
-			Msg("sandbox retained for debugging; inspect sandbox_id=" + resources.SandboxID + "; janitor expiration=" + expiresAt.Format(time.RFC3339))
+			Str("expires_at", retainExpiresAt.Format(time.RFC3339)).
+			Msg("sandbox retained for debugging; inspect sandbox_id=" + resources.SandboxID + "; janitor expiration=" + retainExpiresAt.Format(time.RFC3339))
 	}
 	return err
 }
 
-func (r Runner) lifecycleMetadata(resources RunResources) map[string]string {
-	expiresAt := resources.CreatedAt.Add(r.retentionTTL()).UTC().Format(time.RFC3339)
-	return map[string]string{
-		"managed_by":    "api-canary",
-		"environment":   r.Config.Environment,
-		"region":        r.Config.Region,
-		"canary_target": r.Config.Target,
-		"created_at":    resources.CreatedAt.Format(time.RFC3339),
-		"expires_at":    expiresAt,
-		"run_id":        resources.RunID,
-	}
-}
-
 func (r Runner) canaryCreateSandboxRequest(resources RunResources) canaryapi.CreateSandboxRequest {
+	expiresAt := resources.CreatedAt.Add(r.retentionTTL()).UTC()
 	return canaryapi.CreateSandboxRequest{
 		Name:              sandboxName(r.Config.Target, resources.RunID),
 		FromTemplate:      r.Config.SandboxTemplate,
 		TimeoutSeconds:    int(r.Config.RunTimeout.Seconds()),
 		AutoDeleteSeconds: int(r.retentionTTL().Seconds()),
-		Metadata:          r.lifecycleMetadata(resources),
-	}
-}
-
-func (r Runner) canaryRetainMetadata(resources RunResources, res RunResult) map[string]string {
-	retainedAt := r.Clock().UTC()
-	expiresAt := retainedAt.Add(r.Config.RetainFailedSandboxTTL).UTC()
-	return map[string]string{
-		"managed_by":         "api-canary",
-		"canary_target":      r.Config.Target,
-		"environment":        r.Config.Environment,
-		"region":             r.Config.Region,
-		"run_id":             resources.RunID,
-		"created_at":         resources.CreatedAt.Format(time.RFC3339),
-		"retained_for_debug": "true",
-		"failed_step":        res.FailedStep,
-		"retained_at":        retainedAt.Format(time.RFC3339),
-		"expires_at":         expiresAt.Format(time.RFC3339),
+		Metadata:          sandboxmetadata.LegacyCanaryMetadata(r.Config.Environment, r.Config.Region, r.Config.Target, resources.RunID, resources.CreatedAt, expiresAt),
 	}
 }
 

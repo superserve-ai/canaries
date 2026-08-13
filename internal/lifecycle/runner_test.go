@@ -17,6 +17,7 @@ import (
 	"github.com/superserve-ai/canaries/internal/config"
 	"github.com/superserve-ai/canaries/internal/lock"
 	"github.com/superserve-ai/canaries/internal/metrics"
+	"github.com/superserve-ai/canaries/internal/sandboxmetadata"
 )
 
 func TestSandboxName(t *testing.T) {
@@ -557,8 +558,10 @@ func TestRunLifecycleFailsWhenPreviewPortPublicationFails(t *testing.T) {
 }
 
 func TestFailedRunRetainsSandboxWhenEnabled(t *testing.T) {
+	now := time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)
 	updateCalled := false
 	deleteCalled := false
+	var gotReq canaryapi.UpdateSandboxRequest
 	client := &fakeClient{
 		createSandboxFn: func(context.Context, canaryapi.CreateSandboxRequest) (canaryapi.Sandbox, error) {
 			return canaryapi.Sandbox{ID: "sb-1", Status: "active", AccessToken: "tok"}, nil
@@ -569,8 +572,9 @@ func TestFailedRunRetainsSandboxWhenEnabled(t *testing.T) {
 		execFn: func(context.Context, string, string, canaryapi.ExecRequest) (canaryapi.ExecResult, error) {
 			return canaryapi.ExecResult{}, errors.New("exec failed")
 		},
-		updateSandboxFn: func(context.Context, string, canaryapi.UpdateSandboxRequest) error {
+		updateSandboxFn: func(_ context.Context, _ string, req canaryapi.UpdateSandboxRequest) error {
 			updateCalled = true
+			gotReq = req
 			return nil
 		},
 		deleteSandboxFn: func(context.Context, string) error {
@@ -594,7 +598,7 @@ func TestFailedRunRetainsSandboxWhenEnabled(t *testing.T) {
 		Client:  client,
 		Locker:  lock.NoopLock{},
 		Metrics: metrics.NoopProvider{},
-		Clock:   time.Now,
+		Clock:   func() time.Time { return now },
 	}
 
 	result := r.runLifecycle(context.Background(), "run-1")
@@ -603,6 +607,39 @@ func TestFailedRunRetainsSandboxWhenEnabled(t *testing.T) {
 	}
 	if !updateCalled {
 		t.Fatal("expected retention metadata update")
+	}
+	if gotReq.AutoDeleteSeconds == nil || *gotReq.AutoDeleteSeconds != int((2*time.Hour).Seconds()) {
+		t.Fatalf("unexpected auto delete seconds: %+v", gotReq.AutoDeleteSeconds)
+	}
+	if gotReq.Metadata[sandboxmetadata.KeyManagedBy] != sandboxmetadata.ManagedByCanaryLegacy {
+		t.Fatalf("managed_by = %q", gotReq.Metadata[sandboxmetadata.KeyManagedBy])
+	}
+	if gotReq.Metadata[sandboxmetadata.KeyEnvironment] != "staging" {
+		t.Fatalf("environment = %q", gotReq.Metadata[sandboxmetadata.KeyEnvironment])
+	}
+	if gotReq.Metadata[sandboxmetadata.KeyRegion] != "us-central1" {
+		t.Fatalf("region = %q", gotReq.Metadata[sandboxmetadata.KeyRegion])
+	}
+	if gotReq.Metadata[sandboxmetadata.KeyCanaryTarget] != "staging-us-central1" {
+		t.Fatalf("canary_target = %q", gotReq.Metadata[sandboxmetadata.KeyCanaryTarget])
+	}
+	if gotReq.Metadata[sandboxmetadata.KeyRunID] != "run-1" {
+		t.Fatalf("run_id = %q", gotReq.Metadata[sandboxmetadata.KeyRunID])
+	}
+	if gotReq.Metadata[sandboxmetadata.KeyCreatedAt] != now.Format(time.RFC3339) {
+		t.Fatalf("created_at = %q", gotReq.Metadata[sandboxmetadata.KeyCreatedAt])
+	}
+	if gotReq.Metadata[sandboxmetadata.KeyRetainedForDebug] != "true" {
+		t.Fatalf("retained_for_debug = %q", gotReq.Metadata[sandboxmetadata.KeyRetainedForDebug])
+	}
+	if gotReq.Metadata[sandboxmetadata.KeyFailedStep] != "initial_command" {
+		t.Fatalf("failed_step = %q", gotReq.Metadata[sandboxmetadata.KeyFailedStep])
+	}
+	if gotReq.Metadata[sandboxmetadata.KeyRetainedAt] != now.Format(time.RFC3339) {
+		t.Fatalf("retained_at = %q", gotReq.Metadata[sandboxmetadata.KeyRetainedAt])
+	}
+	if gotReq.Metadata[sandboxmetadata.KeyExpiresAt] != now.Add(2*time.Hour).Format(time.RFC3339) {
+		t.Fatalf("expires_at = %q", gotReq.Metadata[sandboxmetadata.KeyExpiresAt])
 	}
 	if deleteCalled {
 		t.Fatal("did not expect delete when retention is enabled")

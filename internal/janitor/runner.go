@@ -9,6 +9,7 @@ import (
 	"github.com/superserve-ai/canaries/internal/canaryapi"
 	"github.com/superserve-ai/canaries/internal/config"
 	"github.com/superserve-ai/canaries/internal/metrics"
+	"github.com/superserve-ai/canaries/internal/sandboxmetadata"
 )
 
 type Runner struct {
@@ -28,13 +29,19 @@ func (r Runner) Run(ctx context.Context) error {
 	r.Metrics.RecordExecutionDelta(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "janitor", 1)
 	defer r.Metrics.RecordExecutionDelta(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "janitor", -1)
 
-	items, err := r.Client.ListSandboxes(ctx, map[string]string{
-		"metadata.managed_by":  "api-canary",
-		"metadata.environment": r.Config.Environment,
-	})
-	if err != nil {
-		r.Metrics.RecordRun(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "janitor", "failure", r.Clock().Sub(start))
-		return err
+	itemsByID := map[string]canaryapi.Sandbox{}
+	for _, managedBy := range sandboxmetadata.RecognizedManagedByValues() {
+		items, err := r.Client.ListSandboxes(ctx, sandboxmetadata.OwnershipQuery(r.Config.Environment, managedBy))
+		if err != nil {
+			r.Metrics.RecordRun(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "janitor", "failure", r.Clock().Sub(start))
+			return err
+		}
+		for _, item := range items {
+			if _, ok := itemsByID[item.ID]; ok {
+				continue
+			}
+			itemsByID[item.ID] = item
+		}
 	}
 	now := r.Clock().UTC()
 	var examinedCount int64
@@ -42,31 +49,15 @@ func (r Runner) Run(ctx context.Context) error {
 	var deletionFailureCount int64
 	var staleCount int64
 	var oldestOrphanAge time.Duration
-	for _, item := range items {
-		if item.Metadata["managed_by"] != "api-canary" {
+	for _, item := range itemsByID {
+		match, ok := sandboxmetadata.MatchOwnership(item.Metadata, r.Config.Environment)
+		if !ok {
 			continue
 		}
 		examinedCount++
-		var orphanAge time.Duration
-		expiresAt, expiresErr := time.Parse(time.RFC3339, item.Metadata["expires_at"])
-		retained := item.Metadata["retained_for_debug"] == "true"
-		if expiresErr == nil {
-			if expiresAt.After(now) {
-				continue
-			}
-			orphanAge = now.Sub(expiresAt)
-		} else {
-			if !retained {
-				continue
-			}
-			createdAt, createdErr := time.Parse(time.RFC3339, item.Metadata["created_at"])
-			if createdErr != nil {
-				continue
-			}
-			orphanAge = now.Sub(createdAt.Add(r.Config.RetainFailedSandboxTTL))
-			if orphanAge < 0 {
-				continue
-			}
+		orphanAge, stale := sandboxmetadata.StaleSince(item.Metadata, match, now, r.Config.RetainFailedSandboxTTL)
+		if !stale {
+			continue
 		}
 		staleCount++
 		if err := r.Client.DeleteSandbox(ctx, item.ID); err != nil && err != canaryapi.ErrNotFound {

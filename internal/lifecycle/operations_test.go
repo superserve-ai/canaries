@@ -12,6 +12,7 @@ import (
 	"github.com/superserve-ai/canaries/internal/canaryapi"
 	"github.com/superserve-ai/canaries/internal/config"
 	"github.com/superserve-ai/canaries/internal/metrics"
+	"github.com/superserve-ai/canaries/internal/sandboxmetadata"
 )
 
 func TestCreateSandboxSetsJanitorMetadata(t *testing.T) {
@@ -34,12 +35,16 @@ func TestCreateSandboxSetsJanitorMetadata(t *testing.T) {
 		FromTemplate:      "superserve/python-3.11",
 		TimeoutSeconds:    240,
 		AutoDeleteSeconds: 7200,
-		Metadata: map[string]string{
-			"managed_by": "load-runner",
-			"run_id":     "run-123",
-			"created_at": now.Format(time.RFC3339),
-			"expires_at": now.Add(2 * time.Hour).Format(time.RFC3339),
-		},
+		Metadata: sandboxmetadata.TestOwnershipMetadata(map[string]string{
+			sandboxmetadata.KeyEnvironment: "staging",
+			sandboxmetadata.KeyRegion:      "us-central1",
+		}, sandboxmetadata.TestOwnership{
+			TestType:  sandboxmetadata.TestTypeLoadTest,
+			RunID:     "run-123",
+			WorkerID:  "worker-7",
+			CreatedAt: now,
+			ExpiresAt: now.Add(2 * time.Hour),
+		}),
 	}
 	sb, err := ops.CreateSandbox(context.Background(), CreateSandboxOptions{
 		Request: req,
@@ -59,17 +64,23 @@ func TestCreateSandboxSetsJanitorMetadata(t *testing.T) {
 	if gotReq.Name != req.Name {
 		t.Fatalf("sandbox name = %q", gotReq.Name)
 	}
-	if gotReq.Metadata["managed_by"] != "load-runner" {
-		t.Fatalf("managed_by = %q", gotReq.Metadata["managed_by"])
+	if gotReq.Metadata[sandboxmetadata.KeyManagedBy] != sandboxmetadata.ManagedByTestRunner {
+		t.Fatalf("managed_by = %q", gotReq.Metadata[sandboxmetadata.KeyManagedBy])
 	}
-	if gotReq.Metadata["run_id"] != "run-123" {
-		t.Fatalf("run_id = %q", gotReq.Metadata["run_id"])
+	if gotReq.Metadata[sandboxmetadata.KeyTestType] != sandboxmetadata.TestTypeLoadTest {
+		t.Fatalf("test_type = %q", gotReq.Metadata[sandboxmetadata.KeyTestType])
 	}
-	if gotReq.Metadata["created_at"] != now.Format(time.RFC3339) {
-		t.Fatalf("created_at = %q", gotReq.Metadata["created_at"])
+	if gotReq.Metadata[sandboxmetadata.KeyRunID] != "run-123" {
+		t.Fatalf("run_id = %q", gotReq.Metadata[sandboxmetadata.KeyRunID])
 	}
-	if gotReq.Metadata["expires_at"] != now.Add(2*time.Hour).Format(time.RFC3339) {
-		t.Fatalf("expires_at = %q", gotReq.Metadata["expires_at"])
+	if gotReq.Metadata[sandboxmetadata.KeyWorkerID] != "worker-7" {
+		t.Fatalf("worker_id = %q", gotReq.Metadata[sandboxmetadata.KeyWorkerID])
+	}
+	if gotReq.Metadata[sandboxmetadata.KeyCreatedAt] != now.Format(time.RFC3339) {
+		t.Fatalf("created_at = %q", gotReq.Metadata[sandboxmetadata.KeyCreatedAt])
+	}
+	if gotReq.Metadata[sandboxmetadata.KeyExpiresAt] != now.Add(2*time.Hour).Format(time.RFC3339) {
+		t.Fatalf("expires_at = %q", gotReq.Metadata[sandboxmetadata.KeyExpiresAt])
 	}
 }
 
@@ -127,11 +138,26 @@ func TestRunnerCreateSandboxBuildsCanaryRequest(t *testing.T) {
 	if gotReq.AutoDeleteSeconds != 7200 {
 		t.Fatalf("auto delete seconds = %d", gotReq.AutoDeleteSeconds)
 	}
-	if gotReq.Metadata["managed_by"] != "api-canary" {
-		t.Fatalf("managed_by = %q", gotReq.Metadata["managed_by"])
+	if gotReq.Metadata[sandboxmetadata.KeyManagedBy] != sandboxmetadata.ManagedByCanaryLegacy {
+		t.Fatalf("managed_by = %q", gotReq.Metadata[sandboxmetadata.KeyManagedBy])
 	}
-	if gotReq.Metadata["expires_at"] != now.Add(2*time.Hour).Format(time.RFC3339) {
-		t.Fatalf("expires_at = %q", gotReq.Metadata["expires_at"])
+	if gotReq.Metadata[sandboxmetadata.KeyEnvironment] != "staging" {
+		t.Fatalf("environment = %q", gotReq.Metadata[sandboxmetadata.KeyEnvironment])
+	}
+	if gotReq.Metadata[sandboxmetadata.KeyRegion] != "us-central1" {
+		t.Fatalf("region = %q", gotReq.Metadata[sandboxmetadata.KeyRegion])
+	}
+	if gotReq.Metadata[sandboxmetadata.KeyCanaryTarget] != "staging-us-central1" {
+		t.Fatalf("canary_target = %q", gotReq.Metadata[sandboxmetadata.KeyCanaryTarget])
+	}
+	if gotReq.Metadata[sandboxmetadata.KeyRunID] != "run-123" {
+		t.Fatalf("run_id = %q", gotReq.Metadata[sandboxmetadata.KeyRunID])
+	}
+	if gotReq.Metadata[sandboxmetadata.KeyCreatedAt] != now.Format(time.RFC3339) {
+		t.Fatalf("created_at = %q", gotReq.Metadata[sandboxmetadata.KeyCreatedAt])
+	}
+	if gotReq.Metadata[sandboxmetadata.KeyExpiresAt] != now.Add(2*time.Hour).Format(time.RFC3339) {
+		t.Fatalf("expires_at = %q", gotReq.Metadata[sandboxmetadata.KeyExpiresAt])
 	}
 }
 
@@ -404,12 +430,8 @@ func TestOperationsFinalizeSandboxReturnsRetentionOutcome(t *testing.T) {
 		SandboxID:  "sb-1",
 	}, FinalizeOptions{
 		Retain: RetentionOptions{
-			Enabled: true,
-			Metadata: map[string]string{
-				"managed_by":         "api-canary",
-				"retained_for_debug": "true",
-				"failed_step":        "initial_command",
-			},
+			Enabled:           true,
+			Metadata:          sandboxmetadata.LegacyCanaryRetentionMetadata("staging", "us-central1", "staging-us-central1", "run-123", "initial_command", now.Add(-time.Minute), now, now.Add(2*time.Hour)),
 			AutoDeleteSeconds: &ttlSeconds,
 		},
 		Telemetry: TelemetryContext{Scenario: "lifecycle"},
@@ -426,7 +448,7 @@ func TestOperationsFinalizeSandboxReturnsRetentionOutcome(t *testing.T) {
 	if gotReq.AutoDeleteSeconds == nil || *gotReq.AutoDeleteSeconds != ttlSeconds {
 		t.Fatalf("unexpected auto delete seconds: %+v", gotReq.AutoDeleteSeconds)
 	}
-	if gotReq.Metadata["retained_for_debug"] != "true" {
+	if gotReq.Metadata[sandboxmetadata.KeyRetainedForDebug] != "true" {
 		t.Fatalf("unexpected retained metadata: %+v", gotReq.Metadata)
 	}
 }
