@@ -344,14 +344,12 @@ func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) 
 	}
 
 	logStep("publish_preview_port")
-	publishStart := r.Clock()
 	err = ops.PublishPreviewPort(ctx, sb.ID, PublishPreviewPortOptions{
 		Port:      r.Config.PreviewPort,
 		Access:    "public",
 		Telemetry: telemetry,
 	})
 	if err != nil {
-		r.Metrics.RecordStep(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", "publish_preview_port", result(err), r.Clock().Sub(publishStart))
 		res.Err = fmt.Errorf("publishing preview port: %w", err)
 		res.FailedStep = "publish_preview_port"
 		return res
