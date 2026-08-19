@@ -78,6 +78,119 @@ module "lifecycle" {
   depends_on                = [google_project_iam_member.deployment_alerting]
 }
 
+resource "google_service_account" "load_runner" {
+  project      = var.project_id
+  account_id   = "sbx-load-runner-staging"
+  display_name = "Sandbox Load Runner staging"
+}
+
+resource "google_secret_manager_secret_iam_member" "load_runner_staging_accessor" {
+  project   = var.project_id
+  secret_id = module.lifecycle.api_key_secret_name
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.load_runner.email}"
+}
+
+resource "google_cloud_run_v2_job" "load_runner" {
+  project             = var.project_id
+  name                = "sandbox-load-runner-staging-us-central1"
+  location            = var.job_region
+  deletion_protection = false
+  labels = merge(local.labels, {
+    component = "sandbox-load-runner"
+  })
+  depends_on = [
+    module.lifecycle,
+    google_secret_manager_secret_iam_member.load_runner_staging_accessor,
+  ]
+
+  template {
+    labels = merge(local.labels, {
+      component = "sandbox-load-runner"
+    })
+
+    template {
+      service_account = google_service_account.load_runner.email
+      timeout         = "3600s"
+      max_retries     = 0
+
+      vpc_access {
+        connector = "projects/rayai-dev/locations/us-central1/connectors/ss-vpc-conn-f1b3552"
+        egress    = "ALL_TRAFFIC"
+      }
+
+      containers {
+        image   = var.load_runner_image
+        command = ["/load-runner"]
+
+        # This deployment is staging-only by configuration, but the binary is
+        # environment-agnostic and can be deployed separately for production.
+        env {
+          name  = "CANARY_ENVIRONMENT"
+          value = "staging"
+        }
+        env {
+          name  = "CANARY_REGION"
+          value = "us-central1"
+        }
+        env {
+          name  = "CANARY_TARGET"
+          value = "staging-us-central1"
+        }
+        env {
+          name  = "API_BASE_URL"
+          value = "https://api-staging.superserve.ai"
+        }
+        env {
+          name  = "PREVIEW_DOMAIN"
+          value = "staging-sandbox.superserve.ai"
+        }
+        env {
+          name  = "LOAD_TEST_OPERATIONS"
+          value = "100"
+        }
+        env {
+          name  = "LOAD_TEST_CONCURRENCY"
+          value = "10"
+        }
+        env {
+          name  = "LOAD_TEST_RESOURCE_TTL"
+          value = "2h"
+        }
+        env {
+          name  = "LOAD_TEST_RUN_TIMEOUT"
+          value = "30m"
+        }
+        env {
+          name  = "LOAD_TEST_SANDBOX_TEMPLATE"
+          value = "superserve/python-3.11"
+        }
+        env {
+          name  = "OTEL_SERVICE_NAME"
+          value = "superserve-sandbox-load-runner"
+        }
+        env {
+          name  = "OTEL_ENVIRONMENT"
+          value = "staging"
+        }
+        env {
+          name  = "OTEL_EXPORTER_OTLP_ENDPOINT"
+          value = local.otlp_endpoint
+        }
+        env {
+          name = "CANARY_API_KEY_STAGING"
+          value_source {
+            secret_key_ref {
+              secret  = module.lifecycle.api_key_secret_name
+              version = "latest"
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
 module "janitor" {
   source = "../../../modules/janitor"
 
@@ -145,7 +258,7 @@ resource "google_monitoring_alert_policy" "metrics_shutdown_failed" {
     display_name = "Cloud Run logs contain metrics shutdown failed"
 
     condition_matched_log {
-      filter = "resource.type=\"cloud_run_job\" AND severity>=WARNING AND textPayload:\"metrics shutdown failed\""
+      filter = "resource.type=\"cloud_run_job\" AND severity>=WARNING AND jsonPayload.message=\"metrics shutdown failed\""
     }
   }
 

@@ -129,6 +129,50 @@ go run ./cmd/api-canary -mode janitor
 
 Manual staging execution creates and deletes real resources. Use a dedicated canary API key.
 
+### Load runner
+
+The load runner can also be run directly from a local checkout. It uses the same `CANARY_API_KEY` as the regular canary. Staging is the default deployment target, but the binary is not staging-only: it supports the current target inventory above. Production runs require the explicit `LOAD_TEST_PRODUCTION_OPT_IN=true` guard.
+
+For a minimal staging run, start with one operation and one worker:
+
+```bash
+export CANARY_TARGET=staging-us-central1
+export CANARY_ENVIRONMENT=staging
+export CANARY_REGION=us-central1
+export API_BASE_URL=https://api-staging.superserve.ai
+export PREVIEW_DOMAIN=staging-sandbox.superserve.ai
+export CANARY_API_KEY=ss_live_...
+export LOAD_TEST_OPERATIONS=1
+export LOAD_TEST_CONCURRENCY=1
+
+go run ./cmd/load-runner
+```
+
+A production run uses the same binary and configuration shape, with the target-specific routing values and an explicit production opt-in. For example, `production/us-east4` uses:
+
+```bash
+export CANARY_TARGET=production-us-east4
+export CANARY_ENVIRONMENT=production
+export CANARY_REGION=us-east4
+export API_BASE_URL=https://api.superserve.ai
+export PREVIEW_DOMAIN=use-sandbox.superserve.ai
+export CANARY_API_KEY=ss_live_...
+export LOAD_TEST_PRODUCTION_OPT_IN=true
+export LOAD_TEST_OPERATIONS=1
+export LOAD_TEST_CONCURRENCY=1
+
+go run ./cmd/load-runner
+```
+
+`go run` builds the load runner in a temporary location and executes it, so a separate build step or Makefile is not required. To build a reusable local binary instead:
+
+```bash
+go build -o ./bin/load-runner ./cmd/load-runner
+./bin/load-runner
+```
+
+The load runner creates real sandboxes, waits for them to become active, verifies command execution, and deletes them after each operation.
+
 ## Debug Retention
 
 Failed sandboxes can be retained for debugging when retention is enabled.
@@ -237,6 +281,37 @@ gcloud run jobs execute api-canary-janitor-staging \
   --wait
 ```
 
+The staging Terraform root also deploys the single-task load-runner job as `sandbox-load-runner-staging-us-central1`. Running it with no overrides uses the job defaults (`LOAD_TEST_OPERATIONS=100`, `LOAD_TEST_CONCURRENCY=10`):
+
+```bash
+gcloud run jobs execute sandbox-load-runner-staging-us-central1 \
+  --project rayai-dev \
+  --region us-central1 \
+  --wait
+```
+
+For a specific run size and per-runner lifecycle concurrency, override the environment variables only for that execution:
+
+```bash
+gcloud run jobs execute sandbox-load-runner-staging-us-central1 \
+  --project rayai-dev \
+  --region us-central1 \
+  --update-env-vars="LOAD_TEST_OPERATIONS=1000,LOAD_TEST_CONCURRENCY=100" \
+  --wait
+```
+
+You can optionally supply a stable run ID for easier log correlation:
+
+```bash
+gcloud run jobs execute sandbox-load-runner-staging-us-central1 \
+  --project rayai-dev \
+  --region us-central1 \
+  --update-env-vars="LOAD_TEST_OPERATIONS=1000,LOAD_TEST_CONCURRENCY=100,LOAD_TEST_RUN_ID=staging-1000x100" \
+  --wait
+```
+
+`LOAD_TEST_OPERATIONS` is the global operation count for this single task and `LOAD_TEST_CONCURRENCY` is the maximum number of lifecycle workers in flight inside that task. Multi-task Cloud Run fan-out (`--tasks`, shared `run_id`, unique per-task `worker_id`) is intentionally deferred to SS-346.
+
 Use `gcloud run jobs executions list` and `gcloud run jobs executions describe` to inspect status and logs after each run.
 
 To manually clear retained sandboxes, rerun the janitor job after the retention TTL has elapsed.
@@ -244,6 +319,8 @@ To manually clear retained sandboxes, rerun the janitor job after the retention 
 ## Manual Production Runbook
 
 Production lifecycle canaries are scheduled automatically after the production Terraform roots have been applied and the production API key secrets have been populated.
+
+The load-runner binary supports production targets, but this PR does not require a production load-runner deployment. A production job can be added independently later using the same `/load-runner` binary, the appropriate production secret and routing values, and `LOAD_TEST_PRODUCTION_OPT_IN=true`.
 
 The east production region uses the public Google Telemetry API instead of the private collector path, so it does not need VPC access.
 

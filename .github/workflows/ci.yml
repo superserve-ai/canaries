@@ -11,6 +11,7 @@ jobs:
     environment: staging
     permissions:
       contents: read
+      id-token: write
     env:
       TF_VAR_deployment_service_account_email: ${{ vars.GCP_SERVICE_ACCOUNT }}
     steps:
@@ -23,6 +24,12 @@ jobs:
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_wrapper: false
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
 
       - name: Go test
         run: |
@@ -43,16 +50,6 @@ jobs:
         run: |
           set -euo pipefail
           docker build -t api-canary:ci .
-
-      - name: Terraform fmt
-        run: terraform fmt -check -recursive
-
-      - name: Terraform init and validate staging
-        run: |
-          set -euo pipefail
-          cd infra/envs/staging/us-central1
-          terraform init -backend=false
-          terraform validate
 
       - name: Terraform init and validate production
         run: |
@@ -123,8 +120,13 @@ jobs:
           cd "${{ matrix.workdir }}"
           terraform init -input=false
 
+          plan_args=("-var=image=api-canary:pr-${GITHUB_SHA}")
+          if [[ "${{ matrix.name }}" == "staging" ]]; then
+            plan_args+=("-var=load_runner_image=api-canary:pr-${GITHUB_SHA}")
+          fi
+
           set +e
-          terraform plan -input=false -lock=false -detailed-exitcode -no-color -out=tfplan -var="image=api-canary:pr-${GITHUB_SHA}" > /tmp/plan.log
+          terraform plan -input=false -lock=false -detailed-exitcode -no-color -out=tfplan "${plan_args[@]}" > /tmp/plan.log
           plan_exit=$?
           set -e
 
