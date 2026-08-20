@@ -59,7 +59,10 @@ module "lifecycle" {
   create_alerts             = var.create_alerts
   vpc_connector             = "projects/rayai-dev/locations/us-central1/connectors/ss-vpc-conn-f1b3552"
   vpc_egress                = "ALL_TRAFFIC"
-  depends_on                = [google_project_iam_member.deployment_alerting]
+  depends_on = [
+    google_project_iam_member.deployment_alerting,
+    google_logging_linked_dataset.alert_sql,
+  ]
 }
 
 module "janitor" {
