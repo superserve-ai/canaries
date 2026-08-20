@@ -1,4 +1,4 @@
-.PHONY: all build build-api build-ui test test-unit test-ui test-api run-api run-ui lint tidy clean docker-build-api docker-build-ui help
+.PHONY: all build build-api build-ui test test-unit test-ui test-api run-api run-ui fmt fmt-check lint tidy clean docker-build-api docker-build-ui help
 
 BIN_DIR ?= bin
 GO ?= go
@@ -48,8 +48,16 @@ test-ui:
 test-api:
 	$(GO) test -v ./internal/canaryapi/... ./internal/lifecycle/...
 
+## fmt: Format all Go source files
+fmt:
+	gofmt -s -w .
+
+## fmt-check: Check formatting of all Go source files
+fmt-check:
+	@test -z "$$(gofmt -s -l .)" || (echo "Unformatted files found. Run 'make fmt':" && gofmt -s -l . && exit 1)
+
 ## lint: Run go vet on all packages
-lint:
+lint: fmt-check
 	$(GO) vet ./...
 
 ## tidy: Download and tidy Go module dependencies

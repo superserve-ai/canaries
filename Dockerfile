@@ -15,4 +15,5 @@ COPY --from=build /out/ui-canary /ui-canary
 ENTRYPOINT ["/ui-canary"]
 
 FROM gcr.io/distroless/static-debian12:nonroot AS default
+COPY --from=build /out/api-canary /api-canary
 ENTRYPOINT ["/api-canary"]

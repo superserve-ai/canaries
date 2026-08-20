@@ -108,4 +108,3 @@ func TestLoadConfigValidation(t *testing.T) {
 		t.Errorf("expected error when email is missing")
 	}
 }
-

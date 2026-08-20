@@ -193,3 +193,40 @@ func TestUIRunnerWithMockServer(t *testing.T) {
 		t.Fatalf("Runner failed with email/password auth: %v", err)
 	}
 }
+
+func TestAuthenticateInvalidCredentials(t *testing.T) {
+	server := setupMockConsoleServer()
+	defer server.Close()
+
+	baseCfg := config.Config{
+		Environment: "staging",
+		Region:      "us-central1",
+		Target:      "staging-us-central1",
+		RunTimeout:  30 * time.Second,
+	}
+
+	cfg := Config{
+		BaseConfig:      baseCfg,
+		ConsoleURL:      server.URL,
+		Email:           "", // invalid empty credentials
+		Password:        "",
+		Headless:        true,
+		StepTimeout:     3 * time.Second,
+		TerminalTimeout: 3 * time.Second,
+	}
+
+	runner := Runner{
+		Config:  cfg,
+		Locker:  lock.NoopLock{},
+		Metrics: metrics.NoopProvider{},
+		Clock:   time.Now,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	err := runner.Run(ctx)
+	if err == nil {
+		t.Fatal("expected runner to fail with invalid credentials")
+	}
+}

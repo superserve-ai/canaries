@@ -90,4 +90,3 @@ func Authenticate(ctx context.Context, page playwright.Page, cfg Config) error {
 	}
 	return fmt.Errorf("sign in failed, still on %s", page.URL())
 }
-

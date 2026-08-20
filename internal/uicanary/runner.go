@@ -615,10 +615,12 @@ func (r Runner) resumeSandboxInUI(page playwright.Page, sandboxID string, timeou
 func (r Runner) deleteSandboxInUI(page playwright.Page, sandboxID, sandboxName string, timeoutMs float64) error {
 	detailURL := fmt.Sprintf("%s/sandboxes/%s/", r.Config.ConsoleURL, sandboxID)
 	if !strings.HasPrefix(page.URL(), fmt.Sprintf("%s/sandboxes/%s", r.Config.ConsoleURL, sandboxID)) || strings.Contains(page.URL(), "/terminal") {
-		_, _ = page.Goto(detailURL, playwright.PageGotoOptions{
+		if _, err := page.Goto(detailURL, playwright.PageGotoOptions{
 			Timeout:   playwright.Float(timeoutMs),
 			WaitUntil: playwright.WaitUntilStateDomcontentloaded,
-		})
+		}); err != nil {
+			return fmt.Errorf("navigate to sandbox detail for deletion: %w", err)
+		}
 	}
 
 	// Open More actions menu
@@ -653,7 +655,15 @@ func (r Runner) deleteSandboxInUI(page playwright.Page, sandboxID, sandboxName s
 	}
 
 	// Delete confirmation dialog: type expected sandbox name
-	confirmInput := page.Locator("div[role='dialog'] input, .dialog-popup input, input[placeholder*='sandbox' i], #delete-dialog input, input#delete-input").First()
+	dialog := page.Locator("div[role='dialog'], [role='alertdialog'], .dialog-popup, #delete-dialog").First()
+	if err := dialog.WaitFor(playwright.LocatorWaitForOptions{
+		State:   playwright.WaitForSelectorStateVisible,
+		Timeout: playwright.Float(timeoutMs),
+	}); err != nil {
+		return fmt.Errorf("waiting for delete confirmation dialog: %w", err)
+	}
+
+	confirmInput := dialog.Locator("input").First()
 	if err := confirmInput.WaitFor(playwright.LocatorWaitForOptions{
 		State:   playwright.WaitForSelectorStateVisible,
 		Timeout: playwright.Float(timeoutMs),
@@ -662,30 +672,59 @@ func (r Runner) deleteSandboxInUI(page playwright.Page, sandboxID, sandboxName s
 	}
 	_ = confirmInput.Click()
 	_ = confirmInput.Fill("")
-	if err := confirmInput.PressSequentially(sandboxName, playwright.LocatorPressSequentiallyOptions{Delay: playwright.Float(20)}); err != nil {
+	_ = confirmInput.PressSequentially(sandboxName, playwright.LocatorPressSequentiallyOptions{Delay: playwright.Float(30)})
+
+	// Wait for the Delete button to become enabled and click it
+	deleteBtn := dialog.Locator("button:has-text('Delete')").First()
+	deadline := r.now().Add(time.Duration(timeoutMs) * time.Millisecond)
+	clicked := false
+	for r.now().Before(deadline) {
+		disabled, err := deleteBtn.IsDisabled()
+		if err == nil && !disabled {
+			if err := deleteBtn.Click(); err == nil {
+				clicked = true
+				break
+			}
+		}
+		// Fallback re-fill if React state didn't pick up typing
 		_ = confirmInput.Fill(sandboxName)
+		time.Sleep(300 * time.Millisecond)
 	}
 
-	// Click destructive Delete button in dialog
-	confirmDeleteBtn := page.Locator("div[role='dialog'] button:has-text('Delete'):not([disabled]), .dialog-popup button:has-text('Delete'):not([disabled]), #delete-dialog button").Last()
-	if err := confirmDeleteBtn.WaitFor(playwright.LocatorWaitForOptions{
-		State:   playwright.WaitForSelectorStateVisible,
+	if !clicked {
+		return fmt.Errorf("confirm delete button remained disabled or could not be clicked")
+	}
+
+	// Wait for the delete dialog to close (indicates DELETE API call completed)
+	_ = dialog.WaitFor(playwright.LocatorWaitForOptions{
+		State:   playwright.WaitForSelectorStateHidden,
 		Timeout: playwright.Float(timeoutMs),
-	}); err != nil {
-		_ = confirmInput.Fill(sandboxName)
-	}
-	if err := confirmDeleteBtn.Click(); err != nil {
-		return fmt.Errorf("click confirm delete button: %w", err)
-	}
+	})
 
-	// Verify navigation to the sandbox list page
+	// Wait for navigation away from the detail page back to the sandboxes dashboard
 	listURL := fmt.Sprintf("%s/sandboxes/", r.Config.ConsoleURL)
 	if err := page.WaitForURL(listURL+"**", playwright.PageWaitForURLOptions{
 		Timeout: playwright.Float(timeoutMs),
 	}); err != nil {
-		return fmt.Errorf("waiting for redirect to sandbox list after delete: %w", err)
+		_, _ = page.Goto(listURL, playwright.PageGotoOptions{
+			Timeout:   playwright.Float(timeoutMs),
+			WaitUntil: playwright.WaitUntilStateNetworkidle,
+		})
 	}
-	return nil
+
+	// Poll until deleted sandbox is verified gone from the dashboard table
+	time.Sleep(1 * time.Second)
+	pollDeadline := r.now().Add(time.Duration(timeoutMs) * time.Millisecond)
+	for r.now().Before(pollDeadline) {
+		row := page.Locator(fmt.Sprintf("tr:has-text('%s'), div[role='row']:has-text('%s')", sandboxName, sandboxName)).First()
+		count, _ := row.Count()
+		if count == 0 {
+			return nil
+		}
+		time.Sleep(1 * time.Second)
+	}
+
+	return fmt.Errorf("sandbox %s still present in table after deletion", sandboxName)
 }
 
 func extractSandboxIDFromURL(rawURL string) string {
