@@ -76,10 +76,7 @@ module "lifecycle" {
   vpc_network               = try(each.value.vpc_network, null)
   vpc_subnetwork            = try(each.value.vpc_subnetwork, null)
   vpc_tags                  = try(each.value.vpc_tags, [])
-  depends_on = [
-    google_project_iam_member.deployment_alerting,
-    google_logging_linked_dataset.alert_sql,
-  ]
+  depends_on                = [google_project_iam_member.deployment_alerting]
 }
 
 module "janitor" {
