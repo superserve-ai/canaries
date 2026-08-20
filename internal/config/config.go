@@ -18,8 +18,9 @@ type MetricsExporter string
 type LockBackend string
 
 const (
-	ModeLifecycle Mode = "lifecycle"
-	ModeJanitor   Mode = "janitor"
+	ModeLifecycle   Mode = "lifecycle"
+	ModeJanitor     Mode = "janitor"
+	ModeUILifecycle Mode = "ui-lifecycle"
 
 	RuntimeLocal    Runtime = "local"
 	RuntimeCloudRun Runtime = "cloud-run"
@@ -72,8 +73,10 @@ type metricsConfig struct {
 }
 
 func Load(rawMode string) (Config, error) {
+	loadDotEnv()
+
 	mode := Mode(strings.TrimSpace(rawMode))
-	if mode != ModeLifecycle && mode != ModeJanitor {
+	if mode != ModeLifecycle && mode != ModeJanitor && mode != ModeUILifecycle {
 		return Config{}, fmt.Errorf("invalid mode %q", rawMode)
 	}
 
@@ -97,8 +100,10 @@ func Load(rawMode string) (Config, error) {
 
 	lockBackend := LockBackend(strings.TrimSpace(os.Getenv("CANARY_LOCK_BACKEND")))
 	if lockBackend == "" {
-		switch runtime {
-		case RuntimeCloudRun:
+		switch {
+		case mode == ModeUILifecycle:
+			lockBackend = LockBackendNone
+		case runtime == RuntimeCloudRun:
 			lockBackend = LockBackendGCS
 		default:
 			lockBackend = LockBackendFile
@@ -123,15 +128,26 @@ func Load(rawMode string) (Config, error) {
 		return Config{}, errors.New("CANARY_RETAIN_FAILED_SANDBOX_TTL must be 24h or less")
 	}
 
+	target := os.Getenv("CANARY_TARGET")
+	environment := os.Getenv("CANARY_ENVIRONMENT")
+	region := os.Getenv("CANARY_REGION")
+	projectID := os.Getenv("GCP_PROJECT_ID")
+	if mode == ModeUILifecycle {
+		target = envDefault("CANARY_TARGET", "staging-us-central1")
+		environment = envDefault("CANARY_ENVIRONMENT", "staging")
+		region = envDefault("CANARY_REGION", "us-central1")
+		projectID = envDefault("GCP_PROJECT_ID", "superserve")
+	}
+
 	cfg := Config{
 		Mode:                            mode,
 		Runtime:                         runtime,
 		MetricsExporter:                 metricsExporter,
 		LockBackend:                     lockBackend,
-		Target:                          os.Getenv("CANARY_TARGET"),
-		Environment:                     os.Getenv("CANARY_ENVIRONMENT"),
-		Region:                          os.Getenv("CANARY_REGION"),
-		ProjectID:                       os.Getenv("GCP_PROJECT_ID"),
+		Target:                          target,
+		Environment:                     environment,
+		Region:                          region,
+		ProjectID:                       projectID,
 		APIBaseURL:                      os.Getenv("API_BASE_URL"),
 		PreviewDomain:                   os.Getenv("PREVIEW_DOMAIN"),
 		APIKey:                          os.Getenv("CANARY_API_KEY"),
@@ -155,29 +171,51 @@ func Load(rawMode string) (Config, error) {
 		JanitorThreshold:                getenvDuration("JANITOR_STALE_THRESHOLD", 1*time.Hour),
 		Metrics: metricsConfig{
 			ServiceName: envDefault("OTEL_SERVICE_NAME", "superserve-api-canary"),
-			Environment: envDefault("OTEL_ENVIRONMENT", os.Getenv("CANARY_ENVIRONMENT")),
+			Environment: envDefault("OTEL_ENVIRONMENT", environment),
 		},
 	}
 
-	var missing []string
-	for _, item := range []struct {
+	var requiredItems []struct {
 		value string
 		name  string
-	}{
-		{cfg.Target, "CANARY_TARGET"},
-		{cfg.Environment, "CANARY_ENVIRONMENT"},
-		{cfg.Region, "CANARY_REGION"},
-		{cfg.ProjectID, "GCP_PROJECT_ID"},
-		{cfg.APIBaseURL, "API_BASE_URL"},
-		{cfg.PreviewDomain, "PREVIEW_DOMAIN"},
-		{cfg.APIKey, "CANARY_API_KEY"},
-	} {
+	}
+	if mode == ModeUILifecycle {
+		requiredItems = []struct {
+			value string
+			name  string
+		}{
+			{cfg.Target, "CANARY_TARGET"},
+			{cfg.Environment, "CANARY_ENVIRONMENT"},
+			{cfg.Region, "CANARY_REGION"},
+			{cfg.ProjectID, "GCP_PROJECT_ID"},
+		}
+	} else {
+		requiredItems = []struct {
+			value string
+			name  string
+		}{
+			{cfg.Target, "CANARY_TARGET"},
+			{cfg.Environment, "CANARY_ENVIRONMENT"},
+			{cfg.Region, "CANARY_REGION"},
+			{cfg.ProjectID, "GCP_PROJECT_ID"},
+			{cfg.APIBaseURL, "API_BASE_URL"},
+			{cfg.PreviewDomain, "PREVIEW_DOMAIN"},
+			{cfg.APIKey, "CANARY_API_KEY"},
+		}
+	}
+
+	var missing []string
+	for _, item := range requiredItems {
 		if strings.TrimSpace(item.value) == "" {
 			missing = append(missing, item.name)
 		}
 	}
 	if len(missing) > 0 {
 		return Config{}, fmt.Errorf("missing required env vars: %s", strings.Join(missing, ", "))
+	}
+
+	if err := validateTargetTuple(cfg.Target, cfg.Environment, cfg.Region); err != nil {
+		return Config{}, err
 	}
 
 	if cfg.LockBackend == LockBackendFile && cfg.LockFile == "" {
@@ -195,13 +233,13 @@ func Load(rawMode string) (Config, error) {
 		if cfg.MetricsExporter != MetricsExporterOTLP {
 			return Config{}, fmt.Errorf("CANARY_RUNTIME=cloud-run requires CANARY_METRICS_EXPORTER=otlp")
 		}
-		if cfg.LockBackend != LockBackendGCS {
+		if cfg.LockBackend != LockBackendGCS && cfg.Mode != ModeUILifecycle {
 			return Config{}, fmt.Errorf("CANARY_RUNTIME=cloud-run requires CANARY_LOCK_BACKEND=gcs")
 		}
 		if cfg.OTELExporterOTLPMetricsEndpoint == "" {
 			return Config{}, fmt.Errorf("CANARY_RUNTIME=cloud-run requires OTEL_EXPORTER_OTLP_METRICS_ENDPOINT or OTEL_EXPORTER_OTLP_ENDPOINT")
 		}
-		if cfg.LockBucket == "" {
+		if cfg.LockBucket == "" && cfg.Mode != ModeUILifecycle {
 			return Config{}, fmt.Errorf("CANARY_RUNTIME=cloud-run requires LOCK_BUCKET")
 		}
 	case RuntimeLocal:
@@ -328,4 +366,50 @@ func getenvInt(key string, fallback int) int {
 		return fallback
 	}
 	return parsed
+}
+
+func loadDotEnv() {
+	data, err := os.ReadFile(".env")
+	if err != nil {
+		return
+	}
+	lines := strings.Split(string(data), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		eqIdx := strings.Index(line, "=")
+		if eqIdx == -1 {
+			continue
+		}
+		key := strings.TrimSpace(line[:eqIdx])
+		val := strings.TrimSpace(line[eqIdx+1:])
+		if (strings.HasPrefix(val, "\"") && strings.HasSuffix(val, "\"")) ||
+			(strings.HasPrefix(val, "'") && strings.HasSuffix(val, "'")) {
+			if len(val) >= 2 {
+				val = val[1 : len(val)-1]
+			}
+		}
+		if key != "" && os.Getenv(key) == "" {
+			_ = os.Setenv(key, val)
+		}
+	}
+}
+
+// validateTargetTuple checks that target is a two-part hyphen-separated string
+// whose first part equals environment and second part equals region.
+// This is only enforced for ModeUILifecycle to catch misconfigured deployments early.
+func validateTargetTuple(target, environment, region string) error {
+	parts := strings.SplitN(target, "-", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return fmt.Errorf("CANARY_TARGET %q must be in <environment>-<region> format (e.g. staging-us-central1)", target)
+	}
+	if parts[0] != environment {
+		return fmt.Errorf("CANARY_TARGET %q environment part %q does not match CANARY_ENVIRONMENT %q", target, parts[0], environment)
+	}
+	if parts[1] != region {
+		return fmt.Errorf("CANARY_TARGET %q region part %q does not match CANARY_REGION %q", target, parts[1], region)
+	}
+	return nil
 }
