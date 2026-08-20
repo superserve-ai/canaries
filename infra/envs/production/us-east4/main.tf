@@ -19,6 +19,22 @@ locals {
   dashboards = {}
 }
 
+data "terraform_remote_state" "production" {
+  backend = "gcs"
+
+  config = {
+    bucket = "superserve-terraform-state-prod"
+    prefix = "canaries/production"
+  }
+}
+
+check "production_alert_sql_linked_dataset" {
+  assert {
+    condition     = try(data.terraform_remote_state.production.outputs.alert_sql_linked_dataset_id, "") != ""
+    error_message = "Production remote state must expose alert_sql_linked_dataset_id before applying production/us-east4."
+  }
+}
+
 resource "google_project_service" "telemetry" {
   project            = var.project_id
   service            = "telemetry.googleapis.com"
@@ -46,7 +62,11 @@ module "lifecycle" {
   labels                    = local.labels
   vpc_connector             = null
   create_alerts             = var.create_alerts
-  depends_on                = [google_project_service.telemetry, google_project_iam_member.deployment_alerting]
+  depends_on = [
+    google_project_service.telemetry,
+    google_project_iam_member.deployment_alerting,
+    data.terraform_remote_state.production,
+  ]
 }
 
 module "janitor" {

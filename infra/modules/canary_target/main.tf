@@ -294,7 +294,6 @@ resource "google_monitoring_alert_policy" "cloud_run_job_runtime_failure" {
         WHERE
           resource.type = "cloud_run_job"
           AND resource.labels.job_name = "${google_cloud_run_v2_job.lifecycle.name}"
-          AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 15 MINUTE)
       EOT
 
       minutes {
@@ -353,7 +352,6 @@ resource "google_monitoring_alert_policy" "cloud_run_job_aborted_twice" {
         WHERE
           resource.type = "cloud_run_job"
           AND resource.labels.job_name = "${google_cloud_run_v2_job.lifecycle.name}"
-          AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 15 MINUTE)
       EOT
 
       minutes {
