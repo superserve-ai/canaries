@@ -265,44 +265,21 @@ resource "google_monitoring_alert_policy" "cloud_run_job_failed" {
   user_labels = local.labels
 }
 
-resource "google_monitoring_alert_policy" "cloud_run_job_runtime_failure" {
+resource "google_monitoring_alert_policy" "overlap_skipped" {
   count                 = var.create_alerts ? 1 : 0
   project               = var.project_id
-  display_name          = "API Canary ${var.target_name}: Cloud Run job failed before terminal log"
+  display_name          = "API Canary ${var.target_name}: overlapping run skipped"
   combiner              = "OR"
   enabled               = true
   notification_channels = var.notification_channel_ids
 
   conditions {
-    display_name = "Cloud Run failed without a terminal canary log"
+    display_name = "Lifecycle run skipped because target lock was already held"
 
-    condition_sql {
-      query = <<-EOT
-        SELECT
-          COUNTIF(
-            proto_payload.audit_log.service_name = "run.googleapis.com"
-            AND proto_payload.audit_log.method_name = "/Jobs.RunJob"
-            AND proto_payload.audit_log.status.code IS NOT NULL
-            AND proto_payload.audit_log.status.code != 10
-          ) > 0
-          AND COUNTIF(
-            json_payload.message = "lifecycle canary completed"
-            AND json_payload.result = "failure"
-          ) = 0 AS notify
-        FROM
-          `${var.project_id}.global._Default._AllLogs`
-        WHERE
-          resource.type = "cloud_run_job"
-          AND resource.labels.job_name = "${google_cloud_run_v2_job.lifecycle.name}"
-      EOT
-
-      minutes {
-        periodicity = 10
-      }
-
-      boolean_test {
-        column = "notify"
-      }
+    condition_prometheus_query_language {
+      query                     = "((sum(increase(superserve_canary_overlap_skipped_total{target=\"${var.target_name}\",scenario=\"lifecycle\"}[15m])) or vector(0)) > 0)"
+      duration                  = "0s"
+      disable_metric_validation = true
     }
   }
 
@@ -312,65 +289,9 @@ resource "google_monitoring_alert_policy" "cloud_run_job_runtime_failure" {
 
   documentation {
     content   = <<-EOT
-      Cloud Run reported a failure for API canary target ${var.target_name} before the canary emitted its terminal structured failure log.
+      API Canary ${var.target_name} skipped a lifecycle run because another execution already held the target lock.
 
-      This alert covers startup, configuration, panic, OOM, and other runtime failures.
-
-      [View Cloud Run job logs](https://console.cloud.google.com/logs/query;query=${local.lifecycle_job_logs_query};project=${var.project_id})
-      EOT
-    mime_type = "text/markdown"
-  }
-
-  user_labels = local.labels
-}
-
-resource "google_monitoring_alert_policy" "cloud_run_job_aborted_twice" {
-  count                 = var.create_alerts ? 1 : 0
-  project               = var.project_id
-  display_name          = "API Canary ${var.target_name}: execution aborted twice in a row"
-  combiner              = "OR"
-  enabled               = true
-  notification_channels = var.notification_channel_ids
-
-  conditions {
-    display_name = "Two consecutive aborted scheduled invocations"
-
-    condition_sql {
-      query = <<-EOT
-        SELECT
-          COUNTIF(
-            proto_payload.audit_log.service_name = "run.googleapis.com"
-            AND proto_payload.audit_log.method_name = "/Jobs.RunJob"
-            AND proto_payload.audit_log.status.code = 10
-          ) >= 2
-          AND COUNTIF(
-            json_payload.message = "lifecycle canary completed"
-            AND json_payload.result = "success"
-          ) = 0 AS notify
-        FROM
-          `${var.project_id}.global._Default._AllLogs`
-        WHERE
-          resource.type = "cloud_run_job"
-          AND resource.labels.job_name = "${google_cloud_run_v2_job.lifecycle.name}"
-      EOT
-
-      minutes {
-        periodicity = 10
-      }
-
-      boolean_test {
-        column = "notify"
-      }
-    }
-  }
-
-  alert_strategy {
-    auto_close = "1800s"
-  }
-
-  documentation {
-    content   = <<-EOT
-      Two consecutive scheduled invocations for API canary target ${var.target_name} were aborted by Cloud Run, which usually means a previous execution is still running.
+      This indicates overlapping executions rather than a lifecycle failure.
 
       [View Cloud Run job logs](https://console.cloud.google.com/logs/query;query=${local.lifecycle_job_logs_query};project=${var.project_id})
       EOT
@@ -403,7 +324,12 @@ resource "google_monitoring_alert_policy" "missing_runs" {
   }
 
   documentation {
-    content = "The scheduler, Cloud Run Job, or metrics export path for ${var.target_name} may be stalled."
+    content   = <<-EOT
+      The scheduler, Cloud Run Job, or metrics export path for ${var.target_name} may be stalled.
+
+      [View Cloud Run job logs](https://console.cloud.google.com/logs/query;query=${local.lifecycle_job_logs_query};project=${var.project_id})
+      EOT
+    mime_type = "text/markdown"
   }
 
   user_labels = local.labels
