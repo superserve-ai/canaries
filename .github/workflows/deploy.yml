@@ -106,7 +106,7 @@ jobs:
           set -euo pipefail
           cd infra/envs/staging/us-central1
           terraform init -input=false
-          terraform apply             -input=false             -auto-approve             -var="image=${{ steps.image.outputs.image }}"
+          terraform apply             -input=false             -auto-approve             -var="image=${{ steps.image.outputs.image }}"             -var="load_runner_image=${{ steps.image.outputs.image }}"
 
   deploy-production:
     runs-on: ubuntu-latest

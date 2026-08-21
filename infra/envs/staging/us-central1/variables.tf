@@ -12,6 +12,11 @@ variable "image" {
   type = string
 }
 
+variable "load_runner_image" {
+  description = "Image containing the /load-runner binary. Keep this pinned to a load-runner-capable image independently of canary rollbacks."
+  type        = string
+}
+
 variable "deployment_service_account_email" {
   type = string
 }
