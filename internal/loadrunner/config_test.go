@@ -141,6 +141,8 @@ func TestLoadRejectsRoutingHostMismatch(t *testing.T) {
 	}{
 		{name: "api host", env: "API_BASE_URL", value: "https://api-staging-alt.superserve.ai"},
 		{name: "api path", env: "API_BASE_URL", value: "https://api-staging.superserve.ai/sandboxes"},
+		{name: "dangling query", env: "API_BASE_URL", value: "https://api-staging.superserve.ai?"},
+		{name: "dangling fragment", env: "API_BASE_URL", value: "https://api-staging.superserve.ai#"},
 		{name: "insecure api", env: "API_BASE_URL", value: "http://api-staging.superserve.ai"},
 		{name: "preview host", env: "PREVIEW_DOMAIN", value: "staging.attacker.example"},
 	}

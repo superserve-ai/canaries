@@ -153,7 +153,7 @@ func validateRouting(environment, region, target, apiBaseURL, previewDomain stri
 		return fmt.Errorf("CANARY_TARGET %q does not match environment/region %q", target, expectedTarget)
 	}
 	parsed, err := url.Parse(apiBaseURL)
-	if err != nil || parsed.Scheme != "https" || parsed.Hostname() != route.APIHost || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+	if err != nil || parsed.Scheme != "https" || parsed.Hostname() != route.APIHost || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" || strings.HasSuffix(apiBaseURL, "?") || strings.HasSuffix(apiBaseURL, "#") {
 		return fmt.Errorf("API_BASE_URL %q does not match target %q", apiBaseURL, target)
 	}
 	if strings.ToLower(strings.TrimSuffix(strings.TrimSpace(previewDomain), ".")) != route.PreviewDomain {

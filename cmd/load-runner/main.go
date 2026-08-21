@@ -24,19 +24,23 @@ import (
 func main() {
 	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
 	log.Logger = zerolog.New(os.Stderr).With().Timestamp().Logger()
+	os.Exit(run())
+}
+
+func run() int {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	cfg, err := loadrunner.Load()
 	if err != nil {
-		fail(err)
+		return fail(err)
 	}
 	log.Info().Str("run_id", cfg.RunID).Str("environment", cfg.Environment).Int("operations", cfg.Operations).Int("concurrency", cfg.Concurrency).Dur("run_timeout", cfg.RunTimeout).Msg("starting load test")
 
 	metricsCfg := loadrunnerMetricsConfig()
 	mp, shutdownMetrics, err := metrics.NewProvider(ctx, metricsCfg)
 	if err != nil {
-		fail(err)
+		return fail(err)
 	}
 	defer func() {
 		if shutdownErr := shutdownMetrics(context.Background()); shutdownErr != nil {
@@ -49,18 +53,19 @@ func main() {
 	runner := loadrunner.Runner{Config: cfg, Ops: lifecycle.Operations{Client: client, Metrics: mp, Clock: time.Now, HTTP: httpClient}, Clock: time.Now}
 	_, err = runner.Run(ctx)
 	if err != nil && !errors.Is(err, context.Canceled) {
-		fail(err)
+		return fail(err)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }
 
-func fail(err error) {
+func fail(err error) int {
 	log.Error().Err(err).Msg("load runner failed")
 	fmt.Fprintln(os.Stderr, err)
-	os.Exit(1)
+	return 1
 }
 
 func loadrunnerMetricsConfig() config.Config {
