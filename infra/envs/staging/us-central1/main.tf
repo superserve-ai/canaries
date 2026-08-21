@@ -1,3 +1,19 @@
+removed {
+  from = google_logging_project_bucket_config.alert_sql
+
+  lifecycle {
+    destroy = false
+  }
+}
+
+removed {
+  from = google_logging_linked_dataset.alert_sql
+
+  lifecycle {
+    destroy = false
+  }
+}
+
 locals {
   labels = {
     environment = "staging"
@@ -59,10 +75,7 @@ module "lifecycle" {
   create_alerts             = var.create_alerts
   vpc_connector             = "projects/rayai-dev/locations/us-central1/connectors/ss-vpc-conn-f1b3552"
   vpc_egress                = "ALL_TRAFFIC"
-  depends_on = [
-    google_project_iam_member.deployment_alerting,
-    google_logging_linked_dataset.alert_sql,
-  ]
+  depends_on                = [google_project_iam_member.deployment_alerting]
 }
 
 module "janitor" {
