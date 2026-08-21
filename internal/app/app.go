@@ -16,11 +16,12 @@ import (
 	"github.com/superserve-ai/canaries/internal/lifecycle"
 	"github.com/superserve-ai/canaries/internal/lock"
 	"github.com/superserve-ai/canaries/internal/metrics"
+	"github.com/superserve-ai/canaries/internal/uicanary"
 )
 
 func Run(ctx context.Context, args []string) (err error) {
 	fs := flag.NewFlagSet("api-canary", flag.ContinueOnError)
-	mode := fs.String("mode", envDefault("CANARY_MODE", "lifecycle"), "lifecycle or janitor")
+	mode := fs.String("mode", envDefault("CANARY_MODE", "lifecycle"), "lifecycle, janitor, or ui-lifecycle")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -50,11 +51,11 @@ func Run(ctx context.Context, args []string) (err error) {
 		err = combineRunAndShutdownError(err, shutdownErr, cfg.Runtime)
 	}()
 
-	httpClient := &http.Client{Timeout: cfg.HTTPTimeout}
-	apiClient := canaryapi.NewClient(httpClient, cfg.APIBaseURL, cfg.APIKey, cfg.PreviewDomain)
-
 	switch cfg.Mode {
 	case config.ModeLifecycle:
+		httpClient := &http.Client{Timeout: cfg.HTTPTimeout}
+		apiClient := canaryapi.NewClient(httpClient, cfg.APIBaseURL, cfg.APIKey, cfg.PreviewDomain)
+
 		locker, closeFn, err := newLocker(ctx, cfg)
 		if err != nil {
 			return err
@@ -70,9 +71,31 @@ func Run(ctx context.Context, args []string) (err error) {
 		}
 		return runner.Run(ctx)
 	case config.ModeJanitor:
+		httpClient := &http.Client{Timeout: cfg.HTTPTimeout}
+		apiClient := canaryapi.NewClient(httpClient, cfg.APIBaseURL, cfg.APIKey, cfg.PreviewDomain)
+
 		runner := janitor.Runner{
 			Config:  cfg,
 			Client:  apiClient,
+			Metrics: mp,
+			Clock:   time.Now,
+		}
+		return runner.Run(ctx)
+	case config.ModeUILifecycle:
+		uiCfg, err := uicanary.LoadConfig(cfg)
+		if err != nil {
+			return err
+		}
+
+		locker, closeFn, err := newLocker(ctx, cfg)
+		if err != nil {
+			return err
+		}
+		defer closeFn()
+
+		runner := uicanary.Runner{
+			Config:  uiCfg,
+			Locker:  locker,
 			Metrics: mp,
 			Clock:   time.Now,
 		}
@@ -83,7 +106,7 @@ func Run(ctx context.Context, args []string) (err error) {
 }
 
 func newLocker(ctx context.Context, cfg config.Config) (lock.Lock, func(), error) {
-	if cfg.Mode != config.ModeLifecycle {
+	if cfg.Mode != config.ModeLifecycle && cfg.Mode != config.ModeUILifecycle {
 		return lock.NoopLock{}, func() {}, nil
 	}
 	locker, closeFn, err := lock.New(ctx, lock.Config{
