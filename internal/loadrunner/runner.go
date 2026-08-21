@@ -160,16 +160,19 @@ func (r Runner) runOne(ctx context.Context, operation int) (result operationResu
 	result.ReachedActive = true
 
 	execStarted := r.now()
-	res, execErr := r.Ops.ExecStep(ctx, sb.ID, sb.AccessToken, lifecycle.ExecStepOptions{Step: "verify_exec", Command: "printf superserve-load-test", Timeout: r.Config.CommandTimeout, Telemetry: telemetry})
+	res, execErr := r.Ops.Exec(ctx, sb.ID, sb.AccessToken, canaryapi.ExecRequest{Command: "printf superserve-load-test", TimeoutS: int(r.Config.CommandTimeout.Seconds())})
 	result.ExecDuration = r.now().Sub(execStarted)
 	if execErr != nil {
+		r.Ops.RecordStep(ctx, telemetry, "verify_exec", "failure", result.ExecDuration)
 		err = &lifecycleFailure{stage: "verify_exec", sandboxID: sb.ID, err: execErr}
 		return
 	}
 	if res.Stdout != "superserve-load-test" {
+		r.Ops.RecordStep(ctx, telemetry, "verify_exec", "failure", result.ExecDuration)
 		err = &lifecycleFailure{stage: "verify_exec", sandboxID: sb.ID, err: fmt.Errorf("unexpected exec output %q", res.Stdout)}
 		return
 	}
+	r.Ops.RecordStep(ctx, telemetry, "verify_exec", "success", result.ExecDuration)
 	return
 }
 

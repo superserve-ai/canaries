@@ -113,6 +113,10 @@ func (o Operations) recordStep(ctx context.Context, telemetry TelemetryContext, 
 	o.metricsProvider().RecordStep(ctx, telemetry.Environment, telemetry.Region, telemetry.Target, telemetry.Scenario, step, stepResult, duration)
 }
 
+func (o Operations) RecordStep(ctx context.Context, telemetry TelemetryContext, step, stepResult string, duration time.Duration) {
+	o.recordStep(ctx, telemetry, step, stepResult, duration)
+}
+
 func (o Operations) RecordRun(ctx context.Context, telemetry TelemetryContext, runResult string, duration time.Duration) {
 	o.metricsProvider().RecordRun(ctx, telemetry.Environment, telemetry.Region, telemetry.Target, telemetry.Scenario, runResult, duration)
 }

@@ -23,6 +23,7 @@ type fakeLoadClient struct {
 	deleteErr   error
 	createDelay time.Duration
 	status      string
+	execStdout  string
 	statusCalls map[string]int
 	waited      map[string]bool
 }
@@ -80,7 +81,11 @@ func (f *fakeLoadClient) Exec(_ context.Context, id string, _ string, req canary
 	if req.Command != "printf superserve-load-test" {
 		return canaryapi.ExecResult{}, errors.New("unexpected command")
 	}
-	return canaryapi.ExecResult{Stdout: "superserve-load-test", ExitCode: 0}, nil
+	stdout := f.execStdout
+	if stdout == "" {
+		stdout = "superserve-load-test"
+	}
+	return canaryapi.ExecResult{Stdout: stdout, ExitCode: 0}, nil
 }
 func (*fakeLoadClient) PauseSandbox(context.Context, string) error { return nil }
 func (*fakeLoadClient) ResumeSandbox(context.Context, string) (canaryapi.ResumeResponse, error) {
@@ -203,6 +208,56 @@ func TestRunnerReturnsWaitActiveFailureAndDeletesCreatedSandbox(t *testing.T) {
 	if len(client.created) != 1 || len(client.deleted) != 1 {
 		t.Fatalf("created=%d deleted=%d, want one of each", len(client.created), len(client.deleted))
 	}
+}
+
+func TestRunnerRecordsFailedVerifyExecWhenStdoutMismatch(t *testing.T) {
+	client := &fakeLoadClient{execStdout: "unexpected"}
+	metrics := &loadMetricsRecorder{}
+	cfg := testRunnerConfig()
+	cfg.Operations = 1
+	cfg.Concurrency = 1
+
+	summary, err := (Runner{Config: cfg, Ops: lifecycle.Operations{Client: client, Metrics: metrics}, Clock: time.Now}).Run(context.Background())
+	if err == nil || summary.Failed != 1 || summary.Completed != 0 {
+		t.Fatalf("unexpected result: summary=%+v err=%v", summary, err)
+	}
+	if got := metrics.stepResult("verify_exec"); got != "failure" {
+		t.Fatalf("verify_exec telemetry result = %q, want failure", got)
+	}
+}
+
+type loadMetricsRecorder struct {
+	mu    sync.Mutex
+	steps map[string]string
+}
+
+func (r *loadMetricsRecorder) RecordRun(context.Context, string, string, string, string, string, time.Duration) {
+}
+
+func (r *loadMetricsRecorder) RecordStep(_ context.Context, _ string, _ string, _ string, _ string, step, result string, _ time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.steps == nil {
+		r.steps = make(map[string]string)
+	}
+	r.steps[step] = result
+}
+
+func (r *loadMetricsRecorder) RecordCleanup(context.Context, string, string, string, string) {}
+func (r *loadMetricsRecorder) RecordOverlapSkip(context.Context, string, string, string)     {}
+func (r *loadMetricsRecorder) RecordExecutionDelta(context.Context, string, string, string, string, int64) {
+}
+func (r *loadMetricsRecorder) RecordOrphans(context.Context, string, string, string, int64, time.Duration) {
+}
+func (r *loadMetricsRecorder) RecordRetainedSandbox(context.Context, string, string, string, string) {
+}
+func (r *loadMetricsRecorder) RecordJanitorResources(context.Context, string, string, string, int64, int64, int64) {
+}
+
+func (r *loadMetricsRecorder) stepResult(step string) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.steps[step]
 }
 
 func TestSandboxNameForOperationIncludesWorkerIdentity(t *testing.T) {
