@@ -1,3 +1,19 @@
+removed {
+  from = google_logging_project_bucket_config.alert_sql
+
+  lifecycle {
+    destroy = false
+  }
+}
+
+removed {
+  from = google_logging_linked_dataset.alert_sql
+
+  lifecycle {
+    destroy = false
+  }
+}
+
 locals {
   labels = {
     environment = "production"
