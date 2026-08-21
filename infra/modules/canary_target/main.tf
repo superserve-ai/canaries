@@ -277,7 +277,7 @@ resource "google_monitoring_alert_policy" "overlap_skipped" {
     display_name = "Lifecycle run skipped because target lock was already held"
 
     condition_prometheus_query_language {
-      query                     = "((sum(increase(superserve_canary_overlap_skipped_total{target=\"${var.target_name}\",scenario=\"lifecycle\"}[15m])) or vector(0)) > 0)"
+      query                     = "((sum(max_over_time(superserve_canary_overlap_skipped_total{target=\"${var.target_name}\",scenario=\"lifecycle\"}[15m])) or vector(0)) > 0)"
       duration                  = "0s"
       disable_metric_validation = true
     }
