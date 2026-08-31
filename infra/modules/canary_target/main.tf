@@ -310,10 +310,10 @@ resource "google_monitoring_alert_policy" "missing_runs" {
   notification_channels = var.notification_channel_ids
 
   conditions {
-    display_name = "No lifecycle success or failure metric in 15m"
+    display_name = "No lifecycle completion in 15m"
 
     condition_prometheus_query_language {
-      query                     = "((sum(increase(superserve_canary_run_total{target=\"${var.target_name}\",scenario=\"lifecycle\",result=~\"success|failure\"}[15m])) or vector(0)) == 0)"
+      query                     = "((time() - max(superserve_canary_last_completed_timestamp_seconds{target=\"${var.target_name}\",scenario=\"lifecycle\"})) > 900) or absent(superserve_canary_last_completed_timestamp_seconds{target=\"${var.target_name}\",scenario=\"lifecycle\"})"
       duration                  = "0s"
       disable_metric_validation = true
     }
@@ -325,7 +325,9 @@ resource "google_monitoring_alert_policy" "missing_runs" {
 
   documentation {
     content   = <<-EOT
-      The scheduler, Cloud Run Job, or metrics export path for ${var.target_name} may be stalled.
+      No lifecycle completion timestamp has been observed for ${var.target_name} in the last 15 minutes.
+
+      The scheduler, Cloud Run Job, or metrics export path may be stalled.
 
       [View Cloud Run job logs](https://console.cloud.google.com/logs/query;query=${local.lifecycle_job_logs_query};project=${var.project_id})
       EOT
