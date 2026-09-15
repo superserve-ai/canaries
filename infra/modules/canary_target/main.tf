@@ -228,7 +228,6 @@ resource "google_monitoring_alert_policy" "cloud_run_job_failed" {
       filter = <<-EOT
         resource.type="cloud_run_job"
         AND resource.labels.job_name="${google_cloud_run_v2_job.lifecycle.name}"
-        AND severity>=ERROR
         AND jsonPayload.message="lifecycle canary completed"
         AND jsonPayload.result="failure"
       EOT

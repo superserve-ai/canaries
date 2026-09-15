@@ -36,6 +36,9 @@ jobs:
           set -euo pipefail
           go test ./...
 
+      - name: Canary alert filter regression
+        run: python3 -m unittest discover -s infra/modules/canary_target/tests -v
+
       - name: Go fmt check
         run: |
           set -euo pipefail
