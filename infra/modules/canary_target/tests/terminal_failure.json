@@ -1,0 +1,21 @@
+{
+  "resource": {
+    "type": "cloud_run_job",
+    "labels": {
+      "project_id": "rayai-prod",
+      "location": "us-west2",
+      "job_name": "api-canary-production-us-west2"
+    }
+  },
+  "labels": {
+    "run.googleapis.com/execution_name": "api-canary-production-us-west2-7zmpp"
+  },
+  "timestamp": "2026-09-15T18:25:15.714312Z",
+  "jsonPayload": {
+    "message": "lifecycle canary completed",
+    "result": "failure",
+    "level": "error",
+    "sandbox_id": "sb-usw-5ce81842-95ff-4b15-bfd8-910d05ed64c3",
+    "failed_step": "publish_preview_port"
+  }
+}
