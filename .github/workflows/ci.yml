@@ -31,6 +31,11 @@ jobs:
           workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
 
+      - name: Install Playwright and Chromium
+        run: |
+          set -euo pipefail
+          go run github.com/playwright-community/playwright-go/cmd/playwright install --with-deps chromium
+
       - name: Go test
         run: |
           set -euo pipefail
@@ -53,6 +58,7 @@ jobs:
         run: |
           set -euo pipefail
           docker build -t api-canary:ci .
+          docker build --target ui-canary -t ui-canary:ci .
 
       - name: Terraform init and validate production
         run: |
@@ -65,6 +71,13 @@ jobs:
         run: |
           set -euo pipefail
           cd infra/envs/production/us-east4
+          terraform init -backend=false
+          terraform validate
+
+      - name: Terraform init and validate staging central
+        run: |
+          set -euo pipefail
+          cd infra/envs/staging/us-central1
           terraform init -backend=false
           terraform validate
       - name: Install Gitleaks
@@ -126,6 +139,7 @@ jobs:
           plan_args=("-var=image=api-canary:pr-${GITHUB_SHA}")
           if [[ "${{ matrix.name }}" == "staging" ]]; then
             plan_args+=("-var=load_runner_image=api-canary:pr-${GITHUB_SHA}")
+            plan_args+=("-var=ui_canary_image=ui-canary:pr-${GITHUB_SHA}")
           fi
 
           set +e
