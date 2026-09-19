@@ -17,6 +17,18 @@ variable "load_runner_image" {
   type        = string
 }
 
+variable "ui_canary_image" {
+  description = "Container image for the UI canary (defaults to var.image if null)"
+  type        = string
+  default     = null
+}
+
+variable "ui_scheduler_enabled" {
+  description = "Whether the Cloud Scheduler job for UI canary is enabled"
+  type        = bool
+  default     = false
+}
+
 variable "deployment_service_account_email" {
   type = string
 }

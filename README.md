@@ -18,8 +18,9 @@ Each target has its own:
 - independent alert policy
 
 The canary binary supports:
-- `lifecycle`
-- `janitor`
+- `lifecycle` (API lifecycle canary)
+- `janitor` (API orphan cleanup)
+- `ui-lifecycle` (Headless browser UI lifecycle canary)
 
 ## Architecture
 
@@ -40,6 +41,101 @@ The janitor:
 2. deletes stale resources past TTL
 3. emits orphan and deletion metrics
 
+## UI Canary
+
+The UI canary runs automated end-to-end browser journeys against the Superserve web console using Playwright in headless Chromium.
+
+### UI Lifecycle Scenario
+Per run it:
+1. **Authenticates**: Submits operator email and password on `/auth/signin`, verifies session cookie creation and navigates to `/sandboxes/`.
+2. **Creates Sandbox**: Opens create dialog with a timestamped sandbox name (`ui-canary-<unix>`) and asserts the **Active** status badge. In Cloud Run, durable ownership metadata is tagged immediately upon sandbox ID discovery (`tag_sandbox`). If tagging fails after bounded retries, the unowned sandbox is deleted synchronously and the run aborts.
+3. **Interactive Terminal Execution**: Opens the web terminal (xterm.js), evaluates a dynamic arithmetic expression in bash (`echo "RES_UI_$((<nonceA> + <nonceB>))"` with random 4-digit nonces), and verifies the computed sum (`RES_UI_<sum>`) to eliminate false positives from keystroke echoing or hardcoded outputs.
+4. **Pauses Sandbox**: Clicks Stop and asserts the **Paused** status badge.
+5. **Resumes Sandbox**: Clicks Start and asserts the **Active** status badge.
+6. **Deletes Sandbox**: Confirms deletion dialog, waits for the dialog to dismiss and verifies the sandbox is removed from the sandboxes table. Guaranteed deferred cleanup automatically recovers and reaps sandboxes on intermediate failures.
+
+### UI Canary Environment Variables
+
+| Variable | Required | Default | Description |
+| --- | --- | --- | --- |
+| `CANARY_UI_CONSOLE_URL` | **Yes** | — | Target Superserve Console URL (e.g. `https://console-staging.superserve.ai` or `http://localhost:3000`) |
+| `CANARY_UI_EMAIL` | **Yes** | — | Canary operator login email |
+| `CANARY_UI_PASSWORD` | **Yes** | — | Canary operator login password |
+| `CANARY_UI_VERCEL_PROTECTION_BYPASS` | No | — | Vercel deployment protection bypass secret (injected via `x-vercel-protection-bypass` and `x-vercel-set-bypass-cookie: true` headers; never embed in `CANARY_UI_CONSOLE_URL`) |
+| `CANARY_UI_HEADLESS` | No | `true` | Run browser in headless mode (`true` or `false`) |
+| `CANARY_UI_STEP_TIMEOUT` | No | `45s` | Timeout for UI navigation and status assertion steps |
+| `CANARY_UI_TERMINAL_TIMEOUT` | No | `30s` | Timeout for terminal connection and command execution |
+| `CANARY_UI_ARTIFACTS_DIR` | No | `/tmp/ui-canary-artifacts` | Directory for failure screenshots |
+
+### Local UI Canary Execution
+
+Run with `make run-ui` (reads credentials and console URL from `.env` or environment):
+
+```bash
+export CANARY_UI_CONSOLE_URL=https://console-staging.superserve.ai
+export CANARY_UI_VERCEL_PROTECTION_BYPASS=secret123 # required for protected staging
+export CANARY_UI_EMAIL=canary@superserve.ai
+export CANARY_UI_PASSWORD=secret123
+
+make run-ui
+```
+
+### Container Build & Docker Execution
+
+Build the standalone UI Canary image (includes Playwright Chromium runtime and Go driver cache):
+
+```bash
+make docker-build-ui
+
+docker run --rm \
+  -e CANARY_TARGET=staging-us-central1 \
+  -e CANARY_ENVIRONMENT=staging \
+  -e CANARY_REGION=us-central1 \
+  -e CANARY_UI_CONSOLE_URL=https://console-staging.superserve.ai \
+  -e CANARY_UI_VERCEL_PROTECTION_BYPASS=secret123 \
+  -e CANARY_UI_EMAIL=canary@superserve.ai \
+  -e CANARY_UI_PASSWORD=secret123 \
+  superserve/ui-canary:latest
+```
+
+### Cloud Run Deployment & Terraform Infrastructure
+
+The UI canary is defined declaratively in Terraform under `infra/modules/ui_canary` and instantiated per environment (e.g. `infra/envs/staging/us-central1/main.tf`). It provisions:
+- A Cloud Run v2 Job configured with the dedicated Playwright runtime container (`ui_canary_image`), GCS target lease, and OTLP metrics.
+- A Cloud Scheduler job running on a 5-minute cron schedule (`*/5 * * * *`).
+- Secret Manager bindings for operator credentials, Vercel bypass (staging), and the Canary API key for durable ownership metadata tagging.
+
+#### Safe Bootstrapping Sequence for New Targets
+ 
+When onboarding a brand new target environment, the scheduler is disabled initially (`ui_scheduler_enabled = false`) to prevent automated executions and alerts prior to populating secrets:
+ 
+**Step 1: Deploy infrastructure with scheduler disabled**
+
+On initial merge, CI applies Terraform with `ui_scheduler_enabled = false` (the default in `infra/envs/staging/us-central1/variables.tf`). This provisions the Cloud Run Job, IAM roles, and empty Secret Manager containers without activating the Cloud Scheduler job.
+
+**Step 2: Populate Secret Manager versions out-of-band**
+```bash
+PROJECT_ID="rayai-dev"
+echo -n "canary-operator@superserve.ai" | gcloud secrets versions add ui-canary-email-staging-us-central1 --project="$PROJECT_ID" --data-file=-
+echo -n "operator-password-here" | gcloud secrets versions add ui-canary-password-staging-us-central1 --project="$PROJECT_ID" --data-file=-
+echo -n "vercel-bypass-secret-here" | gcloud secrets versions add ui-canary-vercel-bypass-staging-us-central1 --project="$PROJECT_ID" --data-file=-
+# If this is a fresh target without an existing API canary key:
+echo -n "superserve-api-key-here" | gcloud secrets versions add api-canary-key-staging-us-central1 --project="$PROJECT_ID" --data-file=-
+```
+
+**Step 3: Manually execute and verify the Cloud Run Job**
+```bash
+gcloud run jobs execute ui-canary-staging-us-central1 \
+  --project rayai-dev \
+  --region us-central1 \
+  --wait
+```
+Inspect the execution logs to confirm authentication, sandbox creation, terminal execution, and cleanup succeeded.
+
+**Step 4: Enable the Cloud Scheduler job**
+
+Submit a follow-up commit updating `infra/envs/staging/us-central1/variables.tf` to set `default = true` for `ui_scheduler_enabled`. Once merged, normal CI deployments will henceforth maintain the scheduler as durably enabled.
+
 ## Target Inventory
 
 Discovered from `sandbox`:
@@ -55,19 +151,24 @@ Discovered from `sandbox`:
 
 Terraform creates secret containers only. Populate versions manually after apply.
 
-Expected secret names:
+Expected API canary secret names:
 - `api-canary-key-staging-us-central1`
 - `api-canary-key-production-us-central1`
 - `api-canary-key-production-us-east4`
 - `api-canary-key-production-us-west2`
 
-Each secret value must be a customer API key for a dedicated canary account or team.
+Expected UI canary secret names:
+- `ui-canary-email-staging-us-central1`
+- `ui-canary-password-staging-us-central1`
+- `ui-canary-vercel-bypass-staging-us-central1` (staging only)
+
+Each API canary secret value must be a customer API key for a dedicated canary account or team.
 
 Rotate credentials by:
-1. create a new API key in Superserve
+1. create a new API key / password in Superserve
 2. add a new Secret Manager version
 3. rerun the Cloud Run Job or wait for the next schedule
-4. revoke the old API key
+4. revoke the old API key / credential
 
 ## Local Execution
 

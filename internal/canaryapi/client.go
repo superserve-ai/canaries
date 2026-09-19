@@ -152,6 +152,12 @@ func (c *Client) UpdateSandbox(ctx context.Context, id string, req UpdateSandbox
 	return c.doPatch(ctx, "/sandboxes/"+url.PathEscape(id), req)
 }
 
+// TagSandbox implements uicanary.SandboxTagger. It patches ownership metadata
+// onto a sandbox so the janitor can discover and reap it if it leaks.
+func (c *Client) TagSandbox(ctx context.Context, sandboxID string, metadata map[string]string) error {
+	return c.UpdateSandbox(ctx, sandboxID, UpdateSandboxRequest{Metadata: metadata})
+}
+
 func (c *Client) PublishPreviewPort(ctx context.Context, sandboxID string, req PublishPreviewPortRequest) error {
 	payload, err := json.Marshal(req)
 	if err != nil {

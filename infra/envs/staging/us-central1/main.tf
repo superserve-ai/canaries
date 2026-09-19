@@ -78,6 +78,29 @@ module "lifecycle" {
   depends_on                = [google_project_iam_member.deployment_alerting]
 }
 
+module "ui_canary" {
+  source = "../../../modules/ui_canary"
+
+  project_id                   = var.project_id
+  job_region                   = var.job_region
+  target_name                  = "staging-us-central1"
+  environment                  = "staging"
+  target_region                = "us-central1"
+  console_url                  = "https://console-staging.superserve.ai"
+  image                        = coalesce(var.ui_canary_image, var.image)
+  scheduler_enabled            = var.ui_scheduler_enabled
+  ui_email_secret_name         = "ui-canary-email-staging-us-central1"
+  ui_password_secret_name      = "ui-canary-password-staging-us-central1"
+  ui_vercel_bypass_secret_name = "ui-canary-vercel-bypass-staging-us-central1"
+  api_key_secret_name          = module.lifecycle.api_key_secret_name
+  api_base_url                 = "https://api-staging.superserve.ai"
+  lock_bucket_name             = google_storage_bucket.locks.name
+  otlp_metrics_endpoint        = local.otlp_endpoint
+  labels                       = local.labels
+  vpc_connector                = "projects/rayai-dev/locations/us-central1/connectors/ss-vpc-conn-f1b3552"
+  vpc_egress                   = "ALL_TRAFFIC"
+}
+
 resource "google_service_account" "load_runner" {
   project      = var.project_id
   account_id   = "sbx-load-runner-staging"
