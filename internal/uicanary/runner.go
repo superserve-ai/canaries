@@ -497,7 +497,12 @@ func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) 
 
 func (r Runner) createSandboxInUI(page playwright.Page, sandboxName string, timeoutMs float64, onIDDiscovered func(string)) (string, error) {
 	// Navigate to sandboxes list if not already there
-	if !strings.Contains(page.URL(), "/sandboxes") {
+	parsedURL, _ := url.Parse(page.URL())
+	cleanPath := ""
+	if parsedURL != nil {
+		cleanPath = strings.TrimRight(parsedURL.Path, "/")
+	}
+	if cleanPath != "/sandboxes" && !strings.HasPrefix(cleanPath, "/sandboxes/") {
 		listURL := r.Config.ConsoleURL + "/sandboxes/"
 		log.Info().Str("url", listURL).Msg("navigating to sandboxes list")
 		if _, err := page.Goto(listURL, playwright.PageGotoOptions{

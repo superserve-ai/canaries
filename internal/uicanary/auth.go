@@ -3,6 +3,7 @@ package uicanary
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -15,15 +16,15 @@ func Authenticate(ctx context.Context, page playwright.Page, cfg Config) error {
 	log.Info().Str("email", maskEmail(cfg.Email)).Msg("authenticating UI canary via email/password form")
 
 	baseURL := strings.TrimRight(cfg.ConsoleURL, "/")
-	signinURL := baseURL + "/auth/signin?next=/sandboxes/"
-	if _, err := page.Goto(signinURL, playwright.PageGotoOptions{
-		Timeout:   playwright.Float(float64(cfg.StepTimeout.Milliseconds())),
+	rootURL := baseURL + "/"
+	timeoutMs := float64(cfg.StepTimeout.Milliseconds())
+
+	if _, err := page.Goto(rootURL, playwright.PageGotoOptions{
+		Timeout:   playwright.Float(timeoutMs),
 		WaitUntil: playwright.WaitUntilStateDomcontentloaded,
 	}); err != nil {
-		return fmt.Errorf("navigate to %s: %w", signinURL, err)
+		return fmt.Errorf("navigate to %s: %w", rootURL, err)
 	}
-
-	timeoutMs := float64(cfg.StepTimeout.Milliseconds())
 
 	emailInput := page.Locator("input[type='email'], input[placeholder*='Email' i], input[name='email']").First()
 	if err := emailInput.WaitFor(playwright.LocatorWaitForOptions{
@@ -52,18 +53,10 @@ func Authenticate(ctx context.Context, page playwright.Page, cfg Config) error {
 		return fmt.Errorf("click sign in: %w", err)
 	}
 
-	// Allow Supabase authentication request to complete and persist session tokens
-	time.Sleep(3 * time.Second)
-
-	// Poll until redirected to sandboxes, checking for error alerts
-	sandboxesURL := baseURL + "/sandboxes/"
+	// Poll until redirected to authenticated dashboard, checking for error alerts
+	parsedBase, pErr := url.Parse(baseURL)
 	deadline := time.Now().Add(cfg.StepTimeout)
-	fallbackAttempted := false
 	for time.Now().Before(deadline) {
-		if strings.Contains(page.URL(), "/sandboxes") {
-			return nil
-		}
-
 		// Check if an error message is visible
 		errorLoc := page.Locator(".text-destructive, [role='alert']")
 		if count, _ := errorLoc.Count(); count > 0 {
@@ -76,23 +69,39 @@ func Authenticate(ctx context.Context, page playwright.Page, cfg Config) error {
 			}
 		}
 
-		// Fallback: If still on signin after initial wait and no error alert,
-		// trigger a single navigation to sandboxes dashboard to recover if client SPA router stalled.
-		if !fallbackAttempted && time.Now().After(deadline.Add(-cfg.StepTimeout+4*time.Second)) && strings.Contains(page.URL(), "/auth/signin") {
-			fallbackAttempted = true
-			_, _ = page.Goto(sandboxesURL, playwright.PageGotoOptions{
-				Timeout:   playwright.Float(timeoutMs),
-				WaitUntil: playwright.WaitUntilStateDomcontentloaded,
-			})
+		// Check if redirected to authenticated dashboard
+		if currentURL, err := url.Parse(page.URL()); err == nil {
+			originMatch := pErr != nil || (currentURL.Scheme == parsedBase.Scheme && currentURL.Host == parsedBase.Host)
+			if originMatch && isDashboardPath(currentURL.Path) && isDashboardContentVisible(page) {
+				return nil
+			}
 		}
 
-		time.Sleep(1 * time.Second)
+		time.Sleep(500 * time.Millisecond)
 	}
 
-	if strings.Contains(page.URL(), "/sandboxes") {
-		return nil
+	if currentURL, err := url.Parse(page.URL()); err == nil {
+		originMatch := pErr != nil || (currentURL.Scheme == parsedBase.Scheme && currentURL.Host == parsedBase.Host)
+		if originMatch && isDashboardPath(currentURL.Path) && isDashboardContentVisible(page) {
+			return nil
+		}
 	}
+
 	return fmt.Errorf("sign in failed, still on %s", page.URL())
+}
+
+func isDashboardPath(path string) bool {
+	cleanPath := strings.TrimRight(path, "/")
+	return cleanPath == "/sandboxes" || strings.HasPrefix(cleanPath, "/sandboxes/")
+}
+
+func isDashboardContentVisible(page playwright.Page) bool {
+	loc := page.Locator("h1:has-text('Sandboxes'), button:has-text('Create sandbox'), button:has-text('Create Sandbox'), :has-text('No Sandboxes'), table, div[role='rowgroup']").First()
+	if count, _ := loc.Count(); count > 0 {
+		visible, _ := loc.IsVisible()
+		return visible
+	}
+	return false
 }
 
 func maskEmail(email string) string {

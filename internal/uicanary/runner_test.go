@@ -74,6 +74,18 @@ func setupMockConsoleServer(opts ...*mockServerState) *httptest.Server {
 		state.Unlock()
 	}
 
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		if c, err := r.Cookie("sb-auth-token.0"); err == nil && c.Value != "" {
+			http.Redirect(w, r, "/sandboxes/", http.StatusFound)
+			return
+		}
+		http.Redirect(w, r, "/auth/signin?next=/", http.StatusFound)
+	})
+
 	mux.HandleFunc("/auth/signin", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			_ = r.ParseForm()
@@ -863,12 +875,19 @@ func TestAuthenticateDelayedRedirect(t *testing.T) {
 		clientRedirectDone bool
 	)
 	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		http.Redirect(w, r, "/auth/signin?next=/", http.StatusFound)
+	})
+
 	mux.HandleFunc("/auth/signin", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			w.Header().Set("Content-Type", "text/html")
-			// Delayed JS redirect at 4s.
-			// Prior to the fix, the polling loop called page.Goto after 3s,
-			// which aborted in-flight redirects. With the fix, client redirect succeeds.
+			// Delayed JS redirect at 2.5s.
+			// The polling loop asserts destination URL and dashboard element visibility.
 			fmt.Fprintf(w, `<!DOCTYPE html>
 <html>
 <head><title>Authenticating</title></head>
@@ -877,7 +896,7 @@ func TestAuthenticateDelayedRedirect(t *testing.T) {
   <script>
     setTimeout(function() {
       window.location.href = '/sandboxes/?via=client-redirect';
-    }, 4000);
+    }, 2500);
   </script>
 </body>
 </html>`)
@@ -947,6 +966,167 @@ func TestAuthenticateDelayedRedirect(t *testing.T) {
 	mu.Unlock()
 	if !viaClient {
 		t.Fatalf("expected redirect to be initiated by client script (?via=client-redirect)")
+	}
+}
+
+func TestAuthenticateStalledNavigationFails(t *testing.T) {
+	skipIfPlaywrightUnavailable(t)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		http.Redirect(w, r, "/auth/signin?next=/", http.StatusFound)
+	})
+
+	mux.HandleFunc("/auth/signin", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			// Simulates production defect: 200 session established, but client SPA router stalls
+			// and never navigates away from /auth/signin.
+			http.SetCookie(w, &http.Cookie{
+				Name:  "sb-auth-token.0",
+				Value: "valid-session",
+				Path:  "/",
+			})
+			w.Header().Set("Content-Type", "text/html")
+			fmt.Fprintf(w, `<!DOCTYPE html>
+<html>
+<head><title>Sign In</title></head>
+<body>
+  <p>Session active, but router stalled on signin.</p>
+</body>
+</html>`)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprintf(w, `<!DOCTYPE html>
+<html>
+<head><title>Sign In</title></head>
+<body>
+  <form method="POST" action="/auth/signin">
+    <input type="email" placeholder="Email" name="email" value="" />
+    <input type="password" placeholder="Password" name="password" value="" />
+    <button type="submit">Sign In</button>
+  </form>
+</body>
+</html>`)
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	pw, err := playwright.Run()
+	if err != nil {
+		t.Fatalf("playwright run: %v", err)
+	}
+	defer pw.Stop()
+
+	browser, err := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
+		Headless: playwright.Bool(true),
+	})
+	if err != nil {
+		t.Fatalf("chromium launch: %v", err)
+	}
+	defer browser.Close()
+
+	page, err := browser.NewPage()
+	if err != nil {
+		t.Fatalf("new page: %v", err)
+	}
+	defer page.Close()
+
+	cfg := Config{
+		ConsoleURL:  server.URL,
+		Email:       "test@example.com",
+		Password:    "password",
+		StepTimeout: 2 * time.Second,
+	}
+
+	err = Authenticate(context.Background(), page, cfg)
+	if err == nil {
+		t.Fatal("expected Authenticate to fail when client navigation stalls without Goto recovery")
+	}
+	if !strings.Contains(err.Error(), "sign in failed") {
+		t.Fatalf("expected sign in failed error, got: %v", err)
+	}
+}
+
+func TestAuthenticateQueryParamNotFalsePositive(t *testing.T) {
+	skipIfPlaywrightUnavailable(t)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		http.Redirect(w, r, "/auth/signin?next=/sandboxes/", http.StatusFound)
+	})
+
+	mux.HandleFunc("/auth/signin", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			// Stalled while retaining ?next=/sandboxes/ in URL
+			w.Header().Set("Content-Type", "text/html")
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w, `<!DOCTYPE html>
+<html>
+<head><title>Sign In</title></head>
+<body>
+  <h1>Sign In</h1>
+  <p role="alert" class="text-destructive">Authentication stalled</p>
+</body>
+</html>`)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprintf(w, `<!DOCTYPE html>
+<html>
+<head><title>Sign In</title></head>
+<body>
+  <form method="POST" action="/auth/signin?next=/sandboxes/">
+    <input type="email" placeholder="Email" name="email" value="" />
+    <input type="password" placeholder="Password" name="password" value="" />
+    <button type="submit">Sign In</button>
+  </form>
+</body>
+</html>`)
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	pw, err := playwright.Run()
+	if err != nil {
+		t.Fatalf("playwright run: %v", err)
+	}
+	defer pw.Stop()
+
+	browser, err := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
+		Headless: playwright.Bool(true),
+	})
+	if err != nil {
+		t.Fatalf("chromium launch: %v", err)
+	}
+	defer browser.Close()
+
+	page, err := browser.NewPage()
+	if err != nil {
+		t.Fatalf("new page: %v", err)
+	}
+	defer page.Close()
+
+	cfg := Config{
+		ConsoleURL:  server.URL,
+		Email:       "test@example.com",
+		Password:    "password",
+		StepTimeout: 2 * time.Second,
+	}
+
+	err = Authenticate(context.Background(), page, cfg)
+	if err == nil {
+		t.Fatal("expected Authenticate to fail and not false-positive on ?next=/sandboxes/ query param")
 	}
 }
 
