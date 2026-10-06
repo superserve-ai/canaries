@@ -18,3 +18,8 @@ variable "template_runtime_service_account_email" {
   type    = string
   default = ""
 }
+
+variable "snapshot_runtime_service_account_email" {
+  type    = string
+  default = ""
+}

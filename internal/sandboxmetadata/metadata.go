@@ -22,6 +22,11 @@ const (
 	KeyFailedStep       = "failed_step"
 	KeyRetainedAt       = "retained_at"
 
+	// Snapshots carry no metadata either, so a source sandbox names the
+	// snapshot it made until that snapshot is gone; the janitor deletes the
+	// snapshot before the sandbox that still points at it.
+	KeySnapshotID = "snapshot_id"
+
 	// Templates carry no metadata, so canary ownership is the name prefix.
 	TemplateNamePrefix = "api-canary-template-"
 )

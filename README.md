@@ -20,6 +20,7 @@ Each target has its own:
 The canary binary supports:
 - `lifecycle`
 - `template`
+- `snapshot`
 - `janitor`
 
 ## Architecture
@@ -44,9 +45,18 @@ The template canary runs hourly as its own Cloud Run Job with its own lock and a
 
 Templates carry no metadata, so canary templates are named `api-canary-template-<target>-<run_id>` and the janitor sweeps that prefix. The base image is `CANARY_TEMPLATE_BASE_IMAGE` (default `ubuntu:22.04`).
 
+The snapshot canary runs every 15 minutes as its own Cloud Run Job with its own lock and alerts. Per run it:
+1. creates a source sandbox and seeds the same disk and memory tokens the lifecycle run uses
+2. takes a `mem+fs` snapshot
+3. records the snapshot id in the source's metadata as soon as the snapshot exists, polls it to ready, then checks the source is active again
+4. creates a fork from the snapshot and runs the disk and memory checks inside the fork
+5. deletes the fork, the snapshot, then the source
+
+Snapshots carry no metadata and outlive their sandbox, so the source keeps pointing at its snapshot until the snapshot is gone. A failed snapshot delete leaves the source in place, and the janitor deletes the snapshot before any stale sandbox that still names one.
+
 The janitor:
 1. lists canary-owned sandboxes and canary-named templates for the environment
-2. deletes stale resources past TTL
+2. deletes stale resources past TTL, snapshot before the sandbox that names it
 3. emits orphan and deletion metrics
 
 ## Target Inventory
@@ -134,6 +144,7 @@ export MANUAL_STAGING_OPT_IN=true
 
 go run ./cmd/api-canary -mode lifecycle
 go run ./cmd/api-canary -mode template
+go run ./cmd/api-canary -mode snapshot
 go run ./cmd/api-canary -mode janitor
 ```
 

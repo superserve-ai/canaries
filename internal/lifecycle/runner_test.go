@@ -1043,6 +1043,9 @@ type fakeClient struct {
 	createTemplateFn     func(context.Context, canaryapi.CreateTemplateRequest) (canaryapi.Template, error)
 	getTemplateBuildFn   func(context.Context, string, string) (canaryapi.TemplateBuild, error)
 	deleteTemplateFn     func(context.Context, string) error
+	createSnapshotFn     func(context.Context, string, canaryapi.CreateSnapshotRequest) (canaryapi.Snapshot, error)
+	getSnapshotFn        func(context.Context, string) (canaryapi.Snapshot, error)
+	deleteSnapshotFn     func(context.Context, string) error
 }
 
 func (f *fakeClient) CreateSandbox(ctx context.Context, req canaryapi.CreateSandboxRequest) (canaryapi.Sandbox, error) {
@@ -1116,4 +1119,19 @@ func (f *fakeClient) DeleteTemplate(ctx context.Context, id string) error {
 		return nil
 	}
 	return f.deleteTemplateFn(ctx, id)
+}
+
+func (f *fakeClient) CreateSnapshot(ctx context.Context, sandboxID string, req canaryapi.CreateSnapshotRequest) (canaryapi.Snapshot, error) {
+	return f.createSnapshotFn(ctx, sandboxID, req)
+}
+
+func (f *fakeClient) GetSnapshot(ctx context.Context, id string) (canaryapi.Snapshot, error) {
+	return f.getSnapshotFn(ctx, id)
+}
+
+func (f *fakeClient) DeleteSnapshot(ctx context.Context, id string) error {
+	if f.deleteSnapshotFn == nil {
+		return nil
+	}
+	return f.deleteSnapshotFn(ctx, id)
 }

@@ -20,7 +20,7 @@ import (
 
 func Run(ctx context.Context, args []string) (err error) {
 	fs := flag.NewFlagSet("api-canary", flag.ContinueOnError)
-	mode := fs.String("mode", envDefault("CANARY_MODE", "lifecycle"), "lifecycle, template, or janitor")
+	mode := fs.String("mode", envDefault("CANARY_MODE", "lifecycle"), "lifecycle, template, snapshot, or janitor")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -54,7 +54,7 @@ func Run(ctx context.Context, args []string) (err error) {
 	apiClient := canaryapi.NewClient(httpClient, cfg.APIBaseURL, cfg.APIKey, cfg.PreviewDomain)
 
 	switch cfg.Mode {
-	case config.ModeLifecycle, config.ModeTemplate:
+	case config.ModeLifecycle, config.ModeTemplate, config.ModeSnapshot:
 		locker, closeFn, err := newLocker(ctx, cfg)
 		if err != nil {
 			return err

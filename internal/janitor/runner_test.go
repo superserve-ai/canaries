@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -377,6 +378,7 @@ type fakeJanitorClient struct {
 	deleteSandboxFn  func(context.Context, string) error
 	listTemplatesFn  func(context.Context, map[string]string) ([]canaryapi.Template, error)
 	deleteTemplateFn func(context.Context, string) error
+	deleteSnapshotFn func(context.Context, string) error
 }
 
 func (f *fakeJanitorClient) ListSandboxes(ctx context.Context, query map[string]string) ([]canaryapi.Sandbox, error) {
@@ -512,5 +514,64 @@ func TestJanitorTreatsWrappedNotFoundAsDeleted(t *testing.T) {
 	}
 	if metrics.deleted != 2 || metrics.deleteFailures != 0 {
 		t.Fatalf("already-gone resources must count as deleted: %+v", metrics)
+	}
+}
+
+func (f *fakeJanitorClient) DeleteSnapshot(ctx context.Context, id string) error {
+	if f.deleteSnapshotFn == nil {
+		return nil
+	}
+	return f.deleteSnapshotFn(ctx, id)
+}
+
+func TestJanitorDeletesSnapshotBeforeItsSourceAndKeepsSourceWhenSnapshotDeleteFails(t *testing.T) {
+	now := time.Date(2026, 7, 14, 20, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name        string
+		snapshotErr error
+		wantOrder   string
+		wantDeleted int64
+		wantFailed  int64
+	}{
+		{name: "snapshot then sandbox", wantOrder: "snapshot:snap-1,sandbox:sb-1", wantDeleted: 1},
+		{name: "already gone snapshot still frees the sandbox", snapshotErr: fmt.Errorf("DELETE: %w", canaryapi.ErrNotFound), wantOrder: "snapshot:snap-1,sandbox:sb-1", wantDeleted: 1},
+		{name: "failed snapshot delete keeps the pointer", snapshotErr: errors.New("409 creating"), wantOrder: "snapshot:snap-1", wantFailed: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var order []string
+			metrics := &janitorMetricsRecorder{}
+			r := Runner{
+				Config: config.Config{Environment: "staging", Region: "us-central1", Target: "staging-us-central1", RetainFailedSandboxTTL: 2 * time.Hour},
+				Client: &fakeJanitorClient{
+					listSandboxesFn: func(context.Context, map[string]string) ([]canaryapi.Sandbox, error) {
+						return []canaryapi.Sandbox{{ID: "sb-1", Metadata: map[string]string{
+							sandboxmetadata.KeyManagedBy:   sandboxmetadata.ManagedByCanaryLegacy,
+							sandboxmetadata.KeyEnvironment: "staging",
+							sandboxmetadata.KeySnapshotID:  "snap-1",
+							sandboxmetadata.KeyExpiresAt:   now.Add(-time.Hour).Format(time.RFC3339),
+						}}}, nil
+					},
+					deleteSnapshotFn: func(_ context.Context, id string) error {
+						order = append(order, "snapshot:"+id)
+						return tc.snapshotErr
+					},
+					deleteSandboxFn: func(_ context.Context, id string) error {
+						order = append(order, "sandbox:"+id)
+						return nil
+					},
+				},
+				Metrics: metrics,
+				Clock:   func() time.Time { return now },
+			}
+			if err := r.Run(context.Background()); err != nil {
+				t.Fatalf("Run returned %v", err)
+			}
+			if got := strings.Join(order, ","); got != tc.wantOrder {
+				t.Fatalf("order = %q, want %q", got, tc.wantOrder)
+			}
+			if metrics.deleted != tc.wantDeleted || metrics.deleteFailures != tc.wantFailed {
+				t.Fatalf("unexpected metrics: %+v", metrics)
+			}
+		})
 	}
 }
