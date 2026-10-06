@@ -45,10 +45,13 @@ func TestRunSnapshotForksFromSnapshotVerifiesForkAndCleansUpInOrder(t *testing.T
 		createSandboxFn: func(_ context.Context, req canaryapi.CreateSandboxRequest) (canaryapi.Sandbox, error) {
 			if req.FromSnapshot == "" {
 				order = append(order, "create_source")
+				if req.AutoDeleteSeconds != 2*int(time.Hour.Seconds()) {
+					t.Fatalf("source auto-delete must trail the janitor's expiry, got %d", req.AutoDeleteSeconds)
+				}
 				return canaryapi.Sandbox{ID: "sb-source", Status: "active", AccessToken: "src-tok"}, nil
 			}
 			order = append(order, "create_fork")
-			if req.FromSnapshot != "snap-1" || req.FromTemplate != "" {
+			if req.FromSnapshot != "snap-1" || req.FromTemplate != "" || req.AutoDeleteSeconds != int(time.Hour.Seconds()) {
 				t.Fatalf("fork must be created from the snapshot only: %+v", req)
 			}
 			return canaryapi.Sandbox{ID: "sb-fork", Status: "active", AccessToken: "fork-tok", SourceSnapshotID: "snap-1"}, nil
@@ -212,5 +215,20 @@ func TestRunSnapshotRetainsSnapshotPointerAndSkipsSourceDeleteWhenSnapshotDelete
 	res = snapshotRunner(base).runSnapshot(context.Background(), "run-2")
 	if res.Err == nil || len(deletedSandboxes) != 0 {
 		t.Fatalf("source must survive a failed snapshot delete: deleted=%v err=%v", deletedSandboxes, res.Err)
+	}
+
+	// Retention on but the pointer never persisted: nothing can find the
+	// snapshot later, so it is deleted instead of retained.
+	var deletedSnapshots []string
+	base.deleteSnapshotFn = func(_ context.Context, id string) error {
+		deletedSnapshots = append(deletedSnapshots, id)
+		return nil
+	}
+	base.updateSandboxFn = func(context.Context, string, canaryapi.UpdateSandboxRequest) error {
+		return errors.New("metadata service unavailable")
+	}
+	res = r.runSnapshot(context.Background(), "run-3")
+	if res.FailedStep != "record_snapshot_id" || strings.Join(deletedSnapshots, ",") != "snap-1" {
+		t.Fatalf("unrecorded snapshot must be deleted: step=%q deleted=%v", res.FailedStep, deletedSnapshots)
 	}
 }

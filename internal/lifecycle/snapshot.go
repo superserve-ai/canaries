@@ -25,13 +25,16 @@ func (r Runner) runSnapshot(ctx context.Context, runID string) (res RunResult) {
 	telemetry := r.telemetry()
 	source := RunResources{RunID: runID, CreatedAt: r.Clock().UTC()}
 	fork := RunResources{RunID: runID, CreatedAt: source.CreatedAt}
+	pointerRecorded := false
 	defer func() {
 		if fork.SandboxID != "" {
 			res.Err = r.FinalizeSandbox(context.Background(), fork, res)
 		}
 		// The source is the only pointer to the snapshot, so the snapshot goes
 		// first and a failed snapshot delete leaves the source for the janitor.
-		if res.SnapshotID != "" && !(res.Err != nil && r.Config.RetainFailedSandbox) {
+		// Retention keeps the snapshot only once the source actually names it.
+		keepSnapshot := res.Err != nil && r.Config.RetainFailedSandbox && pointerRecorded
+		if res.SnapshotID != "" && !keepSnapshot {
 			logStep("snapshot_delete")
 			if err := ops.DeleteSnapshotBestEffort(context.Background(), res.SnapshotID, DeleteSandboxOptions{Timeout: r.Config.DeleteTimeout, Telemetry: telemetry}); err != nil {
 				log.Warn().Err(err).Str("snapshot_id", res.SnapshotID).Str("sandbox_id", source.SandboxID).Msg("snapshot delete failed; source left for the janitor")
@@ -49,6 +52,9 @@ func (r Runner) runSnapshot(ctx context.Context, runID string) (res RunResult) {
 	createStart := r.Clock()
 	logStep("create_request")
 	req := r.canaryCreateSandboxRequest(source)
+	// expires_at stays at the TTL so the janitor sweeps the source on time, but
+	// platform auto-delete waits another TTL so the pointer outlives that sweep.
+	req.AutoDeleteSeconds *= 2
 	sb, err := ops.CreateSandbox(ctx, CreateSandboxOptions{Request: req, Telemetry: telemetry})
 	if err != nil {
 		ops.RecordStep(ctx, telemetry, "create_total", result(err), r.Clock().Sub(createStart))
@@ -91,6 +97,7 @@ func (r Runner) runSnapshot(ctx context.Context, runID string) (res RunResult) {
 	if err := r.Client.UpdateSandbox(ctx, sb.ID, canaryapi.UpdateSandboxRequest{Metadata: req.Metadata}); err != nil {
 		return failStep(res, StepError{Step: "record_snapshot_id", Err: fmt.Errorf("recording snapshot id: %w", err)})
 	}
+	pointerRecorded = true
 
 	waitStart := r.Clock()
 	logStep("snapshot_wait_ready")
@@ -121,7 +128,7 @@ func (r Runner) runSnapshot(ctx context.Context, runID string) (res RunResult) {
 		Name:              sandboxName(r.Config.Target+"-fork", runID),
 		FromSnapshot:      snap.ID,
 		TimeoutSeconds:    req.TimeoutSeconds,
-		AutoDeleteSeconds: req.AutoDeleteSeconds,
+		AutoDeleteSeconds: int(r.retentionTTL().Seconds()),
 		Metadata:          sandboxmetadata.LegacyCanaryMetadata(r.Config.Environment, r.Config.Region, r.Config.Target, runID, fork.CreatedAt, fork.CreatedAt.Add(r.retentionTTL()).UTC()),
 	}
 	forked, err := ops.CreateSandbox(ctx, CreateSandboxOptions{Request: forkReq, Step: "fork_request", Telemetry: telemetry})
