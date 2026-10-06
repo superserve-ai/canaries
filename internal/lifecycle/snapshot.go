@@ -96,7 +96,10 @@ func (r Runner) runSnapshot(ctx context.Context, runID string) (res RunResult) {
 	// retained or orphaned source still leads the janitor to it.
 	logStep("record_snapshot_id")
 	req.Metadata[sandboxmetadata.KeySnapshotID] = snap.ID
-	if err := r.Client.UpdateSandbox(ctx, sb.ID, canaryapi.UpdateSandboxRequest{Metadata: req.Metadata}); err != nil {
+	recordStart := r.Clock()
+	err = r.Client.UpdateSandbox(ctx, sb.ID, canaryapi.UpdateSandboxRequest{Metadata: req.Metadata})
+	ops.RecordStep(ctx, telemetry, "record_snapshot_id", result(err), r.Clock().Sub(recordStart))
+	if err != nil {
 		return failStep(res, StepError{Step: "record_snapshot_id", Err: fmt.Errorf("recording snapshot id: %w", err)})
 	}
 	pointerRecorded = true

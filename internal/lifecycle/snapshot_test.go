@@ -128,6 +128,44 @@ func TestRunSnapshotForksFromSnapshotVerifiesForkAndCleansUpInOrder(t *testing.T
 	}
 }
 
+func TestRunSnapshotRecordsEveryDocumentedStep(t *testing.T) {
+	client := &fakeClient{
+		createSandboxFn: func(_ context.Context, req canaryapi.CreateSandboxRequest) (canaryapi.Sandbox, error) {
+			return canaryapi.Sandbox{ID: "sb-" + req.FromSnapshot, Status: "active", AccessToken: "tok", SourceSnapshotID: req.FromSnapshot}, nil
+		},
+		getSandboxFn: func(_ context.Context, id string) (canaryapi.Sandbox, error) {
+			return canaryapi.Sandbox{ID: id, Status: "active"}, nil
+		},
+		writeFileFn: func(context.Context, string, string, string, []byte) error { return nil },
+		execFn: func(context.Context, string, string, canaryapi.ExecRequest) (canaryapi.ExecResult, error) {
+			return canaryapi.ExecResult{ExitCode: 0}, nil
+		},
+		createSnapshotFn: func(_ context.Context, sandboxID string, _ canaryapi.CreateSnapshotRequest) (canaryapi.Snapshot, error) {
+			return canaryapi.Snapshot{ID: "snap-1", SandboxID: sandboxID, Status: "ready"}, nil
+		},
+		getSnapshotFn: func(_ context.Context, id string) (canaryapi.Snapshot, error) {
+			return canaryapi.Snapshot{ID: id, Status: "ready"}, nil
+		},
+	}
+	recorder := &lifecycleMetricsRecorder{}
+	r := snapshotRunner(client)
+	r.Metrics = recorder
+
+	if res := r.runSnapshot(context.Background(), "run-1"); res.Err != nil {
+		t.Fatalf("runSnapshot returned %v", res.Err)
+	}
+	for _, step := range []string{
+		"create_request", "create_wait_active", "create_total", "seed_canary_token", "initial_command",
+		"snapshot_request", "snapshot_wait_ready", "snapshot_total", "record_snapshot_id", "source_wait_active", "source_exec",
+		"fork_request", "fork_wait_active", "fork_total", "prepare_verification_utilities", "verify_disk", "verify_memory",
+		"delete_request", "snapshot_delete",
+	} {
+		if _, ok := recorder.durations[step]; !ok {
+			t.Errorf("step %q was never recorded", step)
+		}
+	}
+}
+
 func TestRunSnapshotFailedCaptureReportsStepAndSkipsFork(t *testing.T) {
 	var deleted []string
 	client := &fakeClient{
