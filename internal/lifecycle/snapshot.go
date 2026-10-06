@@ -12,6 +12,10 @@ import (
 	"github.com/superserve-ai/canaries/internal/sandboxmetadata"
 )
 
+// A sandbox that names a snapshot must outlive the janitor sweep that clears
+// the pointer, so platform auto-delete trails the janitor's expiry by this much.
+const snapshotPointerAutoDeleteFactor = 2
+
 type WaitForSnapshotOptions struct {
 	PollInterval time.Duration
 	Telemetry    TelemetryContext
@@ -52,9 +56,7 @@ func (r Runner) runSnapshot(ctx context.Context, runID string) (res RunResult) {
 	createStart := r.Clock()
 	logStep("create_request")
 	req := r.canaryCreateSandboxRequest(source)
-	// expires_at stays at the TTL so the janitor sweeps the source on time, but
-	// platform auto-delete waits another TTL so the pointer outlives that sweep.
-	req.AutoDeleteSeconds *= 2
+	req.AutoDeleteSeconds *= snapshotPointerAutoDeleteFactor
 	sb, err := ops.CreateSandbox(ctx, CreateSandboxOptions{Request: req, Telemetry: telemetry})
 	if err != nil {
 		ops.RecordStep(ctx, telemetry, "create_total", result(err), r.Clock().Sub(createStart))
@@ -171,7 +173,14 @@ func (r Runner) waitOptions(want, step string, telemetry TelemetryContext) WaitF
 
 func (o Operations) CreateSnapshot(ctx context.Context, sandboxID string, req canaryapi.CreateSnapshotRequest, telemetry TelemetryContext) (canaryapi.Snapshot, error) {
 	start := o.now()
-	snap, err := o.Client.CreateSnapshot(ctx, sandboxID, req)
+	var snap canaryapi.Snapshot
+	// A lost response may hide a committed capture; the idempotency key makes
+	// the retry return that snapshot instead of leaking it.
+	err := retryTransient(ctx, func() error {
+		var attemptErr error
+		snap, attemptErr = o.Client.CreateSnapshot(ctx, sandboxID, req)
+		return attemptErr
+	})
 	if err == nil && snap.ID == "" {
 		err = errors.New("snapshot response has no id")
 	}

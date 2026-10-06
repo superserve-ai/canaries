@@ -383,6 +383,10 @@ func (r Runner) FinalizeSandbox(ctx context.Context, resources RunResources, res
 	for k, v := range resources.RetainMetadata {
 		retainMetadata[k] = v
 	}
+	autoDeleteSeconds := int(r.Config.RetainFailedSandboxTTL.Seconds())
+	if retainMetadata[sandboxmetadata.KeySnapshotID] != "" {
+		autoDeleteSeconds *= snapshotPointerAutoDeleteFactor
+	}
 
 	outcome, err := r.operations().FinalizeSandbox(ctx, resources, res, FinalizeOptions{
 		Delete: DeleteSandboxOptions{
@@ -392,7 +396,7 @@ func (r Runner) FinalizeSandbox(ctx context.Context, resources RunResources, res
 		Retain: RetentionOptions{
 			Enabled:           r.Config.RetainFailedSandbox,
 			Metadata:          retainMetadata,
-			AutoDeleteSeconds: func() *int { v := int(r.Config.RetainFailedSandboxTTL.Seconds()); return &v }(),
+			AutoDeleteSeconds: &autoDeleteSeconds,
 		},
 		Telemetry: telemetry,
 	})

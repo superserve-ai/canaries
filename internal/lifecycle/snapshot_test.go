@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -170,6 +171,7 @@ func TestRunSnapshotFailedCaptureReportsStepAndSkipsFork(t *testing.T) {
 
 func TestRunSnapshotRetainsSnapshotPointerAndSkipsSourceDeleteWhenSnapshotDeleteFails(t *testing.T) {
 	var retained map[string]string
+	retainedAutoDelete := 0
 	var deletedSandboxes []string
 	base := &fakeClient{
 		createSandboxFn: func(context.Context, canaryapi.CreateSandboxRequest) (canaryapi.Sandbox, error) {
@@ -190,6 +192,9 @@ func TestRunSnapshotRetainsSnapshotPointerAndSkipsSourceDeleteWhenSnapshotDelete
 		},
 		updateSandboxFn: func(_ context.Context, _ string, req canaryapi.UpdateSandboxRequest) error {
 			retained = req.Metadata
+			if req.AutoDeleteSeconds != nil {
+				retainedAutoDelete = *req.AutoDeleteSeconds
+			}
 			return nil
 		},
 		deleteSandboxFn: func(_ context.Context, id string) error {
@@ -208,6 +213,9 @@ func TestRunSnapshotRetainsSnapshotPointerAndSkipsSourceDeleteWhenSnapshotDelete
 	}
 	if len(deletedSandboxes) != 0 {
 		t.Fatalf("retained run must not delete the source: %v", deletedSandboxes)
+	}
+	if retainedAutoDelete != 2*int(r.Config.RetainFailedSandboxTTL.Seconds()) {
+		t.Fatalf("retention must keep the auto-delete lead over the janitor, got %d", retainedAutoDelete)
 	}
 
 	// Retention off: a failed snapshot delete leaves the source for the janitor.
@@ -230,5 +238,27 @@ func TestRunSnapshotRetainsSnapshotPointerAndSkipsSourceDeleteWhenSnapshotDelete
 	res = r.runSnapshot(context.Background(), "run-3")
 	if res.FailedStep != "record_snapshot_id" || strings.Join(deletedSnapshots, ",") != "snap-1" {
 		t.Fatalf("unrecorded snapshot must be deleted: step=%q deleted=%v", res.FailedStep, deletedSnapshots)
+	}
+}
+
+func TestCreateSnapshotRetriesLostResponseWithSameIdempotencyKey(t *testing.T) {
+	var keys []string
+	client := &fakeClient{
+		createSnapshotFn: func(_ context.Context, _ string, req canaryapi.CreateSnapshotRequest) (canaryapi.Snapshot, error) {
+			keys = append(keys, req.IdempotencyKey)
+			if len(keys) == 1 {
+				return canaryapi.Snapshot{}, io.ErrUnexpectedEOF
+			}
+			return canaryapi.Snapshot{ID: "snap-1", Status: "ready"}, nil
+		},
+	}
+	ops := Operations{Client: client, Metrics: metrics.NoopProvider{}}
+
+	snap, err := ops.CreateSnapshot(context.Background(), "sb-1", canaryapi.CreateSnapshotRequest{Kind: "mem+fs", IdempotencyKey: "run-1"}, TelemetryContext{})
+	if err != nil || snap.ID != "snap-1" {
+		t.Fatalf("expected the retry to recover the snapshot, got %+v err=%v", snap, err)
+	}
+	if len(keys) != 2 || keys[0] != keys[1] {
+		t.Fatalf("retry must reuse the idempotency key, got %v", keys)
 	}
 }

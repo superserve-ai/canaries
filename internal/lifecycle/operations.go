@@ -191,27 +191,33 @@ func (o Operations) WriteSandboxFile(ctx context.Context, sandboxID, accessToken
 }
 
 func (o Operations) WriteSandboxFileWithRetry(ctx context.Context, sandboxID, accessToken, path string, content []byte) error {
+	err := retryTransient(ctx, func() error { return o.WriteSandboxFile(ctx, sandboxID, accessToken, path, content) })
+	if err != nil && ctx.Err() != nil && errors.Is(err, ctx.Err()) {
+		return fmt.Errorf("writing %s: %w", path, err)
+	}
+	return err
+}
+
+// retryTransient re-runs attempt on transport-level failures only; the caller
+// must make the call safe to repeat.
+func retryTransient(ctx context.Context, attempt func() error) error {
 	delays := []time.Duration{250 * time.Millisecond, 500 * time.Millisecond, 1 * time.Second, 2 * time.Second}
-	for attempt := 0; attempt <= len(delays); attempt++ {
-		err := o.WriteSandboxFile(ctx, sandboxID, accessToken, path, content)
-		if err == nil {
-			return nil
-		}
-		if !isTransientWriteFileError(err) || attempt == len(delays) {
+	for i := 0; ; i++ {
+		err := attempt()
+		if err == nil || !isTransientError(err) || i == len(delays) {
 			return err
 		}
-		timer := time.NewTimer(delays[attempt])
+		timer := time.NewTimer(delays[i])
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return fmt.Errorf("writing %s: %w", path, ctx.Err())
+			return ctx.Err()
 		case <-timer.C:
 		}
 	}
-	return nil
 }
 
-func isTransientWriteFileError(err error) bool {
+func isTransientError(err error) bool {
 	var statusErr *canaryapi.HTTPStatusError
 	if !errors.As(err, &statusErr) {
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
