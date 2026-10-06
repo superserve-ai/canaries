@@ -3,6 +3,7 @@ package janitor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -467,5 +468,49 @@ func TestJanitorDeletesStaleTemplatesAndKeepsFreshOnes(t *testing.T) {
 	}
 	if metrics.examined != 2 || metrics.deleted != 1 || metrics.deleteFailures != 0 {
 		t.Fatalf("unexpected metrics: %+v", metrics)
+	}
+}
+
+func TestJanitorTreatsWrappedNotFoundAsDeleted(t *testing.T) {
+	now := time.Date(2026, 7, 14, 20, 0, 0, 0, time.UTC)
+	metrics := &janitorMetricsRecorder{}
+	r := Runner{
+		Config: config.Config{
+			Environment:            "staging",
+			Region:                 "us-central1",
+			Target:                 "staging-us-central1",
+			ResourceTTL:            time.Hour,
+			RetainFailedSandboxTTL: 2 * time.Hour,
+		},
+		Client: &fakeJanitorClient{
+			listSandboxesFn: func(context.Context, map[string]string) ([]canaryapi.Sandbox, error) {
+				return []canaryapi.Sandbox{{
+					ID: "sb-gone",
+					Metadata: map[string]string{
+						sandboxmetadata.KeyManagedBy:   sandboxmetadata.ManagedByCanaryLegacy,
+						sandboxmetadata.KeyEnvironment: "staging",
+						sandboxmetadata.KeyExpiresAt:   now.Add(-time.Hour).Format(time.RFC3339),
+					},
+				}}, nil
+			},
+			deleteSandboxFn: func(context.Context, string) error {
+				return fmt.Errorf("DELETE /sandboxes/sb-gone: %w", canaryapi.ErrNotFound)
+			},
+			listTemplatesFn: func(context.Context, map[string]string) ([]canaryapi.Template, error) {
+				return []canaryapi.Template{{ID: "tpl-gone", CreatedAt: now.Add(-3 * time.Hour)}}, nil
+			},
+			deleteTemplateFn: func(context.Context, string) error {
+				return fmt.Errorf("DELETE /templates/tpl-gone: %w", canaryapi.ErrNotFound)
+			},
+		},
+		Metrics: metrics,
+		Clock:   func() time.Time { return now },
+	}
+
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run returned %v", err)
+	}
+	if metrics.deleted != 2 || metrics.deleteFailures != 0 {
+		t.Fatalf("already-gone resources must count as deleted: %+v", metrics)
 	}
 }

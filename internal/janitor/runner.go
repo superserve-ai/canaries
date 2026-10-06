@@ -2,6 +2,7 @@ package janitor
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"time"
 
@@ -63,7 +64,7 @@ func (r Runner) Run(ctx context.Context) error {
 			continue
 		}
 		staleCount++
-		if err := r.Client.DeleteSandbox(ctx, item.ID); err != nil && err != canaryapi.ErrNotFound {
+		if err := r.Client.DeleteSandbox(ctx, item.ID); err != nil && !errors.Is(err, canaryapi.ErrNotFound) {
 			deletionFailureCount++
 			log.Error().Err(err).Str("sandbox_id", item.ID).Msg("janitor delete failed")
 			if orphanAge > oldestOrphanAge {
@@ -91,7 +92,7 @@ func (r Runner) Run(ctx context.Context) error {
 			continue
 		}
 		staleCount++
-		if err := r.Client.DeleteTemplate(ctx, tpl.ID); err != nil && err != canaryapi.ErrNotFound {
+		if err := r.Client.DeleteTemplate(ctx, tpl.ID); err != nil && !errors.Is(err, canaryapi.ErrNotFound) {
 			deletionFailureCount++
 			log.Error().Err(err).Str("template_id", tpl.ID).Msg("janitor template delete failed")
 			if age := now.Sub(staleSince); age > oldestOrphanAge {
