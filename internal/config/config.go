@@ -20,6 +20,7 @@ type LockBackend string
 const (
 	ModeLifecycle Mode = "lifecycle"
 	ModeJanitor   Mode = "janitor"
+	ModeTemplate  Mode = "template"
 
 	RuntimeLocal    Runtime = "local"
 	RuntimeCloudRun Runtime = "cloud-run"
@@ -46,6 +47,7 @@ type Config struct {
 	PreviewDomain                   string
 	APIKey                          string
 	SandboxTemplate                 string
+	TemplateBaseImage               string
 	RunTimeout                      time.Duration
 	ResourceTTL                     time.Duration
 	PollInterval                    time.Duration
@@ -73,7 +75,7 @@ type metricsConfig struct {
 
 func Load(rawMode string) (Config, error) {
 	mode := Mode(strings.TrimSpace(rawMode))
-	if mode != ModeLifecycle && mode != ModeJanitor {
+	if mode != ModeLifecycle && mode != ModeJanitor && mode != ModeTemplate {
 		return Config{}, fmt.Errorf("invalid mode %q", rawMode)
 	}
 
@@ -136,6 +138,7 @@ func Load(rawMode string) (Config, error) {
 		PreviewDomain:                   os.Getenv("PREVIEW_DOMAIN"),
 		APIKey:                          os.Getenv("CANARY_API_KEY"),
 		SandboxTemplate:                 envDefault("CANARY_SANDBOX_TEMPLATE", "superserve/python-3.11"),
+		TemplateBaseImage:               envDefault("CANARY_TEMPLATE_BASE_IMAGE", "ubuntu:22.04"),
 		LockBucket:                      os.Getenv("LOCK_BUCKET"),
 		LockFile:                        os.Getenv("CANARY_LOCK_FILE"),
 		OTELExporterOTLPMetricsEndpoint: strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")),

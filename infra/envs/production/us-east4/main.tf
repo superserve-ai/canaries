@@ -52,6 +52,41 @@ module "lifecycle" {
   ]
 }
 
+module "template" {
+  source = "../../../modules/canary_target"
+
+  scenario              = "template"
+  create_api_key_secret = false
+  scheduler_cron        = "0 * * * *"
+  job_timeout           = "1800s"
+  run_timeout           = "25m"
+  lock_ttl              = "30m"
+  missing_runs_window   = "2h"
+  # Scheduler and alerts switch on together once the staging run has soaked.
+  scheduler_enabled         = false
+  create_alerts             = false
+  project_id                = var.project_id
+  job_region                = var.job_region
+  target_name               = "production-us-east4"
+  environment               = "production"
+  target_region             = "us-east4"
+  api_base_url              = "https://api.superserve.ai"
+  preview_domain            = "sandbox.superserve.ai"
+  image                     = var.image
+  api_key_secret_name       = module.lifecycle.api_key_secret_name
+  lock_bucket_name          = "${var.project_id}-api-canary-locks"
+  otlp_metrics_endpoint     = local.otlp_endpoint
+  retain_failed_sandbox     = local.retain_failed_sandbox
+  retain_failed_sandbox_ttl = local.retain_failed_sandbox_ttl
+  notification_channel_ids  = var.notification_channel_ids
+  labels                    = local.labels
+  vpc_connector             = null
+  depends_on = [
+    google_project_service.telemetry,
+    google_project_iam_member.deployment_alerting,
+  ]
+}
+
 module "janitor" {
   source = "../../../modules/janitor"
 
@@ -89,6 +124,7 @@ module "permissions" {
   lock_bucket_name                        = "${var.project_id}-api-canary-locks"
   lifecycle_runtime_service_account_email = module.lifecycle.runtime_service_account_email
   janitor_runtime_service_account_email   = module.janitor.runtime_service_account_email
+  template_runtime_service_account_email  = module.template.runtime_service_account_email
 }
 
 resource "google_project_iam_member" "deployment_alerting" {

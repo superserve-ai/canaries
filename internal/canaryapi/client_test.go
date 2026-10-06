@@ -182,3 +182,28 @@ func TestPublishPreviewPortRejectsUnexpectedStatus(t *testing.T) {
 		t.Fatalf("unexpected error %q", got)
 	}
 }
+
+func TestCreateTemplateAcceptsQueuedBuild(t *testing.T) {
+	t.Parallel()
+
+	httpClient := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Method != http.MethodPost || req.URL.Path != "/templates" {
+			return nil, fmt.Errorf("unexpected request %s %s", req.Method, req.URL.Path)
+		}
+		return &http.Response{
+			StatusCode: http.StatusAccepted,
+			Body:       io.NopCloser(strings.NewReader(`{"id":"tpl-1","name":"api-canary-template-x","status":"building","build_id":"b-1","created_at":"2026-10-06T20:00:00Z"}`)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})}
+	client := NewClient(httpClient, "https://api.example", "api-key", "preview.example")
+
+	tpl, err := client.CreateTemplate(context.Background(), CreateTemplateRequest{Name: "api-canary-template-x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tpl.ID != "tpl-1" || tpl.BuildID != "b-1" || tpl.CreatedAt.IsZero() {
+		t.Fatalf("unexpected template %+v", tpl)
+	}
+}

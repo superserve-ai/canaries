@@ -105,3 +105,38 @@ variable "vpc_tags" {
   type    = list(string)
   default = []
 }
+
+variable "scenario" {
+  type    = string
+  default = "lifecycle"
+
+  validation {
+    condition     = contains(["lifecycle", "template"], var.scenario)
+    error_message = "scenario must be lifecycle or template"
+  }
+}
+
+variable "create_api_key_secret" {
+  type    = bool
+  default = true
+}
+
+variable "job_timeout" {
+  type    = string
+  default = "600s"
+}
+
+variable "run_timeout" {
+  type    = string
+  default = "4m"
+}
+
+variable "lock_ttl" {
+  type    = string
+  default = "10m"
+}
+
+variable "missing_runs_window" {
+  type    = string
+  default = "15m"
+}

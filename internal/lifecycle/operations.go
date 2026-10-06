@@ -122,7 +122,7 @@ func (o Operations) RecordRun(ctx context.Context, telemetry TelemetryContext, r
 }
 
 func (o Operations) RecordOverlapSkip(ctx context.Context, telemetry TelemetryContext) {
-	o.metricsProvider().RecordOverlapSkip(ctx, telemetry.Environment, telemetry.Region, telemetry.Target)
+	o.metricsProvider().RecordOverlapSkip(ctx, telemetry.Environment, telemetry.Region, telemetry.Target, telemetry.Scenario)
 }
 
 func (o Operations) RecordExecutionDelta(ctx context.Context, telemetry TelemetryContext, delta int64) {
@@ -134,7 +134,7 @@ func (o Operations) RecordCleanup(ctx context.Context, telemetry TelemetryContex
 }
 
 func (o Operations) RecordRetainedSandbox(ctx context.Context, telemetry TelemetryContext, failedStep string) {
-	o.metricsProvider().RecordRetainedSandbox(ctx, telemetry.Environment, telemetry.Region, telemetry.Target, failedStep)
+	o.metricsProvider().RecordRetainedSandbox(ctx, telemetry.Environment, telemetry.Region, telemetry.Target, telemetry.Scenario, failedStep)
 }
 
 func (o Operations) CreateSandbox(ctx context.Context, opts CreateSandboxOptions) (canaryapi.Sandbox, error) {

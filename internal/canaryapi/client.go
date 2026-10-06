@@ -77,6 +77,35 @@ type ResumeResponse struct {
 	AccessToken string `json:"access_token"`
 }
 
+type BuildStep struct {
+	Run string `json:"run,omitempty"`
+}
+
+type BuildSpec struct {
+	From  string      `json:"from"`
+	Steps []BuildStep `json:"steps,omitempty"`
+}
+
+type CreateTemplateRequest struct {
+	Name      string    `json:"name"`
+	BuildSpec BuildSpec `json:"build_spec"`
+}
+
+type Template struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	Status    string    `json:"status"`
+	BuildID   string    `json:"build_id,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type TemplateBuild struct {
+	ID           string `json:"id"`
+	TemplateID   string `json:"template_id"`
+	Status       string `json:"status"`
+	ErrorMessage string `json:"error_message,omitempty"`
+}
+
 type ErrorResponse struct {
 	Error struct {
 		Code    string `json:"code"`
@@ -108,7 +137,35 @@ func (c *Client) GetSandbox(ctx context.Context, id string) (Sandbox, error) {
 }
 
 func (c *Client) ListSandboxes(ctx context.Context, query map[string]string) ([]Sandbox, error) {
-	u, _ := url.Parse(c.baseURL + "/sandboxes")
+	var out []Sandbox
+	err := c.getJSONWithQuery(ctx, "/sandboxes", query, &out)
+	return out, err
+}
+
+func (c *Client) CreateTemplate(ctx context.Context, req CreateTemplateRequest) (Template, error) {
+	var out Template
+	err := c.doJSON(ctx, http.MethodPost, "/templates", req, &out)
+	return out, err
+}
+
+func (c *Client) GetTemplateBuild(ctx context.Context, templateID, buildID string) (TemplateBuild, error) {
+	var out TemplateBuild
+	err := c.doJSON(ctx, http.MethodGet, "/templates/"+url.PathEscape(templateID)+"/builds/"+url.PathEscape(buildID), nil, &out)
+	return out, err
+}
+
+func (c *Client) ListTemplates(ctx context.Context, query map[string]string) ([]Template, error) {
+	var out []Template
+	err := c.getJSONWithQuery(ctx, "/templates", query, &out)
+	return out, err
+}
+
+func (c *Client) DeleteTemplate(ctx context.Context, id string) error {
+	return c.doNoContent(ctx, http.MethodDelete, "/templates/"+url.PathEscape(id))
+}
+
+func (c *Client) getJSONWithQuery(ctx context.Context, path string, query map[string]string, out any) error {
+	u, _ := url.Parse(c.baseURL + path)
 	values := u.Query()
 	for key, value := range query {
 		values.Set(key, value)
@@ -116,22 +173,18 @@ func (c *Client) ListSandboxes(ctx context.Context, query map[string]string) ([]
 	u.RawQuery = values.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	req.Header.Set("X-API-Key", c.apiKey)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer resp.Body.Close()
 	if err := requireStatus(http.MethodGet, u.Path, resp, http.StatusOK); err != nil {
-		return nil, err
+		return err
 	}
-	var out []Sandbox
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, err
-	}
-	return out, nil
+	return json.NewDecoder(resp.Body).Decode(out)
 }
 
 func (c *Client) PauseSandbox(ctx context.Context, id string) error {
@@ -264,7 +317,7 @@ func (c *Client) doJSON(ctx context.Context, method, path string, in, out any) e
 			if err := requireStatus(method, path, resp, http.StatusCreated); err != nil {
 				return err
 			}
-		} else if err := requireStatus(method, path, resp, http.StatusOK, http.StatusCreated); err != nil {
+		} else if err := requireStatus(method, path, resp, http.StatusOK, http.StatusCreated, http.StatusAccepted); err != nil {
 			return err
 		}
 	default:

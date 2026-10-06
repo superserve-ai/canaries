@@ -20,6 +20,7 @@ TARGETS = {
     "staging-us-central1": "envs/staging/us-central1/main.tf",
 }
 JOB_REFERENCE = "${google_cloud_run_v2_job.lifecycle.name}"
+SCENARIO_REFERENCE = "${var.scenario}"
 
 
 def equalities(filter_text):
@@ -61,7 +62,9 @@ class TerminalAlertTest(unittest.TestCase):
         self.assertNotIn("severity", self.fixture)
         for target in TARGETS:
             job = f"api-canary-{target}"
-            predicates = equalities(self.filter.replace(JOB_REFERENCE, job))
+            predicates = equalities(
+                self.filter.replace(JOB_REFERENCE, job).replace(SCENARIO_REFERENCE, "lifecycle")
+            )
             failure = copy.deepcopy(self.fixture)
             failure["resource"]["labels"]["job_name"] = job
             cases = [("observed terminal failure", failure, True)]
@@ -100,6 +103,9 @@ class TerminalAlertTest(unittest.TestCase):
             "execution_name": r'labels.\"run.googleapis.com/execution_name\"',
             "failed_step": "jsonPayload.failed_step",
             "sandbox_id": "jsonPayload.sandbox_id",
+            "template_id": "jsonPayload.template_id",
+            "build_id": "jsonPayload.build_id",
+            "build_error": "jsonPayload.build_error",
         })
         for field in ("sandbox_id", "failed_step"):
             self.assertIn("$${log.extracted_label." + field + "}", self.policy)

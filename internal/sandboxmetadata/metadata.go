@@ -21,6 +21,9 @@ const (
 	KeyRetainedForDebug = "retained_for_debug"
 	KeyFailedStep       = "failed_step"
 	KeyRetainedAt       = "retained_at"
+
+	// Templates carry no metadata, so canary ownership is the name prefix.
+	TemplateNamePrefix = "api-canary-template-"
 )
 
 type TestOwnership struct {

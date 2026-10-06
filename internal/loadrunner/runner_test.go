@@ -243,13 +243,13 @@ func (r *loadMetricsRecorder) RecordStep(_ context.Context, _ string, _ string, 
 	r.steps[step] = result
 }
 
-func (r *loadMetricsRecorder) RecordCleanup(context.Context, string, string, string, string) {}
-func (r *loadMetricsRecorder) RecordOverlapSkip(context.Context, string, string, string)     {}
+func (r *loadMetricsRecorder) RecordCleanup(context.Context, string, string, string, string)     {}
+func (r *loadMetricsRecorder) RecordOverlapSkip(context.Context, string, string, string, string) {}
 func (r *loadMetricsRecorder) RecordExecutionDelta(context.Context, string, string, string, string, int64) {
 }
 func (r *loadMetricsRecorder) RecordOrphans(context.Context, string, string, string, int64, time.Duration) {
 }
-func (r *loadMetricsRecorder) RecordRetainedSandbox(context.Context, string, string, string, string) {
+func (r *loadMetricsRecorder) RecordRetainedSandbox(context.Context, string, string, string, string, string) {
 }
 func (r *loadMetricsRecorder) RecordJanitorResources(context.Context, string, string, string, int64, int64, int64) {
 }
@@ -274,3 +274,13 @@ func TestSandboxNameForOperationIncludesWorkerIdentity(t *testing.T) {
 		t.Fatalf("sandbox name %q does not include worker identity", b)
 	}
 }
+
+func (f *fakeLoadClient) CreateTemplate(context.Context, canaryapi.CreateTemplateRequest) (canaryapi.Template, error) {
+	return canaryapi.Template{}, errors.New("not used")
+}
+
+func (f *fakeLoadClient) GetTemplateBuild(context.Context, string, string) (canaryapi.TemplateBuild, error) {
+	return canaryapi.TemplateBuild{}, errors.New("not used")
+}
+
+func (f *fakeLoadClient) DeleteTemplate(context.Context, string) error { return errors.New("not used") }

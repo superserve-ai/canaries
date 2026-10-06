@@ -2,8 +2,12 @@ locals {
   use_direct_vpc = var.vpc_connector == null && var.vpc_network != null && var.vpc_subnetwork != null
   use_vpc_access = var.vpc_connector != null || local.use_direct_vpc
 
-  lifecycle_job_name = "api-canary-${var.target_name}"
-  scheduler_name     = "api-canary-schedule-${var.target_name}"
+  name_suffix         = var.scenario == "lifecycle" ? "" : "-${var.scenario}"
+  lifecycle_job_name  = "api-canary${local.name_suffix}-${var.target_name}"
+  scheduler_name      = "api-canary${local.name_suffix}-schedule-${var.target_name}"
+  runtime_sa_prefix   = { lifecycle = "apicn", template = "apicnt" }[var.scenario]
+  scheduler_sa_prefix = { lifecycle = "apicns", template = "apicnts" }[var.scenario]
+  api_key_secret_id   = var.create_api_key_secret ? google_secret_manager_secret.api_key[0].secret_id : var.api_key_secret_name
   lifecycle_run_logs_query = format(
     "resource.type%%3D%%22cloud_run_job%%22%%0Aresource.labels.job_name%%3D%%22%s%%22%%0Alabels.%%22run.googleapis.com/execution_name%%22%%3D%%22$${log.extracted_label.execution_name}%%22",
     google_cloud_run_v2_job.lifecycle.name,
@@ -16,24 +20,32 @@ locals {
     environment = var.environment
     region      = var.target_region
     managed_by  = "terraform"
-    component   = "api-canary"
+    component   = "api-canary${local.name_suffix}"
     target      = var.target_name
   })
 }
 
 resource "google_service_account" "runtime" {
   project      = var.project_id
-  account_id   = substr("apicn-${var.target_name}", 0, 30)
-  display_name = "API Canary ${var.target_name}"
+  account_id   = substr("${local.runtime_sa_prefix}-${var.target_name}", 0, 30)
+  display_name = "API Canary${local.name_suffix} ${var.target_name}"
 }
 
 resource "google_service_account" "scheduler" {
   project      = var.project_id
-  account_id   = substr("apicns-${var.target_name}", 0, 30)
-  display_name = "API Canary Scheduler ${var.target_name}"
+  account_id   = substr("${local.scheduler_sa_prefix}-${var.target_name}", 0, 30)
+  display_name = "API Canary${local.name_suffix} Scheduler ${var.target_name}"
+}
+
+# The lifecycle instance owns the per-target secret; other scenarios on the
+# same target only reference it.
+moved {
+  from = google_secret_manager_secret.api_key
+  to   = google_secret_manager_secret.api_key[0]
 }
 
 resource "google_secret_manager_secret" "api_key" {
+  count     = var.create_api_key_secret ? 1 : 0
   project   = var.project_id
   secret_id = var.api_key_secret_name
 
@@ -46,7 +58,7 @@ resource "google_secret_manager_secret" "api_key" {
 
 resource "google_secret_manager_secret_iam_member" "runtime_accessor" {
   project   = var.project_id
-  secret_id = google_secret_manager_secret.api_key.secret_id
+  secret_id = local.api_key_secret_id
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.runtime.email}"
 }
@@ -66,7 +78,7 @@ resource "google_cloud_run_v2_job" "lifecycle" {
 
     template {
       service_account = google_service_account.runtime.email
-      timeout         = "600s"
+      timeout         = var.job_timeout
       max_retries     = 0
       dynamic "vpc_access" {
         for_each = local.use_vpc_access ? [1] : []
@@ -88,11 +100,19 @@ resource "google_cloud_run_v2_job" "lifecycle" {
       }
       containers {
         image = var.image
-        args  = ["-mode", "lifecycle"]
+        args  = ["-mode", var.scenario]
 
         env {
           name  = "CANARY_MODE"
-          value = "lifecycle"
+          value = var.scenario
+        }
+        env {
+          name  = "RUN_TIMEOUT"
+          value = var.run_timeout
+        }
+        env {
+          name  = "LOCK_TTL"
+          value = var.lock_ttl
         }
         env {
           name  = "CANARY_RUNTIME"
@@ -174,7 +194,7 @@ resource "google_cloud_run_v2_job" "lifecycle" {
           name = "CANARY_API_KEY"
           value_source {
             secret_key_ref {
-              secret  = google_secret_manager_secret.api_key.secret_id
+              secret  = local.api_key_secret_id
               version = "latest"
             }
           }
@@ -198,7 +218,7 @@ resource "google_cloud_scheduler_job" "lifecycle" {
   project     = var.project_id
   region      = var.job_region
   name        = local.scheduler_name
-  description = "Runs API lifecycle canary for ${var.target_name}"
+  description = "Runs API ${var.scenario} canary for ${var.target_name}"
   schedule    = var.scheduler_cron
   time_zone   = "Etc/UTC"
 
@@ -216,19 +236,19 @@ resource "google_cloud_scheduler_job" "lifecycle" {
 resource "google_monitoring_alert_policy" "cloud_run_job_failed" {
   count                 = var.create_alerts ? 1 : 0
   project               = var.project_id
-  display_name          = "API Canary ${var.target_name}: lifecycle failed"
+  display_name          = "API Canary ${var.target_name}: ${var.scenario} failed"
   combiner              = "OR"
   enabled               = true
   notification_channels = var.notification_channel_ids
 
   conditions {
-    display_name = "Lifecycle terminal failure log"
+    display_name = "${title(var.scenario)} terminal failure log"
 
     condition_matched_log {
       filter = <<-EOT
         resource.type="cloud_run_job"
         AND resource.labels.job_name="${google_cloud_run_v2_job.lifecycle.name}"
-        AND jsonPayload.message="lifecycle canary completed"
+        AND jsonPayload.message="${var.scenario} canary completed"
         AND jsonPayload.result="failure"
       EOT
 
@@ -236,6 +256,9 @@ resource "google_monitoring_alert_policy" "cloud_run_job_failed" {
         execution_name = "EXTRACT(labels.\"run.googleapis.com/execution_name\")"
         failed_step    = "EXTRACT(jsonPayload.failed_step)"
         sandbox_id     = "EXTRACT(jsonPayload.sandbox_id)"
+        template_id    = "EXTRACT(jsonPayload.template_id)"
+        build_id       = "EXTRACT(jsonPayload.build_id)"
+        build_error    = "EXTRACT(jsonPayload.build_error)"
       }
     }
   }
@@ -250,11 +273,16 @@ resource "google_monitoring_alert_policy" "cloud_run_job_failed" {
 
   documentation {
     content   = <<-EOT
-      API Canary ${var.target_name} failed
+      API Canary ${var.target_name} ${var.scenario} failed
 
       Region: ${var.target_region}
       Sandbox: $${log.extracted_label.sandbox_id}
       Failed step: $${log.extracted_label.failed_step}
+%{if var.scenario == "template"~}
+      Template: $${log.extracted_label.template_id}
+      Build: $${log.extracted_label.build_id}
+      Build error: $${log.extracted_label.build_error}
+%{endif}
 
       [View canary run logs](https://console.cloud.google.com/logs/query;query=${local.lifecycle_run_logs_query};project=${var.project_id})
       EOT
@@ -273,10 +301,10 @@ resource "google_monitoring_alert_policy" "overlap_skipped" {
   notification_channels = var.notification_channel_ids
 
   conditions {
-    display_name = "Lifecycle run skipped because target lock was already held"
+    display_name = "${title(var.scenario)} run skipped because target lock was already held"
 
     condition_prometheus_query_language {
-      query                     = "((sum(max_over_time(superserve_canary_overlap_skipped_total{target=\"${var.target_name}\",scenario=\"lifecycle\"}[15m])) or vector(0)) > 0)"
+      query                     = "((sum(max_over_time(superserve_canary_overlap_skipped_total{target=\"${var.target_name}\",scenario=\"${var.scenario}\"}[15m])) or vector(0)) > 0)"
       duration                  = "0s"
       disable_metric_validation = true
     }
@@ -288,9 +316,9 @@ resource "google_monitoring_alert_policy" "overlap_skipped" {
 
   documentation {
     content   = <<-EOT
-      API Canary ${var.target_name} skipped a lifecycle run because another execution already held the target lock.
+      API Canary ${var.target_name} skipped a ${var.scenario} run because another execution already held the target lock.
 
-      This indicates overlapping executions rather than a lifecycle failure.
+      This indicates overlapping executions rather than a ${var.scenario} failure.
 
       [View Cloud Run job logs](https://console.cloud.google.com/logs/query;query=${local.lifecycle_job_logs_query};project=${var.project_id})
       EOT
@@ -309,10 +337,10 @@ resource "google_monitoring_alert_policy" "missing_runs" {
   notification_channels = var.notification_channel_ids
 
   conditions {
-    display_name = "No lifecycle success or failure metric in 15m"
+    display_name = "No ${var.scenario} success or failure metric in ${var.missing_runs_window}"
 
     condition_prometheus_query_language {
-      query                     = "((sum(increase(superserve_canary_run_total{target=\"${var.target_name}\",scenario=\"lifecycle\",result=~\"success|failure\"}[15m])) or vector(0)) == 0)"
+      query                     = "((sum(increase(superserve_canary_run_total{target=\"${var.target_name}\",scenario=\"${var.scenario}\",result=~\"success|failure\"}[${var.missing_runs_window}])) or vector(0)) == 0)"
       duration                  = "0s"
       disable_metric_validation = true
     }

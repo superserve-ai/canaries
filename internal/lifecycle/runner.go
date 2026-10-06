@@ -37,6 +37,9 @@ type RunResult struct {
 	Err        error
 	FailedStep string
 	SandboxID  string
+	TemplateID string
+	BuildID    string
+	BuildError string
 }
 
 type ExecValidationError struct {
@@ -82,8 +85,24 @@ func (r Runner) telemetry() TelemetryContext {
 		Environment: r.Config.Environment,
 		Region:      r.Config.Region,
 		Target:      r.Config.Target,
-		Scenario:    "lifecycle",
+		Scenario:    r.scenario(),
 	}
+}
+
+func (r Runner) scenario() string {
+	if r.Config.Mode == config.ModeTemplate {
+		return "template"
+	}
+	return "lifecycle"
+}
+
+// The template scenario holds its own lease so a multi-minute build never
+// blocks the lifecycle run on the same target.
+func (r Runner) lockKey() string {
+	if r.Config.Mode == config.ModeTemplate {
+		return r.Config.Target + "-template"
+	}
+	return r.Config.Target
 }
 
 type Client interface {
@@ -97,18 +116,22 @@ type Client interface {
 	WriteFile(context.Context, string, string, string, []byte) error
 	Exec(context.Context, string, string, canaryapi.ExecRequest) (canaryapi.ExecResult, error)
 	PreviewURL(string, int) string
+	CreateTemplate(context.Context, canaryapi.CreateTemplateRequest) (canaryapi.Template, error)
+	GetTemplateBuild(context.Context, string, string) (canaryapi.TemplateBuild, error)
+	DeleteTemplate(context.Context, string) error
 }
 
 func (r Runner) Run(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, r.Config.RunTimeout)
 	defer cancel()
 
-	outcome, lease, err := r.Locker.Acquire(ctx, r.Config.Target, r.Config.LockTTL)
+	scenario := r.scenario()
+	outcome, lease, err := r.Locker.Acquire(ctx, r.lockKey(), r.Config.LockTTL)
 	if err != nil {
 		return fmt.Errorf("acquire lock: %w", err)
 	}
 	if outcome == lock.OutcomeAlreadyRunning {
-		r.Metrics.RecordOverlapSkip(ctx, r.Config.Environment, r.Config.Region, r.Config.Target)
+		r.Metrics.RecordOverlapSkip(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, scenario)
 		log.Info().Str("target", r.Config.Target).Msg("canary skipped because another run holds the target lock")
 		return nil
 	}
@@ -121,8 +144,8 @@ func (r Runner) Run(ctx context.Context) error {
 		}
 	}()
 
-	r.Metrics.RecordExecutionDelta(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", 1)
-	defer r.Metrics.RecordExecutionDelta(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", -1)
+	r.Metrics.RecordExecutionDelta(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, scenario, 1)
+	defer r.Metrics.RecordExecutionDelta(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, scenario, -1)
 
 	runID := fmt.Sprintf("%s-%s-%d-%s", r.Config.Environment, r.Config.Region, r.Clock().Unix(), uuid.NewString()[:8])
 	start := r.Clock()
@@ -133,25 +156,35 @@ func (r Runner) Run(ctx context.Context) error {
 		Str("target", r.Config.Target).
 		Str("environment", r.Config.Environment).
 		Str("region", r.Config.Region).
-		Msg("lifecycle canary started")
+		Msg(scenario + " canary started")
 
-	runResult := r.runLifecycle(ctx, runID)
+	var runResult RunResult
+	if r.Config.Mode == config.ModeTemplate {
+		runResult = r.runTemplate(ctx, runID)
+	} else {
+		runResult = r.runLifecycle(ctx, runID)
+	}
 	err = runResult.Err
 	if err == nil {
 		result = "success"
 	}
 	duration := r.Clock().Sub(start)
-	r.Metrics.RecordRun(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", result, duration)
+	r.Metrics.RecordRun(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, scenario, result, duration)
 
 	if err != nil {
-		log.Error().
+		evt := log.Error().
 			Err(err).
 			Str("run_id", runID).
 			Str("sandbox_id", runResult.SandboxID).
 			Str("result", result).
 			Str("failed_step", runResult.FailedStep).
-			Dur("duration", duration).
-			Msg("lifecycle canary completed")
+			Dur("duration", duration)
+		if runResult.TemplateID != "" {
+			evt = evt.Str("template_id", runResult.TemplateID).
+				Str("build_id", runResult.BuildID).
+				Str("build_error", runResult.BuildError)
+		}
+		evt.Msg(scenario + " canary completed")
 		return err
 	}
 
@@ -159,7 +192,7 @@ func (r Runner) Run(ctx context.Context) error {
 		Str("run_id", runID).
 		Str("result", result).
 		Dur("duration", duration).
-		Msg("lifecycle canary completed")
+		Msg(scenario + " canary completed")
 	return nil
 }
 

@@ -78,6 +78,38 @@ module "lifecycle" {
   depends_on                = [google_project_iam_member.deployment_alerting]
 }
 
+module "template" {
+  source = "../../../modules/canary_target"
+
+  scenario                  = "template"
+  create_api_key_secret     = false
+  scheduler_cron            = "0 * * * *"
+  job_timeout               = "1800s"
+  run_timeout               = "25m"
+  lock_ttl                  = "30m"
+  missing_runs_window       = "2h"
+  project_id                = var.project_id
+  job_region                = var.job_region
+  target_name               = "staging-us-central1"
+  environment               = "staging"
+  target_region             = "us-central1"
+  api_base_url              = "https://api-staging.superserve.ai"
+  preview_domain            = "staging-sandbox.superserve.ai"
+  image                     = var.image
+  api_key_secret_name       = module.lifecycle.api_key_secret_name
+  lock_bucket_name          = google_storage_bucket.locks.name
+  otlp_metrics_endpoint     = local.otlp_endpoint
+  retain_failed_sandbox     = local.retain_failed_sandbox
+  retain_failed_sandbox_ttl = local.retain_failed_sandbox_ttl
+  manual_staging_opt_in     = true
+  notification_channel_ids  = var.notification_channel_ids
+  labels                    = local.labels
+  create_alerts             = var.create_alerts
+  vpc_connector             = "projects/rayai-dev/locations/us-central1/connectors/ss-vpc-conn-f1b3552"
+  vpc_egress                = "ALL_TRAFFIC"
+  depends_on                = [google_project_iam_member.deployment_alerting]
+}
+
 resource "google_service_account" "load_runner" {
   project      = var.project_id
   account_id   = "sbx-load-runner-staging"
@@ -228,6 +260,7 @@ module "permissions" {
   lock_bucket_name                        = google_storage_bucket.locks.name
   lifecycle_runtime_service_account_email = module.lifecycle.runtime_service_account_email
   janitor_runtime_service_account_email   = module.janitor.runtime_service_account_email
+  template_runtime_service_account_email  = module.template.runtime_service_account_email
 }
 
 resource "google_project_iam_member" "deployment_alerting" {
