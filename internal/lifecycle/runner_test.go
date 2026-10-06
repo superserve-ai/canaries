@@ -986,7 +986,8 @@ func (m *lifecycleMetricsRecorder) RecordStep(_ context.Context, _, _, _, _, ste
 
 func (m *lifecycleMetricsRecorder) RecordCleanup(context.Context, string, string, string, string) {}
 
-func (m *lifecycleMetricsRecorder) RecordOverlapSkip(context.Context, string, string, string) {}
+func (m *lifecycleMetricsRecorder) RecordOverlapSkip(context.Context, string, string, string, string) {
+}
 
 func (m *lifecycleMetricsRecorder) RecordExecutionDelta(context.Context, string, string, string, string, int64) {
 }
@@ -994,7 +995,7 @@ func (m *lifecycleMetricsRecorder) RecordExecutionDelta(context.Context, string,
 func (m *lifecycleMetricsRecorder) RecordOrphans(context.Context, string, string, string, int64, time.Duration) {
 }
 
-func (m *lifecycleMetricsRecorder) RecordRetainedSandbox(context.Context, string, string, string, string) {
+func (m *lifecycleMetricsRecorder) RecordRetainedSandbox(context.Context, string, string, string, string, string) {
 }
 
 func (m *lifecycleMetricsRecorder) RecordJanitorResources(context.Context, string, string, string, int64, int64, int64) {
@@ -1039,6 +1040,9 @@ type fakeClient struct {
 	execFn               func(context.Context, string, string, canaryapi.ExecRequest) (canaryapi.ExecResult, error)
 	publishPreviewPortFn func(context.Context, string, canaryapi.PublishPreviewPortRequest) error
 	previewURLFn         func(string, int) string
+	createTemplateFn     func(context.Context, canaryapi.CreateTemplateRequest) (canaryapi.Template, error)
+	getTemplateBuildFn   func(context.Context, string, string) (canaryapi.TemplateBuild, error)
+	deleteTemplateFn     func(context.Context, string) error
 }
 
 func (f *fakeClient) CreateSandbox(ctx context.Context, req canaryapi.CreateSandboxRequest) (canaryapi.Sandbox, error) {
@@ -1097,4 +1101,19 @@ func (f *fakeClient) Exec(ctx context.Context, sandboxID, accessToken string, re
 
 func (f *fakeClient) PreviewURL(sandboxID string, port int) string {
 	return f.previewURLFn(sandboxID, port)
+}
+
+func (f *fakeClient) CreateTemplate(ctx context.Context, req canaryapi.CreateTemplateRequest) (canaryapi.Template, error) {
+	return f.createTemplateFn(ctx, req)
+}
+
+func (f *fakeClient) GetTemplateBuild(ctx context.Context, templateID, buildID string) (canaryapi.TemplateBuild, error) {
+	return f.getTemplateBuildFn(ctx, templateID, buildID)
+}
+
+func (f *fakeClient) DeleteTemplate(ctx context.Context, id string) error {
+	if f.deleteTemplateFn == nil {
+		return nil
+	}
+	return f.deleteTemplateFn(ctx, id)
 }

@@ -11,19 +11,19 @@ Gauges export as the instrument name as written.
 
 | Metric | Type | Labels | Description |
 | --- | --- | --- | --- |
-| `superserve_canary_run_total` | Counter | `environment`, `region`, `target`, `scenario`, `result` | Counts completed canary runs for lifecycle and janitor modes. |
-| `superserve_canary_step_total` | Counter | `environment`, `region`, `target`, `scenario`, `step`, `result` | Counts lifecycle step outcomes, including request and readiness phases for create, pause, resume, preview, and delete. |
-| `superserve_canary_cleanup_total` | Counter | `environment`, `region`, `target`, `scenario`, `result` | Counts sandbox cleanup attempts from lifecycle finalization. |
-| `superserve_canary_overlap_skipped_total` | Counter | `environment`, `region`, `target`, `scenario`, `result` | Counts lifecycle runs skipped because another run already held the target lock. |
+| `superserve_canary_run_total` | Counter | `environment`, `region`, `target`, `scenario`, `result` | Counts completed canary runs for lifecycle, template, and janitor modes. |
+| `superserve_canary_step_total` | Counter | `environment`, `region`, `target`, `scenario`, `step`, `result` | Counts lifecycle and template step outcomes, including request and readiness phases for create, pause, resume, preview, and delete, plus template create, build wait, and delete. |
+| `superserve_canary_cleanup_total` | Counter | `environment`, `region`, `target`, `scenario`, `result` | Counts sandbox and template cleanup attempts from run finalization. |
+| `superserve_canary_overlap_skipped_total` | Counter | `environment`, `region`, `target`, `scenario`, `result` | Counts lifecycle or template runs skipped because another run already held the scenario's target lock. |
 | `superserve_canary_running_executions` | Up-down counter | `environment`, `region`, `target`, `scenario`, `result` | Tracks current in-flight executions per target and scenario. |
 | `superserve_canary_orphan_resources` | Gauge | `environment`, `region`, `target`, `scenario`, `result` | Tracks the current unresolved orphan count observed by the janitor. |
 | `superserve_canary_oldest_orphan_age_seconds` | Gauge | `environment`, `region`, `target`, `scenario`, `result` | Tracks the age of the oldest unresolved orphan, in seconds. |
 | `superserve_canary_retained_sandbox_total` | Counter | `environment`, `region`, `target`, `scenario`, `step`, `result` | Counts lifecycle failures retained for debugging, grouped by failing step. |
-| `superserve_canary_janitor_resources_examined_total` | Counter | `environment`, `region`, `target`, `scenario`, `result` | Counts retained sandboxes the janitor inspected. |
-| `superserve_canary_janitor_resources_deleted_total` | Counter | `environment`, `region`, `target`, `scenario`, `result` | Counts retained sandboxes the janitor successfully deleted. |
+| `superserve_canary_janitor_resources_examined_total` | Counter | `environment`, `region`, `target`, `scenario`, `result` | Counts retained sandboxes and canary templates the janitor inspected. |
+| `superserve_canary_janitor_resources_deleted_total` | Counter | `environment`, `region`, `target`, `scenario`, `result` | Counts retained sandboxes and canary templates the janitor successfully deleted. |
 | `superserve_canary_janitor_delete_failures_total` | Counter | `environment`, `region`, `target`, `scenario`, `result` | Counts janitor delete attempts that failed. |
 | `superserve_canary_run_duration_seconds` | Histogram | `environment`, `region`, `target`, `scenario`, `result` | End-to-end run duration for lifecycle and janitor runs. |
-| `superserve_canary_step_duration_seconds` | Histogram | `environment`, `region`, `target`, `scenario`, `step`, `result` | Lifecycle step duration histograms for create total, create request, create readiness, pause total, pause request, pause readiness, resume total, resume request, resume readiness, preview polling, and delete request. |
+| `superserve_canary_step_duration_seconds` | Histogram | `environment`, `region`, `target`, `scenario`, `step`, `result` | Step duration histograms for create total, create request, create readiness, pause total, pause request, pause readiness, resume total, resume request, resume readiness, preview polling, and delete request, plus template create, template build wait, template build total, verify build artifact, and template delete under `scenario="template"`. |
 | `superserve_canary_last_completed_timestamp_seconds` | Gauge | `environment`, `region`, `target`, `scenario`, `result` | Timestamp of the last completed run, successful or failed. |
 | `superserve_canary_last_success_timestamp_seconds` | Gauge | `environment`, `region`, `target`, `scenario`, `result` | Timestamp of the last successful run. |
 

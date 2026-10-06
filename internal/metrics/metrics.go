@@ -27,10 +27,10 @@ type Provider interface {
 	RecordRun(context.Context, string, string, string, string, string, time.Duration)
 	RecordStep(context.Context, string, string, string, string, string, string, time.Duration)
 	RecordCleanup(context.Context, string, string, string, string)
-	RecordOverlapSkip(context.Context, string, string, string)
+	RecordOverlapSkip(context.Context, string, string, string, string)
 	RecordExecutionDelta(context.Context, string, string, string, string, int64)
 	RecordOrphans(context.Context, string, string, string, int64, time.Duration)
-	RecordRetainedSandbox(context.Context, string, string, string, string)
+	RecordRetainedSandbox(context.Context, string, string, string, string, string)
 	RecordJanitorResources(context.Context, string, string, string, int64, int64, int64)
 }
 
@@ -40,12 +40,12 @@ func (NoopProvider) RecordRun(context.Context, string, string, string, string, s
 }
 func (NoopProvider) RecordStep(context.Context, string, string, string, string, string, string, time.Duration) {
 }
-func (NoopProvider) RecordCleanup(context.Context, string, string, string, string) {}
-func (NoopProvider) RecordOverlapSkip(context.Context, string, string, string)     {}
+func (NoopProvider) RecordCleanup(context.Context, string, string, string, string)     {}
+func (NoopProvider) RecordOverlapSkip(context.Context, string, string, string, string) {}
 func (NoopProvider) RecordExecutionDelta(context.Context, string, string, string, string, int64) {
 }
 func (NoopProvider) RecordOrphans(context.Context, string, string, string, int64, time.Duration) {}
-func (NoopProvider) RecordRetainedSandbox(context.Context, string, string, string, string) {
+func (NoopProvider) RecordRetainedSandbox(context.Context, string, string, string, string, string) {
 }
 func (NoopProvider) RecordJanitorResources(context.Context, string, string, string, int64, int64, int64) {
 }
@@ -234,11 +234,11 @@ func (p *recorder) RecordCleanup(ctx context.Context, environment, region, targe
 	p.cleanupTotal.Add(ctx, 1, metric.WithAttributes(p.attrs(environment, region, target, "cleanup", "", result)...))
 }
 
-func (p *recorder) RecordOverlapSkip(ctx context.Context, environment, region, target string) {
+func (p *recorder) RecordOverlapSkip(ctx context.Context, environment, region, target, scenario string) {
 	if p == nil || p.overlapSkipped == nil {
 		return
 	}
-	p.overlapSkipped.Add(ctx, 1, metric.WithAttributes(p.attrs(environment, region, target, "lifecycle", "", "skipped")...))
+	p.overlapSkipped.Add(ctx, 1, metric.WithAttributes(p.attrs(environment, region, target, scenario, "", "skipped")...))
 }
 
 func (p *recorder) RecordExecutionDelta(ctx context.Context, environment, region, target, scenario string, delta int64) {
@@ -259,11 +259,11 @@ func (p *recorder) RecordOrphans(ctx context.Context, environment, region, targe
 	}
 }
 
-func (p *recorder) RecordRetainedSandbox(ctx context.Context, environment, region, target, failedStep string) {
+func (p *recorder) RecordRetainedSandbox(ctx context.Context, environment, region, target, scenario, failedStep string) {
 	if p == nil || p.retainedSandbox == nil {
 		return
 	}
-	attrs := p.attrs(environment, region, target, "lifecycle", failedStep, "retained")
+	attrs := p.attrs(environment, region, target, scenario, failedStep, "retained")
 	p.retainedSandbox.Add(ctx, 1, metric.WithAttributes(attrs...))
 }
 

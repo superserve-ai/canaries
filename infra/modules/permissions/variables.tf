@@ -13,3 +13,8 @@ variable "lifecycle_runtime_service_account_email" {
 variable "janitor_runtime_service_account_email" {
   type = string
 }
+
+variable "template_runtime_service_account_email" {
+  type    = string
+  default = ""
+}

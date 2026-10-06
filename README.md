@@ -19,6 +19,7 @@ Each target has its own:
 
 The canary binary supports:
 - `lifecycle`
+- `template`
 - `janitor`
 
 ## Architecture
@@ -35,8 +36,16 @@ Per run it:
 7. verifies the deterministic public preview URL returns the exact run token
 8. deletes the sandbox in a best-effort cleanup path
 
+The template canary runs hourly as its own Cloud Run Job with its own lock and alerts. Per run it:
+1. creates a template whose single build step writes the run token to `/opt/canary/build-token`
+2. polls the build until it is ready, failed, or cancelled
+3. creates a sandbox from the template and reads the token back, which proves the build steps ran
+4. deletes the sandbox, then the template
+
+Templates carry no metadata, so canary templates are named `api-canary-template-<target>-<run_id>` and the janitor sweeps that prefix. The base image is `CANARY_TEMPLATE_BASE_IMAGE` (default `ubuntu:22.04`).
+
 The janitor:
-1. lists canary-owned sandboxes for the environment
+1. lists canary-owned sandboxes and canary-named templates for the environment
 2. deletes stale resources past TTL
 3. emits orphan and deletion metrics
 
@@ -124,6 +133,7 @@ export CANARY_API_KEY=ss_live_...
 export MANUAL_STAGING_OPT_IN=true
 
 go run ./cmd/api-canary -mode lifecycle
+go run ./cmd/api-canary -mode template
 go run ./cmd/api-canary -mode janitor
 ```
 

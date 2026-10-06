@@ -2,6 +2,8 @@ package janitor
 
 import (
 	"context"
+	"errors"
+	"strconv"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -22,6 +24,8 @@ type Runner struct {
 type Client interface {
 	ListSandboxes(context.Context, map[string]string) ([]canaryapi.Sandbox, error)
 	DeleteSandbox(context.Context, string) error
+	ListTemplates(context.Context, map[string]string) ([]canaryapi.Template, error)
+	DeleteTemplate(context.Context, string) error
 }
 
 func (r Runner) Run(ctx context.Context) error {
@@ -60,7 +64,7 @@ func (r Runner) Run(ctx context.Context) error {
 			continue
 		}
 		staleCount++
-		if err := r.Client.DeleteSandbox(ctx, item.ID); err != nil && err != canaryapi.ErrNotFound {
+		if err := r.Client.DeleteSandbox(ctx, item.ID); err != nil && !errors.Is(err, canaryapi.ErrNotFound) {
 			deletionFailureCount++
 			log.Error().Err(err).Str("sandbox_id", item.ID).Msg("janitor delete failed")
 			if orphanAge > oldestOrphanAge {
@@ -70,6 +74,36 @@ func (r Runner) Run(ctx context.Context) error {
 		}
 		deletedCount++
 	}
+
+	templates, err := r.Client.ListTemplates(ctx, map[string]string{
+		"owner":       "team",
+		"name_prefix": sandboxmetadata.TemplateNamePrefix,
+		"limit":       strconv.Itoa(templateListLimit),
+	})
+	if err != nil {
+		r.Metrics.RecordRun(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "janitor", "failure", r.Clock().Sub(start))
+		return err
+	}
+	var templateDeletedCount int64
+	for _, tpl := range templates {
+		examinedCount++
+		staleSince := tpl.CreatedAt.Add(r.templateTTL())
+		if staleSince.After(now) {
+			continue
+		}
+		staleCount++
+		if err := r.Client.DeleteTemplate(ctx, tpl.ID); err != nil && !errors.Is(err, canaryapi.ErrNotFound) {
+			deletionFailureCount++
+			log.Error().Err(err).Str("template_id", tpl.ID).Msg("janitor template delete failed")
+			if age := now.Sub(staleSince); age > oldestOrphanAge {
+				oldestOrphanAge = age
+			}
+			continue
+		}
+		deletedCount++
+		templateDeletedCount++
+	}
+
 	currentOrphanCount := staleCount - deletedCount
 	if currentOrphanCount < 0 {
 		currentOrphanCount = 0
@@ -84,7 +118,21 @@ func (r Runner) Run(ctx context.Context) error {
 		Int64("retained_stale", staleCount).
 		Int64("retained_deleted", deletedCount).
 		Int64("retained_deletion_failures", deletionFailureCount).
+		Int64("templates_examined", int64(len(templates))).
+		Int64("templates_deleted", templateDeletedCount).
 		Msg("janitor retention sweep complete")
 	r.Metrics.RecordRun(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "janitor", "success", r.Clock().Sub(start))
 	return nil
+}
+
+// Team template quota is small, so the sweep page never needs to be larger.
+const templateListLimit = 100
+
+// A canary template outlives its run only when the run failed with retention
+// on, so it is stale once the longer of the two TTLs has passed.
+func (r Runner) templateTTL() time.Duration {
+	if r.Config.RetainFailedSandboxTTL > r.Config.ResourceTTL {
+		return r.Config.RetainFailedSandboxTTL
+	}
+	return r.Config.ResourceTTL
 }

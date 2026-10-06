@@ -3,6 +3,7 @@ package janitor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -372,8 +373,10 @@ func TestJanitorMinimumSafetyMatrix(t *testing.T) {
 }
 
 type fakeJanitorClient struct {
-	listSandboxesFn func(context.Context, map[string]string) ([]canaryapi.Sandbox, error)
-	deleteSandboxFn func(context.Context, string) error
+	listSandboxesFn  func(context.Context, map[string]string) ([]canaryapi.Sandbox, error)
+	deleteSandboxFn  func(context.Context, string) error
+	listTemplatesFn  func(context.Context, map[string]string) ([]canaryapi.Template, error)
+	deleteTemplateFn func(context.Context, string) error
 }
 
 func (f *fakeJanitorClient) ListSandboxes(ctx context.Context, query map[string]string) ([]canaryapi.Sandbox, error) {
@@ -397,16 +400,117 @@ func (m *janitorMetricsRecorder) RecordRun(context.Context, string, string, stri
 }
 func (m *janitorMetricsRecorder) RecordStep(context.Context, string, string, string, string, string, string, time.Duration) {
 }
-func (m *janitorMetricsRecorder) RecordCleanup(context.Context, string, string, string, string) {}
-func (m *janitorMetricsRecorder) RecordOverlapSkip(context.Context, string, string, string)     {}
+func (m *janitorMetricsRecorder) RecordCleanup(context.Context, string, string, string, string)     {}
+func (m *janitorMetricsRecorder) RecordOverlapSkip(context.Context, string, string, string, string) {}
 func (m *janitorMetricsRecorder) RecordExecutionDelta(context.Context, string, string, string, string, int64) {
 }
 func (m *janitorMetricsRecorder) RecordOrphans(context.Context, string, string, string, int64, time.Duration) {
 }
-func (m *janitorMetricsRecorder) RecordRetainedSandbox(context.Context, string, string, string, string) {
+func (m *janitorMetricsRecorder) RecordRetainedSandbox(context.Context, string, string, string, string, string) {
 }
 func (m *janitorMetricsRecorder) RecordJanitorResources(_ context.Context, _ string, _ string, _ string, examined, deleted, deleteFailures int64) {
 	m.examined += examined
 	m.deleted += deleted
 	m.deleteFailures += deleteFailures
+}
+
+func (f *fakeJanitorClient) ListTemplates(ctx context.Context, query map[string]string) ([]canaryapi.Template, error) {
+	if f.listTemplatesFn == nil {
+		return nil, nil
+	}
+	return f.listTemplatesFn(ctx, query)
+}
+
+func (f *fakeJanitorClient) DeleteTemplate(ctx context.Context, id string) error {
+	if f.deleteTemplateFn == nil {
+		return nil
+	}
+	return f.deleteTemplateFn(ctx, id)
+}
+
+func TestJanitorDeletesStaleTemplatesAndKeepsFreshOnes(t *testing.T) {
+	now := time.Date(2026, 7, 14, 20, 0, 0, 0, time.UTC)
+	var deleted []string
+	metrics := &janitorMetricsRecorder{}
+	r := Runner{
+		Config: config.Config{
+			Environment:            "staging",
+			Region:                 "us-central1",
+			Target:                 "staging-us-central1",
+			ResourceTTL:            time.Hour,
+			RetainFailedSandboxTTL: 2 * time.Hour,
+		},
+		Client: &fakeJanitorClient{
+			listSandboxesFn: func(context.Context, map[string]string) ([]canaryapi.Sandbox, error) { return nil, nil },
+			listTemplatesFn: func(_ context.Context, query map[string]string) ([]canaryapi.Template, error) {
+				if query["name_prefix"] != sandboxmetadata.TemplateNamePrefix || query["owner"] != "team" {
+					t.Fatalf("unexpected template query %v", query)
+				}
+				return []canaryapi.Template{
+					{ID: "tpl-stale", CreatedAt: now.Add(-3 * time.Hour)},
+					{ID: "tpl-fresh", CreatedAt: now.Add(-90 * time.Minute)},
+				}, nil
+			},
+			deleteTemplateFn: func(_ context.Context, id string) error {
+				deleted = append(deleted, id)
+				return nil
+			},
+		},
+		Metrics: metrics,
+		Clock:   func() time.Time { return now },
+	}
+
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run returned %v", err)
+	}
+	if len(deleted) != 1 || deleted[0] != "tpl-stale" {
+		t.Fatalf("deleted = %v, want only tpl-stale", deleted)
+	}
+	if metrics.examined != 2 || metrics.deleted != 1 || metrics.deleteFailures != 0 {
+		t.Fatalf("unexpected metrics: %+v", metrics)
+	}
+}
+
+func TestJanitorTreatsWrappedNotFoundAsDeleted(t *testing.T) {
+	now := time.Date(2026, 7, 14, 20, 0, 0, 0, time.UTC)
+	metrics := &janitorMetricsRecorder{}
+	r := Runner{
+		Config: config.Config{
+			Environment:            "staging",
+			Region:                 "us-central1",
+			Target:                 "staging-us-central1",
+			ResourceTTL:            time.Hour,
+			RetainFailedSandboxTTL: 2 * time.Hour,
+		},
+		Client: &fakeJanitorClient{
+			listSandboxesFn: func(context.Context, map[string]string) ([]canaryapi.Sandbox, error) {
+				return []canaryapi.Sandbox{{
+					ID: "sb-gone",
+					Metadata: map[string]string{
+						sandboxmetadata.KeyManagedBy:   sandboxmetadata.ManagedByCanaryLegacy,
+						sandboxmetadata.KeyEnvironment: "staging",
+						sandboxmetadata.KeyExpiresAt:   now.Add(-time.Hour).Format(time.RFC3339),
+					},
+				}}, nil
+			},
+			deleteSandboxFn: func(context.Context, string) error {
+				return fmt.Errorf("DELETE /sandboxes/sb-gone: %w", canaryapi.ErrNotFound)
+			},
+			listTemplatesFn: func(context.Context, map[string]string) ([]canaryapi.Template, error) {
+				return []canaryapi.Template{{ID: "tpl-gone", CreatedAt: now.Add(-3 * time.Hour)}}, nil
+			},
+			deleteTemplateFn: func(context.Context, string) error {
+				return fmt.Errorf("DELETE /templates/tpl-gone: %w", canaryapi.ErrNotFound)
+			},
+		},
+		Metrics: metrics,
+		Clock:   func() time.Time { return now },
+	}
+
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run returned %v", err)
+	}
+	if metrics.deleted != 2 || metrics.deleteFailures != 0 {
+		t.Fatalf("already-gone resources must count as deleted: %+v", metrics)
+	}
 }
