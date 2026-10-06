@@ -99,16 +99,14 @@ module "template" {
   for_each = local.lifecycle_targets
   source   = "../../modules/canary_target"
 
-  scenario              = "template"
-  create_api_key_secret = false
-  scheduler_cron        = "0 * * * *"
-  job_timeout           = "1800s"
-  run_timeout           = "25m"
-  lock_ttl              = "30m"
-  missing_runs_window   = "2h"
-  # Scheduler and alerts switch on together once the staging run has soaked.
-  scheduler_enabled         = false
-  create_alerts             = false
+  scenario                  = "template"
+  create_api_key_secret     = false
+  scheduler_cron            = "0 * * * *"
+  job_timeout               = "1800s"
+  run_timeout               = "25m"
+  lock_ttl                  = "30m"
+  missing_runs_window       = "2h"
+  create_alerts             = var.create_alerts
   project_id                = var.project_id
   job_region                = each.value.job_region
   target_name               = each.key
