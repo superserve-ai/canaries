@@ -42,6 +42,14 @@ func (r Runner) runSnapshot(ctx context.Context, runID string) (res RunResult) {
 			logStep("snapshot_delete")
 			if err := ops.DeleteSnapshotBestEffort(context.Background(), res.SnapshotID, DeleteSandboxOptions{Timeout: r.Config.DeleteTimeout, Telemetry: telemetry}); err != nil {
 				log.Warn().Err(err).Str("snapshot_id", res.SnapshotID).Str("sandbox_id", source.SandboxID).Msg("snapshot delete failed; source left for the janitor")
+				if !pointerRecorded && source.SandboxID != "" {
+					// The janitor can only follow a pointer, so leave one.
+					md := r.canaryCreateSandboxRequest(source).Metadata
+					md[sandboxmetadata.KeySnapshotID] = res.SnapshotID
+					if perr := r.Client.UpdateSandbox(context.Background(), source.SandboxID, canaryapi.UpdateSandboxRequest{Metadata: md}); perr != nil {
+						log.Warn().Err(perr).Str("snapshot_id", res.SnapshotID).Str("sandbox_id", source.SandboxID).Msg("snapshot pointer could not be left on the source")
+					}
+				}
 				if res.Err == nil {
 					res.Err = err
 				}

@@ -277,6 +277,24 @@ func TestRunSnapshotRetainsSnapshotPointerAndSkipsSourceDeleteWhenSnapshotDelete
 	if res.FailedStep != "record_snapshot_id" || strings.Join(deletedSnapshots, ",") != "snap-1" {
 		t.Fatalf("unrecorded snapshot must be deleted: step=%q deleted=%v", res.FailedStep, deletedSnapshots)
 	}
+
+	// Pointer write failed and so did the fallback delete: the finalizer makes
+	// one more attempt to leave the pointer, and keeps the source for the janitor.
+	updates := 0
+	var lastMetadata map[string]string
+	base.updateSandboxFn = func(_ context.Context, _ string, req canaryapi.UpdateSandboxRequest) error {
+		updates++
+		if updates == 1 {
+			return errors.New("metadata service unavailable")
+		}
+		lastMetadata = req.Metadata
+		return nil
+	}
+	base.deleteSnapshotFn = func(context.Context, string) error { return errors.New("control plane unavailable") }
+	res = snapshotRunner(base).runSnapshot(context.Background(), "run-4")
+	if res.Err == nil || lastMetadata[sandboxmetadata.KeySnapshotID] != "snap-1" || len(deletedSandboxes) != 0 {
+		t.Fatalf("source must be left pointing at the snapshot: metadata=%v deleted=%v err=%v", lastMetadata, deletedSandboxes, res.Err)
+	}
 }
 
 func TestCreateSnapshotRetriesLostResponseWithSameIdempotencyKey(t *testing.T) {
