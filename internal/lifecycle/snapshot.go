@@ -26,34 +26,29 @@ func (r Runner) runSnapshot(ctx context.Context, runID string) (res RunResult) {
 	source := RunResources{RunID: runID, CreatedAt: r.Clock().UTC()}
 	fork := RunResources{RunID: runID, CreatedAt: source.CreatedAt}
 	defer func() {
-		// Fork first: nothing blocks deleting a snapshot with live forks, but
-		// the source must go before the snapshot id it carries stops mattering.
 		if fork.SandboxID != "" {
 			res.Err = r.FinalizeSandbox(context.Background(), fork, res)
 		}
+		// The source is the only pointer to the snapshot, so the snapshot goes
+		// first and a failed snapshot delete leaves the source for the janitor.
+		if res.SnapshotID != "" && !(res.Err != nil && r.Config.RetainFailedSandbox) {
+			logStep("snapshot_delete")
+			if err := ops.DeleteSnapshotBestEffort(context.Background(), res.SnapshotID, DeleteSandboxOptions{Timeout: r.Config.DeleteTimeout, Telemetry: telemetry}); err != nil {
+				log.Warn().Err(err).Str("snapshot_id", res.SnapshotID).Str("sandbox_id", source.SandboxID).Msg("snapshot delete failed; source left for the janitor")
+				if res.Err == nil {
+					res.Err = err
+				}
+				return
+			}
+		}
 		if source.SandboxID != "" {
 			res.Err = r.FinalizeSandbox(context.Background(), source, res)
-		}
-		if res.SnapshotID == "" {
-			return
-		}
-		if res.Err != nil && r.Config.RetainFailedSandbox {
-			log.Info().Str("snapshot_id", res.SnapshotID).Str("failed_step", res.FailedStep).Msg("snapshot retained for debugging")
-			return
-		}
-		logStep("snapshot_delete")
-		if err := ops.DeleteSnapshotBestEffort(context.Background(), res.SnapshotID, DeleteSandboxOptions{Timeout: r.Config.DeleteTimeout, Telemetry: telemetry}); err != nil {
-			log.Warn().Err(err).Str("snapshot_id", res.SnapshotID).Msg("snapshot delete failed")
-			if res.Err == nil {
-				res.Err = err
-			}
 		}
 	}()
 
 	createStart := r.Clock()
 	logStep("create_request")
 	req := r.canaryCreateSandboxRequest(source)
-	req.Metadata[sandboxmetadata.KeyScenario] = sandboxmetadata.ScenarioSnapshot
 	sb, err := ops.CreateSandbox(ctx, CreateSandboxOptions{Request: req, Telemetry: telemetry})
 	if err != nil {
 		ops.RecordStep(ctx, telemetry, "create_total", result(err), r.Clock().Sub(createStart))
@@ -81,25 +76,29 @@ func (r Runner) runSnapshot(ctx context.Context, runID string) (res RunResult) {
 		Name:           "api-canary-" + runID,
 		IdempotencyKey: runID,
 	}, telemetry)
+	requestDuration := r.Clock().Sub(snapshotStart)
 	if err != nil {
-		ops.RecordStep(ctx, telemetry, "snapshot_total", result(err), r.Clock().Sub(snapshotStart))
+		ops.RecordStep(ctx, telemetry, "snapshot_total", result(err), requestDuration)
 		return failStep(res, StepError{Step: "snapshot_request", Err: err})
 	}
 	res.SnapshotID = snap.ID
+	source.RetainMetadata = map[string]string{sandboxmetadata.KeySnapshotID: snap.ID}
 
-	logStep("snapshot_wait_ready")
-	if _, err := ops.WaitForSnapshotReady(ctx, snap.ID, WaitForSnapshotOptions{PollInterval: r.Config.PollInterval, Telemetry: telemetry}); err != nil {
-		ops.RecordStep(ctx, telemetry, "snapshot_total", result(err), r.Clock().Sub(snapshotStart))
-		return failStep(res, StepError{Step: "snapshot_wait_ready", Err: fmt.Errorf("waiting for snapshot: %w", err)})
-	}
-	ops.RecordStep(ctx, telemetry, "snapshot_total", "success", r.Clock().Sub(snapshotStart))
-
-	// The janitor finds this id on the soft-deleted source row later.
+	// Point the source at its snapshot before anything else can fail, so a
+	// retained or orphaned source still leads the janitor to it.
 	logStep("record_snapshot_id")
 	req.Metadata[sandboxmetadata.KeySnapshotID] = snap.ID
 	if err := r.Client.UpdateSandbox(ctx, sb.ID, canaryapi.UpdateSandboxRequest{Metadata: req.Metadata}); err != nil {
 		return failStep(res, StepError{Step: "record_snapshot_id", Err: fmt.Errorf("recording snapshot id: %w", err)})
 	}
+
+	waitStart := r.Clock()
+	logStep("snapshot_wait_ready")
+	if _, err := ops.WaitForSnapshotReady(ctx, snap.ID, WaitForSnapshotOptions{PollInterval: r.Config.PollInterval, Telemetry: telemetry}); err != nil {
+		ops.RecordStep(ctx, telemetry, "snapshot_total", result(err), requestDuration+r.Clock().Sub(waitStart))
+		return failStep(res, StepError{Step: "snapshot_wait_ready", Err: fmt.Errorf("waiting for snapshot: %w", err)})
+	}
+	ops.RecordStep(ctx, telemetry, "snapshot_total", "success", requestDuration+r.Clock().Sub(waitStart))
 
 	// Capturing an active sandbox pauses it briefly; the source must come back.
 	logStep("source_wait_active")

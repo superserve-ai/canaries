@@ -31,6 +31,8 @@ type RunResources struct {
 	SandboxID string
 	RunID     string
 	CreatedAt time.Time
+	// RetainMetadata survives the retention update, which replaces the whole map.
+	RetainMetadata map[string]string
 }
 
 type RunResult struct {
@@ -377,6 +379,10 @@ func (r Runner) FinalizeSandbox(ctx context.Context, resources RunResources, res
 	}
 	retainedAt := r.Clock().UTC()
 	retainExpiresAt := retainedAt.Add(r.Config.RetainFailedSandboxTTL).UTC()
+	retainMetadata := sandboxmetadata.LegacyCanaryRetentionMetadata(r.Config.Environment, r.Config.Region, r.Config.Target, resources.RunID, res.FailedStep, resources.CreatedAt, retainedAt, retainExpiresAt)
+	for k, v := range resources.RetainMetadata {
+		retainMetadata[k] = v
+	}
 
 	outcome, err := r.operations().FinalizeSandbox(ctx, resources, res, FinalizeOptions{
 		Delete: DeleteSandboxOptions{
@@ -385,7 +391,7 @@ func (r Runner) FinalizeSandbox(ctx context.Context, resources RunResources, res
 		},
 		Retain: RetentionOptions{
 			Enabled:           r.Config.RetainFailedSandbox,
-			Metadata:          sandboxmetadata.LegacyCanaryRetentionMetadata(r.Config.Environment, r.Config.Region, r.Config.Target, resources.RunID, res.FailedStep, resources.CreatedAt, retainedAt, retainExpiresAt),
+			Metadata:          retainMetadata,
 			AutoDeleteSeconds: func() *int { v := int(r.Config.RetainFailedSandboxTTL.Seconds()); return &v }(),
 		},
 		Telemetry: telemetry,

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -224,9 +225,6 @@ func TestJanitorRecognizesLegacyAndGeneralizedOwnedSandboxes(t *testing.T) {
 		},
 		Client: &fakeJanitorClient{
 			listSandboxesFn: func(_ context.Context, query map[string]string) ([]canaryapi.Sandbox, error) {
-				if query["status"] == "deleted" {
-					return nil, nil
-				}
 				queries = append(queries, query["metadata.managed_by"])
 				if got := query["metadata.environment"]; got != "staging" {
 					t.Fatalf("unexpected environment query %q", got)
@@ -526,56 +524,54 @@ func (f *fakeJanitorClient) DeleteSnapshot(ctx context.Context, id string) error
 	return f.deleteSnapshotFn(ctx, id)
 }
 
-func TestJanitorDeletesSnapshotsOfExpiredDeletedSources(t *testing.T) {
+func TestJanitorDeletesSnapshotBeforeItsSourceAndKeepsSourceWhenSnapshotDeleteFails(t *testing.T) {
 	now := time.Date(2026, 7, 14, 20, 0, 0, 0, time.UTC)
-	var deleted []string
-	metrics := &janitorMetricsRecorder{}
-	source := func(id, snapshotID string, expiresAt time.Time) canaryapi.Sandbox {
-		return canaryapi.Sandbox{ID: id, Status: "deleted", Metadata: map[string]string{
-			sandboxmetadata.KeyManagedBy:   sandboxmetadata.ManagedByCanaryLegacy,
-			sandboxmetadata.KeyEnvironment: "staging",
-			sandboxmetadata.KeyScenario:    sandboxmetadata.ScenarioSnapshot,
-			sandboxmetadata.KeySnapshotID:  snapshotID,
-			sandboxmetadata.KeyExpiresAt:   expiresAt.Format(time.RFC3339),
-		}}
-	}
-	r := Runner{
-		Config: config.Config{
-			Environment:            "staging",
-			Region:                 "us-central1",
-			Target:                 "staging-us-central1",
-			ResourceTTL:            time.Hour,
-			RetainFailedSandboxTTL: 2 * time.Hour,
-		},
-		Client: &fakeJanitorClient{
-			listSandboxesFn: func(_ context.Context, query map[string]string) ([]canaryapi.Sandbox, error) {
-				if query["status"] != "deleted" {
-					return nil, nil
-				}
-				if query["metadata."+sandboxmetadata.KeyScenario] != sandboxmetadata.ScenarioSnapshot {
-					t.Fatalf("deleted-source query must filter on the snapshot scenario: %v", query)
-				}
-				return []canaryapi.Sandbox{
-					source("sb-old", "snap-old", now.Add(-time.Hour)),
-					source("sb-new", "snap-new", now.Add(time.Hour)),
-				}, nil
-			},
-			deleteSnapshotFn: func(_ context.Context, id string) error {
-				deleted = append(deleted, id)
-				return nil
-			},
-		},
-		Metrics: metrics,
-		Clock:   func() time.Time { return now },
-	}
-
-	if err := r.Run(context.Background()); err != nil {
-		t.Fatalf("Run returned %v", err)
-	}
-	if len(deleted) != 1 || deleted[0] != "snap-old" {
-		t.Fatalf("deleted = %v, want only snap-old", deleted)
-	}
-	if metrics.examined != 2 || metrics.deleted != 1 || metrics.deleteFailures != 0 {
-		t.Fatalf("unexpected metrics: %+v", metrics)
+	for _, tc := range []struct {
+		name        string
+		snapshotErr error
+		wantOrder   string
+		wantDeleted int64
+		wantFailed  int64
+	}{
+		{name: "snapshot then sandbox", wantOrder: "snapshot:snap-1,sandbox:sb-1", wantDeleted: 1},
+		{name: "already gone snapshot still frees the sandbox", snapshotErr: fmt.Errorf("DELETE: %w", canaryapi.ErrNotFound), wantOrder: "snapshot:snap-1,sandbox:sb-1", wantDeleted: 1},
+		{name: "failed snapshot delete keeps the pointer", snapshotErr: errors.New("409 creating"), wantOrder: "snapshot:snap-1", wantFailed: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var order []string
+			metrics := &janitorMetricsRecorder{}
+			r := Runner{
+				Config: config.Config{Environment: "staging", Region: "us-central1", Target: "staging-us-central1", RetainFailedSandboxTTL: 2 * time.Hour},
+				Client: &fakeJanitorClient{
+					listSandboxesFn: func(context.Context, map[string]string) ([]canaryapi.Sandbox, error) {
+						return []canaryapi.Sandbox{{ID: "sb-1", Metadata: map[string]string{
+							sandboxmetadata.KeyManagedBy:   sandboxmetadata.ManagedByCanaryLegacy,
+							sandboxmetadata.KeyEnvironment: "staging",
+							sandboxmetadata.KeySnapshotID:  "snap-1",
+							sandboxmetadata.KeyExpiresAt:   now.Add(-time.Hour).Format(time.RFC3339),
+						}}}, nil
+					},
+					deleteSnapshotFn: func(_ context.Context, id string) error {
+						order = append(order, "snapshot:"+id)
+						return tc.snapshotErr
+					},
+					deleteSandboxFn: func(_ context.Context, id string) error {
+						order = append(order, "sandbox:"+id)
+						return nil
+					},
+				},
+				Metrics: metrics,
+				Clock:   func() time.Time { return now },
+			}
+			if err := r.Run(context.Background()); err != nil {
+				t.Fatalf("Run returned %v", err)
+			}
+			if got := strings.Join(order, ","); got != tc.wantOrder {
+				t.Fatalf("order = %q, want %q", got, tc.wantOrder)
+			}
+			if metrics.deleted != tc.wantDeleted || metrics.deleteFailures != tc.wantFailed {
+				t.Fatalf("unexpected metrics: %+v", metrics)
+			}
+		})
 	}
 }

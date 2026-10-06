@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -44,9 +45,6 @@ func TestRunSnapshotForksFromSnapshotVerifiesForkAndCleansUpInOrder(t *testing.T
 		createSandboxFn: func(_ context.Context, req canaryapi.CreateSandboxRequest) (canaryapi.Sandbox, error) {
 			if req.FromSnapshot == "" {
 				order = append(order, "create_source")
-				if req.Metadata[sandboxmetadata.KeyScenario] != sandboxmetadata.ScenarioSnapshot {
-					t.Fatalf("source must be tagged with the snapshot scenario: %v", req.Metadata)
-				}
 				return canaryapi.Sandbox{ID: "sb-source", Status: "active", AccessToken: "src-tok"}, nil
 			}
 			order = append(order, "create_fork")
@@ -116,7 +114,7 @@ func TestRunSnapshotForksFromSnapshotVerifiesForkAndCleansUpInOrder(t *testing.T
 	want := []string{
 		"create_source", "seed:sb-source", "snapshot:sb-source", "record_snapshot_id", "source_exec:sb-source",
 		"create_fork", "verify_disk:sb-fork", "verify_memory:sb-fork",
-		"delete:sb-fork", "delete:sb-source", "delete_snapshot:snap-1",
+		"delete:sb-fork", "delete_snapshot:snap-1", "delete:sb-source",
 	}
 	if strings.Join(order, ",") != strings.Join(want, ",") {
 		t.Fatalf("order =\n%v\nwant\n%v", order, want)
@@ -162,7 +160,57 @@ func TestRunSnapshotFailedCaptureReportsStepAndSkipsFork(t *testing.T) {
 	if res.Err == nil || res.FailedStep != "snapshot_wait_ready" || res.SnapshotID != "snap-1" {
 		t.Fatalf("failed step = %q snapshot = %q err = %v", res.FailedStep, res.SnapshotID, res.Err)
 	}
-	if strings.Join(deleted, ",") != "sb-source,snap-1" {
-		t.Fatalf("cleanup = %v, want source then snapshot", deleted)
+	if strings.Join(deleted, ",") != "snap-1,sb-source" {
+		t.Fatalf("cleanup = %v, want snapshot then source", deleted)
+	}
+}
+
+func TestRunSnapshotRetainsSnapshotPointerAndSkipsSourceDeleteWhenSnapshotDeleteFails(t *testing.T) {
+	var retained map[string]string
+	var deletedSandboxes []string
+	base := &fakeClient{
+		createSandboxFn: func(context.Context, canaryapi.CreateSandboxRequest) (canaryapi.Sandbox, error) {
+			return canaryapi.Sandbox{ID: "sb-source", Status: "active", AccessToken: "tok"}, nil
+		},
+		getSandboxFn: func(_ context.Context, id string) (canaryapi.Sandbox, error) {
+			return canaryapi.Sandbox{ID: id, Status: "active"}, nil
+		},
+		writeFileFn: func(context.Context, string, string, string, []byte) error { return nil },
+		execFn: func(context.Context, string, string, canaryapi.ExecRequest) (canaryapi.ExecResult, error) {
+			return canaryapi.ExecResult{ExitCode: 0}, nil
+		},
+		createSnapshotFn: func(_ context.Context, sandboxID string, _ canaryapi.CreateSnapshotRequest) (canaryapi.Snapshot, error) {
+			return canaryapi.Snapshot{ID: "snap-1", SandboxID: sandboxID, Status: "creating"}, nil
+		},
+		getSnapshotFn: func(_ context.Context, id string) (canaryapi.Snapshot, error) {
+			return canaryapi.Snapshot{ID: id, Status: "failed"}, nil
+		},
+		updateSandboxFn: func(_ context.Context, _ string, req canaryapi.UpdateSandboxRequest) error {
+			retained = req.Metadata
+			return nil
+		},
+		deleteSandboxFn: func(_ context.Context, id string) error {
+			deletedSandboxes = append(deletedSandboxes, id)
+			return nil
+		},
+	}
+
+	// Retention on: the capture failed after the id was recorded, and the
+	// retention update must not erase the pointer.
+	r := snapshotRunner(base)
+	r.Config.RetainFailedSandbox = true
+	res := r.runSnapshot(context.Background(), "run-1")
+	if res.Err == nil || retained[sandboxmetadata.KeySnapshotID] != "snap-1" || retained[sandboxmetadata.KeyRetainedForDebug] != "true" {
+		t.Fatalf("retention metadata must keep the snapshot pointer: %v (err=%v)", retained, res.Err)
+	}
+	if len(deletedSandboxes) != 0 {
+		t.Fatalf("retained run must not delete the source: %v", deletedSandboxes)
+	}
+
+	// Retention off: a failed snapshot delete leaves the source for the janitor.
+	base.deleteSnapshotFn = func(context.Context, string) error { return errors.New("409 snapshot is still being created") }
+	res = snapshotRunner(base).runSnapshot(context.Background(), "run-2")
+	if res.Err == nil || len(deletedSandboxes) != 0 {
+		t.Fatalf("source must survive a failed snapshot delete: deleted=%v err=%v", deletedSandboxes, res.Err)
 	}
 }

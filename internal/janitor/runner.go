@@ -53,6 +53,7 @@ func (r Runner) Run(ctx context.Context) error {
 	var deletedCount int64
 	var deletionFailureCount int64
 	var staleCount int64
+	var snapshotDeletedCount int64
 	var oldestOrphanAge time.Duration
 	for _, item := range itemsByID {
 		match, ok := sandboxmetadata.MatchOwnership(item.Metadata, r.Config.Environment)
@@ -65,6 +66,19 @@ func (r Runner) Run(ctx context.Context) error {
 			continue
 		}
 		staleCount++
+		// The sandbox is the only pointer to its snapshot, so the snapshot goes
+		// first and a failed snapshot delete leaves the sandbox for the next pass.
+		if snapshotID := item.Metadata[sandboxmetadata.KeySnapshotID]; snapshotID != "" {
+			if err := r.Client.DeleteSnapshot(ctx, snapshotID); err != nil && !errors.Is(err, canaryapi.ErrNotFound) {
+				deletionFailureCount++
+				log.Error().Err(err).Str("snapshot_id", snapshotID).Str("sandbox_id", item.ID).Msg("janitor snapshot delete failed")
+				if orphanAge > oldestOrphanAge {
+					oldestOrphanAge = orphanAge
+				}
+				continue
+			}
+			snapshotDeletedCount++
+		}
 		if err := r.Client.DeleteSandbox(ctx, item.ID); err != nil && !errors.Is(err, canaryapi.ErrNotFound) {
 			deletionFailureCount++
 			log.Error().Err(err).Str("sandbox_id", item.ID).Msg("janitor delete failed")
@@ -103,38 +117,6 @@ func (r Runner) Run(ctx context.Context) error {
 		}
 		deletedCount++
 		templateDeletedCount++
-	}
-
-	// Snapshots outlive their sandbox and have no list-all endpoint, so the
-	// sweep reads the snapshot id the run recorded on its soft-deleted source.
-	sources, err := r.Client.ListSandboxes(ctx, sandboxmetadata.DeletedSnapshotSourcesQuery(r.Config.Environment, templateListLimit))
-	if err != nil {
-		r.Metrics.RecordRun(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "janitor", "failure", r.Clock().Sub(start))
-		return err
-	}
-	var snapshotDeletedCount int64
-	for _, item := range sources {
-		snapshotID := item.Metadata[sandboxmetadata.KeySnapshotID]
-		match, ok := sandboxmetadata.MatchOwnership(item.Metadata, r.Config.Environment)
-		if snapshotID == "" || !ok {
-			continue
-		}
-		examinedCount++
-		orphanAge, stale := sandboxmetadata.StaleSince(item.Metadata, match, now, r.Config.RetainFailedSandboxTTL)
-		if !stale {
-			continue
-		}
-		staleCount++
-		if err := r.Client.DeleteSnapshot(ctx, snapshotID); err != nil && !errors.Is(err, canaryapi.ErrNotFound) {
-			deletionFailureCount++
-			log.Error().Err(err).Str("snapshot_id", snapshotID).Str("sandbox_id", item.ID).Msg("janitor snapshot delete failed")
-			if orphanAge > oldestOrphanAge {
-				oldestOrphanAge = orphanAge
-			}
-			continue
-		}
-		deletedCount++
-		snapshotDeletedCount++
 	}
 
 	currentOrphanCount := staleCount - deletedCount
