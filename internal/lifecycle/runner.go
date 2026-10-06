@@ -40,6 +40,8 @@ type RunResult struct {
 	TemplateID string
 	BuildID    string
 	BuildError string
+	SnapshotID string
+	ForkID     string
 }
 
 type ExecValidationError struct {
@@ -90,17 +92,18 @@ func (r Runner) telemetry() TelemetryContext {
 }
 
 func (r Runner) scenario() string {
-	if r.Config.Mode == config.ModeTemplate {
-		return "template"
+	switch r.Config.Mode {
+	case config.ModeTemplate, config.ModeSnapshot:
+		return string(r.Config.Mode)
 	}
 	return "lifecycle"
 }
 
-// The template scenario holds its own lease so a multi-minute build never
-// blocks the lifecycle run on the same target.
+// Each scenario holds its own lease so a slow run never blocks the lifecycle
+// run on the same target.
 func (r Runner) lockKey() string {
-	if r.Config.Mode == config.ModeTemplate {
-		return r.Config.Target + "-template"
+	if scenario := r.scenario(); scenario != "lifecycle" {
+		return r.Config.Target + "-" + scenario
 	}
 	return r.Config.Target
 }
@@ -119,6 +122,9 @@ type Client interface {
 	CreateTemplate(context.Context, canaryapi.CreateTemplateRequest) (canaryapi.Template, error)
 	GetTemplateBuild(context.Context, string, string) (canaryapi.TemplateBuild, error)
 	DeleteTemplate(context.Context, string) error
+	CreateSnapshot(context.Context, string, canaryapi.CreateSnapshotRequest) (canaryapi.Snapshot, error)
+	GetSnapshot(context.Context, string) (canaryapi.Snapshot, error)
+	DeleteSnapshot(context.Context, string) error
 }
 
 func (r Runner) Run(ctx context.Context) error {
@@ -159,9 +165,12 @@ func (r Runner) Run(ctx context.Context) error {
 		Msg(scenario + " canary started")
 
 	var runResult RunResult
-	if r.Config.Mode == config.ModeTemplate {
+	switch r.Config.Mode {
+	case config.ModeTemplate:
 		runResult = r.runTemplate(ctx, runID)
-	} else {
+	case config.ModeSnapshot:
+		runResult = r.runSnapshot(ctx, runID)
+	default:
 		runResult = r.runLifecycle(ctx, runID)
 	}
 	err = runResult.Err
@@ -183,6 +192,9 @@ func (r Runner) Run(ctx context.Context) error {
 			evt = evt.Str("template_id", runResult.TemplateID).
 				Str("build_id", runResult.BuildID).
 				Str("build_error", runResult.BuildError)
+		}
+		if runResult.SnapshotID != "" || runResult.ForkID != "" {
+			evt = evt.Str("snapshot_id", runResult.SnapshotID).Str("fork_id", runResult.ForkID)
 		}
 		evt.Msg(scenario + " canary completed")
 		return err
@@ -241,34 +253,9 @@ func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) 
 	}
 	r.Metrics.RecordStep(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", "create_total", "success", r.Clock().Sub(createStart))
 
-	diskToken := "disk-" + uuid.NewString()
-	memoryToken := "mem-" + uuid.NewString()
-	accessTokenPrefix := sb.AccessToken
-	if len(accessTokenPrefix) > 8 {
-		accessTokenPrefix = accessTokenPrefix[:8]
-	}
-	log.Info().
-		Str("sandbox_id", sb.ID).
-		Str("access_token_prefix", accessTokenPrefix).
-		Msg("writing canary token")
-	logStep("seed_canary_token")
-	if err := ops.WriteSandboxFileWithRetry(ctx, sb.ID, sb.AccessToken, "/tmp/canary-token", []byte(diskToken)); err != nil {
-		res.Err = fmt.Errorf("seeding canary token: %w", err)
-		res.FailedStep = "seed_canary_token"
-		return res
-	}
-
-	backgroundCmd := fmt.Sprintf("sh -lc 'nohup python3 -c \"import time; time.sleep(3600)\" %q >/tmp/canary-bg.log 2>&1 & echo started'", memoryToken)
-	logStep("initial_command")
-	if _, err := ops.ExecStep(ctx, sb.ID, sb.AccessToken, ExecStepOptions{
-		Step:      "initial_command",
-		Command:   backgroundCmd,
-		Timeout:   r.Config.CommandTimeout,
-		Telemetry: telemetry,
-	}); err != nil {
-		res.Err = fmt.Errorf("priming sandbox: %w", err)
-		res.FailedStep = "initial_command"
-		return res
+	state, err := r.seedState(ctx, sb, telemetry)
+	if err != nil {
+		return failStep(res, err)
 	}
 
 	pauseStart := r.Clock()
@@ -318,42 +305,8 @@ func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) 
 	}
 	r.Metrics.RecordStep(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "lifecycle", "resume_total", "success", r.Clock().Sub(resumeStart))
 
-	logStep("prepare_verification_utilities")
-	if err := ops.UploadVerificationUtilities(ctx, VerificationUtilitiesInput{
-		SandboxID:   sb.ID,
-		AccessToken: resumeResp.AccessToken,
-		Step:        "prepare_verification_utilities",
-		Telemetry:   telemetry,
-	}); err != nil {
-		res.Err = err
-		res.FailedStep = "prepare_verification_utilities"
-		return res
-	}
-
-	verifyDiskCmd := fmt.Sprintf("sh -lc 'CANARY_DISK_TOKEN=%q sh /tmp/verification-utilities/verify_disk.sh'", diskToken)
-	logStep("verify_disk")
-	if _, err := ops.ExecStep(ctx, sb.ID, resumeResp.AccessToken, ExecStepOptions{
-		Step:      "verify_disk",
-		Command:   verifyDiskCmd,
-		Timeout:   r.Config.CommandTimeout,
-		Telemetry: telemetry,
-	}); err != nil {
-		res.Err = fmt.Errorf("verifying disk state: %w", err)
-		res.FailedStep = "verify_disk"
-		return res
-	}
-
-	verifyMemoryCmd := fmt.Sprintf("sh -lc 'CANARY_MEMORY_TOKEN=%q python3 /tmp/verification-utilities/verify_memory.py'", memoryToken)
-	logStep("verify_memory")
-	if _, err := ops.ExecStep(ctx, sb.ID, resumeResp.AccessToken, ExecStepOptions{
-		Step:      "verify_memory",
-		Command:   verifyMemoryCmd,
-		Timeout:   r.Config.CommandTimeout,
-		Telemetry: telemetry,
-	}); err != nil {
-		res.Err = fmt.Errorf("verifying memory state: %w", err)
-		res.FailedStep = "verify_memory"
-		return res
+	if err := r.verifyState(ctx, sb.ID, resumeResp.AccessToken, state, telemetry); err != nil {
+		return failStep(res, err)
 	}
 
 	serveToken := "preview-" + runID
@@ -593,4 +546,86 @@ func result(err error) string {
 		return "failure"
 	}
 	return "success"
+}
+
+// seededState is what a sandbox holds after seeding: a token on disk and a
+// token held only in a background process's argv, so a restore has to bring
+// back both the filesystem and memory for verifyState to pass.
+type seededState struct {
+	DiskToken   string
+	MemoryToken string
+}
+
+func (r Runner) seedState(ctx context.Context, sb canaryapi.Sandbox, telemetry TelemetryContext) (seededState, error) {
+	ops := r.operations()
+	state := seededState{DiskToken: "disk-" + uuid.NewString(), MemoryToken: "mem-" + uuid.NewString()}
+	accessTokenPrefix := sb.AccessToken
+	if len(accessTokenPrefix) > 8 {
+		accessTokenPrefix = accessTokenPrefix[:8]
+	}
+	log.Info().
+		Str("sandbox_id", sb.ID).
+		Str("access_token_prefix", accessTokenPrefix).
+		Msg("writing canary token")
+	logStep("seed_canary_token")
+	if err := ops.WriteSandboxFileWithRetry(ctx, sb.ID, sb.AccessToken, "/tmp/canary-token", []byte(state.DiskToken)); err != nil {
+		return state, StepError{Step: "seed_canary_token", Err: fmt.Errorf("seeding canary token: %w", err)}
+	}
+
+	backgroundCmd := fmt.Sprintf("sh -lc 'nohup python3 -c \"import time; time.sleep(3600)\" %q >/tmp/canary-bg.log 2>&1 & echo started'", state.MemoryToken)
+	logStep("initial_command")
+	if _, err := ops.ExecStep(ctx, sb.ID, sb.AccessToken, ExecStepOptions{
+		Step:      "initial_command",
+		Command:   backgroundCmd,
+		Timeout:   r.Config.CommandTimeout,
+		Telemetry: telemetry,
+	}); err != nil {
+		return state, StepError{Step: "initial_command", Err: fmt.Errorf("priming sandbox: %w", err)}
+	}
+	return state, nil
+}
+
+func (r Runner) verifyState(ctx context.Context, sandboxID, accessToken string, state seededState, telemetry TelemetryContext) error {
+	ops := r.operations()
+	logStep("prepare_verification_utilities")
+	if err := ops.UploadVerificationUtilities(ctx, VerificationUtilitiesInput{
+		SandboxID:   sandboxID,
+		AccessToken: accessToken,
+		Step:        "prepare_verification_utilities",
+		Telemetry:   telemetry,
+	}); err != nil {
+		return StepError{Step: "prepare_verification_utilities", Err: err}
+	}
+
+	verifyDiskCmd := fmt.Sprintf("sh -lc 'CANARY_DISK_TOKEN=%q sh /tmp/verification-utilities/verify_disk.sh'", state.DiskToken)
+	logStep("verify_disk")
+	if _, err := ops.ExecStep(ctx, sandboxID, accessToken, ExecStepOptions{
+		Step:      "verify_disk",
+		Command:   verifyDiskCmd,
+		Timeout:   r.Config.CommandTimeout,
+		Telemetry: telemetry,
+	}); err != nil {
+		return StepError{Step: "verify_disk", Err: fmt.Errorf("verifying disk state: %w", err)}
+	}
+
+	verifyMemoryCmd := fmt.Sprintf("sh -lc 'CANARY_MEMORY_TOKEN=%q python3 /tmp/verification-utilities/verify_memory.py'", state.MemoryToken)
+	logStep("verify_memory")
+	if _, err := ops.ExecStep(ctx, sandboxID, accessToken, ExecStepOptions{
+		Step:      "verify_memory",
+		Command:   verifyMemoryCmd,
+		Timeout:   r.Config.CommandTimeout,
+		Telemetry: telemetry,
+	}); err != nil {
+		return StepError{Step: "verify_memory", Err: fmt.Errorf("verifying memory state: %w", err)}
+	}
+	return nil
+}
+
+func failStep(res RunResult, err error) RunResult {
+	res.Err = err
+	var stepErr StepError
+	if errors.As(err, &stepErr) {
+		res.FailedStep = stepErr.Step
+	}
+	return res
 }

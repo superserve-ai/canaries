@@ -1,6 +1,9 @@
 package sandboxmetadata
 
-import "time"
+import (
+	"strconv"
+	"time"
+)
 
 const (
 	ManagedByCanaryLegacy = "api-canary"
@@ -21,6 +24,13 @@ const (
 	KeyRetainedForDebug = "retained_for_debug"
 	KeyFailedStep       = "failed_step"
 	KeyRetainedAt       = "retained_at"
+
+	// Snapshots carry no metadata either, so the snapshot scenario records the
+	// snapshot id on its source sandbox and the janitor reads it back from the
+	// soft-deleted row.
+	KeyScenario      = "scenario"
+	KeySnapshotID    = "snapshot_id"
+	ScenarioSnapshot = "snapshot"
 
 	// Templates carry no metadata, so canary ownership is the name prefix.
 	TemplateNamePrefix = "api-canary-template-"
@@ -53,6 +63,21 @@ func OwnershipQuery(environment, managedBy string) map[string]string {
 	return map[string]string{
 		"metadata." + KeyManagedBy:   managedBy,
 		"metadata." + KeyEnvironment: environment,
+	}
+}
+
+// DeletedSnapshotSourcesQuery lists the newest soft-deleted snapshot-scenario
+// sources; the list filter is equality only, so the scenario key is what
+// narrows it.
+func DeletedSnapshotSourcesQuery(environment string, limit int) map[string]string {
+	return map[string]string{
+		"metadata." + KeyManagedBy:   ManagedByCanaryLegacy,
+		"metadata." + KeyEnvironment: environment,
+		"metadata." + KeyScenario:    ScenarioSnapshot,
+		"status":                     "deleted",
+		"sort":                       "created_at",
+		"order":                      "desc",
+		"limit":                      strconv.Itoa(limit),
 	}
 }
 

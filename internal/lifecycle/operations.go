@@ -31,6 +31,7 @@ type Operations struct {
 
 type CreateSandboxOptions struct {
 	Request   canaryapi.CreateSandboxRequest
+	Step      string
 	Telemetry TelemetryContext
 }
 
@@ -140,7 +141,11 @@ func (o Operations) RecordRetainedSandbox(ctx context.Context, telemetry Telemet
 func (o Operations) CreateSandbox(ctx context.Context, opts CreateSandboxOptions) (canaryapi.Sandbox, error) {
 	start := o.now()
 	sb, err := o.Client.CreateSandbox(ctx, opts.Request)
-	o.recordStep(ctx, opts.Telemetry, "create_request", result(err), o.now().Sub(start))
+	step := opts.Step
+	if step == "" {
+		step = "create_request"
+	}
+	o.recordStep(ctx, opts.Telemetry, step, result(err), o.now().Sub(start))
 	if err != nil {
 		return canaryapi.Sandbox{}, fmt.Errorf("creating sandbox: %w", err)
 	}

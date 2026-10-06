@@ -5,8 +5,8 @@ locals {
   name_suffix         = var.scenario == "lifecycle" ? "" : "-${var.scenario}"
   lifecycle_job_name  = "api-canary${local.name_suffix}-${var.target_name}"
   scheduler_name      = "api-canary${local.name_suffix}-schedule-${var.target_name}"
-  runtime_sa_prefix   = { lifecycle = "apicn", template = "apicnt" }[var.scenario]
-  scheduler_sa_prefix = { lifecycle = "apicns", template = "apicnts" }[var.scenario]
+  runtime_sa_prefix   = { lifecycle = "apicn", template = "apicnt", snapshot = "apicnsnap" }[var.scenario]
+  scheduler_sa_prefix = { lifecycle = "apicns", template = "apicnts", snapshot = "apicnsnaps" }[var.scenario]
   api_key_secret_id   = var.create_api_key_secret ? google_secret_manager_secret.api_key[0].secret_id : var.api_key_secret_name
   lifecycle_run_logs_query = format(
     "resource.type%%3D%%22cloud_run_job%%22%%0Aresource.labels.job_name%%3D%%22%s%%22%%0Alabels.%%22run.googleapis.com/execution_name%%22%%3D%%22$${log.extracted_label.execution_name}%%22",

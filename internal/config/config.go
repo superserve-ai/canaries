@@ -21,6 +21,7 @@ const (
 	ModeLifecycle Mode = "lifecycle"
 	ModeJanitor   Mode = "janitor"
 	ModeTemplate  Mode = "template"
+	ModeSnapshot  Mode = "snapshot"
 
 	RuntimeLocal    Runtime = "local"
 	RuntimeCloudRun Runtime = "cloud-run"
@@ -75,7 +76,7 @@ type metricsConfig struct {
 
 func Load(rawMode string) (Config, error) {
 	mode := Mode(strings.TrimSpace(rawMode))
-	if mode != ModeLifecycle && mode != ModeJanitor && mode != ModeTemplate {
+	if mode != ModeLifecycle && mode != ModeJanitor && mode != ModeTemplate && mode != ModeSnapshot {
 		return Config{}, fmt.Errorf("invalid mode %q", rawMode)
 	}
 

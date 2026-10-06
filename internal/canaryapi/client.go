@@ -38,11 +38,13 @@ type Sandbox struct {
 	AutoDeleteAt     *time.Time        `json:"auto_delete_at"`
 	TimeoutSeconds   *int              `json:"timeout_seconds,omitempty"`
 	AutoDeleteSecond *int              `json:"auto_delete_seconds,omitempty"`
+	SourceSnapshotID string            `json:"source_snapshot_id,omitempty"`
 }
 
 type CreateSandboxRequest struct {
 	Name              string            `json:"name"`
 	FromTemplate      string            `json:"from_template,omitempty"`
+	FromSnapshot      string            `json:"from_snapshot,omitempty"`
 	TimeoutSeconds    int               `json:"timeout_seconds,omitempty"`
 	AutoDeleteSeconds int               `json:"auto_delete_seconds,omitempty"`
 	Metadata          map[string]string `json:"metadata,omitempty"`
@@ -106,6 +108,19 @@ type TemplateBuild struct {
 	ErrorMessage string `json:"error_message,omitempty"`
 }
 
+type CreateSnapshotRequest struct {
+	Kind           string `json:"kind"`
+	Name           string `json:"name,omitempty"`
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
+}
+
+type Snapshot struct {
+	ID        string    `json:"id"`
+	SandboxID string    `json:"sandbox_id"`
+	Status    string    `json:"status"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
 type ErrorResponse struct {
 	Error struct {
 		Code    string `json:"code"`
@@ -158,6 +173,22 @@ func (c *Client) ListTemplates(ctx context.Context, query map[string]string) ([]
 	var out []Template
 	err := c.getJSONWithQuery(ctx, "/templates", query, &out)
 	return out, err
+}
+
+func (c *Client) CreateSnapshot(ctx context.Context, sandboxID string, req CreateSnapshotRequest) (Snapshot, error) {
+	var out Snapshot
+	err := c.doJSON(ctx, http.MethodPost, "/sandboxes/"+url.PathEscape(sandboxID)+"/snapshot", req, &out)
+	return out, err
+}
+
+func (c *Client) GetSnapshot(ctx context.Context, id string) (Snapshot, error) {
+	var out Snapshot
+	err := c.doJSON(ctx, http.MethodGet, "/snapshots/"+url.PathEscape(id), nil, &out)
+	return out, err
+}
+
+func (c *Client) DeleteSnapshot(ctx context.Context, id string) error {
+	return c.doNoContent(ctx, http.MethodDelete, "/snapshots/"+url.PathEscape(id))
 }
 
 func (c *Client) DeleteTemplate(ctx context.Context, id string) error {
@@ -339,7 +370,9 @@ func (c *Client) doNoContent(ctx context.Context, method, path string) error {
 		return err
 	}
 	defer resp.Body.Close()
-	return requireStatus(method, path, resp, http.StatusNoContent)
+	// 202 means the server took the request and finishes it asynchronously;
+	// every caller polls the resource state afterwards.
+	return requireStatus(method, path, resp, http.StatusNoContent, http.StatusAccepted)
 }
 
 func (c *Client) doPatch(ctx context.Context, path string, in any) error {

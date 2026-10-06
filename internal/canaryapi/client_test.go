@@ -207,3 +207,24 @@ func TestCreateTemplateAcceptsQueuedBuild(t *testing.T) {
 		t.Fatalf("unexpected template %+v", tpl)
 	}
 }
+
+func TestDeleteSnapshotAcceptsDeferredDelete(t *testing.T) {
+	t.Parallel()
+
+	httpClient := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Method != http.MethodDelete || req.URL.Path != "/snapshots/snap-1" {
+			return nil, fmt.Errorf("unexpected request %s %s", req.Method, req.URL.Path)
+		}
+		return &http.Response{
+			StatusCode: http.StatusAccepted,
+			Body:       io.NopCloser(strings.NewReader(`{"status":"deleting"}`)),
+			Header:     http.Header{"Retry-After": []string{"30"}},
+			Request:    req,
+		}, nil
+	})}
+	client := NewClient(httpClient, "https://api.example", "api-key", "preview.example")
+
+	if err := client.DeleteSnapshot(context.Background(), "snap-1"); err != nil {
+		t.Fatalf("a deferred delete is a success, got %v", err)
+	}
+}

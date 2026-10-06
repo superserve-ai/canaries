@@ -284,3 +284,13 @@ func (f *fakeLoadClient) GetTemplateBuild(context.Context, string, string) (cana
 }
 
 func (f *fakeLoadClient) DeleteTemplate(context.Context, string) error { return errors.New("not used") }
+
+func (f *fakeLoadClient) CreateSnapshot(context.Context, string, canaryapi.CreateSnapshotRequest) (canaryapi.Snapshot, error) {
+	return canaryapi.Snapshot{}, errors.New("not used")
+}
+
+func (f *fakeLoadClient) GetSnapshot(context.Context, string) (canaryapi.Snapshot, error) {
+	return canaryapi.Snapshot{}, errors.New("not used")
+}
+
+func (f *fakeLoadClient) DeleteSnapshot(context.Context, string) error { return errors.New("not used") }

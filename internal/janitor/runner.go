@@ -26,6 +26,7 @@ type Client interface {
 	DeleteSandbox(context.Context, string) error
 	ListTemplates(context.Context, map[string]string) ([]canaryapi.Template, error)
 	DeleteTemplate(context.Context, string) error
+	DeleteSnapshot(context.Context, string) error
 }
 
 func (r Runner) Run(ctx context.Context) error {
@@ -104,6 +105,38 @@ func (r Runner) Run(ctx context.Context) error {
 		templateDeletedCount++
 	}
 
+	// Snapshots outlive their sandbox and have no list-all endpoint, so the
+	// sweep reads the snapshot id the run recorded on its soft-deleted source.
+	sources, err := r.Client.ListSandboxes(ctx, sandboxmetadata.DeletedSnapshotSourcesQuery(r.Config.Environment, templateListLimit))
+	if err != nil {
+		r.Metrics.RecordRun(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "janitor", "failure", r.Clock().Sub(start))
+		return err
+	}
+	var snapshotDeletedCount int64
+	for _, item := range sources {
+		snapshotID := item.Metadata[sandboxmetadata.KeySnapshotID]
+		match, ok := sandboxmetadata.MatchOwnership(item.Metadata, r.Config.Environment)
+		if snapshotID == "" || !ok {
+			continue
+		}
+		examinedCount++
+		orphanAge, stale := sandboxmetadata.StaleSince(item.Metadata, match, now, r.Config.RetainFailedSandboxTTL)
+		if !stale {
+			continue
+		}
+		staleCount++
+		if err := r.Client.DeleteSnapshot(ctx, snapshotID); err != nil && !errors.Is(err, canaryapi.ErrNotFound) {
+			deletionFailureCount++
+			log.Error().Err(err).Str("snapshot_id", snapshotID).Str("sandbox_id", item.ID).Msg("janitor snapshot delete failed")
+			if orphanAge > oldestOrphanAge {
+				oldestOrphanAge = orphanAge
+			}
+			continue
+		}
+		deletedCount++
+		snapshotDeletedCount++
+	}
+
 	currentOrphanCount := staleCount - deletedCount
 	if currentOrphanCount < 0 {
 		currentOrphanCount = 0
@@ -120,12 +153,13 @@ func (r Runner) Run(ctx context.Context) error {
 		Int64("retained_deletion_failures", deletionFailureCount).
 		Int64("templates_examined", int64(len(templates))).
 		Int64("templates_deleted", templateDeletedCount).
+		Int64("snapshots_deleted", snapshotDeletedCount).
 		Msg("janitor retention sweep complete")
 	r.Metrics.RecordRun(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, "janitor", "success", r.Clock().Sub(start))
 	return nil
 }
 
-// Team template quota is small, so the sweep page never needs to be larger.
+// Team template and snapshot quotas are small, so one page covers a sweep.
 const templateListLimit = 100
 
 // A canary template outlives its run only when the run failed with retention
