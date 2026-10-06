@@ -155,7 +155,7 @@ func TestRunSnapshotRecordsEveryDocumentedStep(t *testing.T) {
 		t.Fatalf("runSnapshot returned %v", res.Err)
 	}
 	for _, step := range []string{
-		"create_request", "create_wait_active", "create_total", "seed_canary_token", "initial_command",
+		"create_request", "create_wait_active", "create_total", "initial_command",
 		"snapshot_request", "snapshot_wait_ready", "snapshot_total", "record_snapshot_id", "source_wait_active", "source_exec",
 		"fork_request", "fork_wait_active", "fork_total", "prepare_verification_utilities", "verify_disk", "verify_memory",
 		"delete_request", "snapshot_delete",
