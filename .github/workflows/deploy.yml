@@ -4,6 +4,16 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      scope:
+        description: Resources to deploy
+        type: choice
+        options: [all, ui-only]
+        default: all
+
+concurrency:
+  group: canaries-deploy
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -16,16 +26,31 @@ jobs:
       # Build once without GCP credentials. Each environment-specific deploy
       # job authenticates with its own service account and pushes this image.
       - name: Build canary image
+        if: inputs.scope != 'ui-only'
         run: |
           set -euo pipefail
           docker build --platform linux/amd64 -t api-canary:${GITHUB_SHA} .
           docker save api-canary:${GITHUB_SHA} | gzip > /tmp/api-canary-image.tar.gz
 
+      - name: Build UI canary image
+        run: |
+          set -euo pipefail
+          docker build --platform linux/amd64 --target ui-canary -t ui-canary:${GITHUB_SHA} .
+          docker save ui-canary:${GITHUB_SHA} | gzip > /tmp/ui-canary-image.tar.gz
+
       - name: Upload canary image artifact
+        if: inputs.scope != 'ui-only'
         uses: actions/upload-artifact@v4
         with:
           name: api-canary-image-${{ github.sha }}
           path: /tmp/api-canary-image.tar.gz
+          if-no-files-found: error
+
+      - name: Upload UI canary image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-canary-image-${{ github.sha }}
+          path: /tmp/ui-canary-image.tar.gz
           if-no-files-found: error
 
   deploy-staging:
@@ -74,9 +99,16 @@ jobs:
           esac
 
       - name: Download prebuilt canary image
+        if: inputs.scope != 'ui-only'
         uses: actions/download-artifact@v4
         with:
           name: api-canary-image-${{ github.sha }}
+          path: /tmp
+
+      - name: Download prebuilt UI canary image
+        uses: actions/download-artifact@v4
+        with:
+          name: ui-canary-image-${{ github.sha }}
           path: /tmp
 
       - name: Configure Docker auth
@@ -84,6 +116,7 @@ jobs:
           gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
 
       - name: Load and push staging image
+        if: inputs.scope != 'ui-only'
         id: image
         run: |
           set -euo pipefail
@@ -97,16 +130,47 @@ jobs:
 
           echo "image=${IMAGE}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
 
+      - name: Load and push staging UI image
+        id: ui_image
+        run: |
+          set -euo pipefail
+          gzip -dc /tmp/ui-canary-image.tar.gz | docker load
+
+          UI_IMAGE="us-central1-docker.pkg.dev/rayai-dev/superserve/ui-canary"
+          docker tag ui-canary:${GITHUB_SHA} "${UI_IMAGE}:${GITHUB_SHA}"
+          docker tag ui-canary:${GITHUB_SHA} "${UI_IMAGE}:latest"
+          docker push "${UI_IMAGE}:${GITHUB_SHA}"
+          docker push "${UI_IMAGE}:latest"
+
+          echo "image=${UI_IMAGE}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_wrapper: false
 
       - name: Apply staging
+        env:
+          DEPLOY_SCOPE: ${{ inputs.scope }}
+          API_IMAGE: ${{ steps.image.outputs.image }}
+          UI_IMAGE: ${{ steps.ui_image.outputs.image }}
         run: |
           set -euo pipefail
           cd infra/envs/staging/us-central1
           terraform init -input=false
-          terraform apply             -input=false             -auto-approve             -var="image=${{ steps.image.outputs.image }}"             -var="load_runner_image=${{ steps.image.outputs.image }}"
+          args=()
+          LOAD_IMAGE="$API_IMAGE"
+          if [[ "$DEPLOY_SCOPE" == "ui-only" ]]; then
+            args+=(-target=module.ui_canary)
+            API_IMAGE=$(gcloud run jobs describe api-canary-staging-us-central1 --project=rayai-dev --region=us-central1 --format='value(spec.template.spec.template.spec.containers[0].image)')
+            LOAD_IMAGE=$(gcloud run jobs describe sandbox-load-runner-staging-us-central1 --project=rayai-dev --region=us-central1 --format='value(spec.template.spec.template.spec.containers[0].image)')
+          fi
+          terraform apply \
+            -input=false \
+            -auto-approve \
+            "${args[@]}" \
+            -var="image=$API_IMAGE" \
+            -var="load_runner_image=$LOAD_IMAGE" \
+            -var="ui_canary_image=$UI_IMAGE"
 
   deploy-production:
     runs-on: ubuntu-latest
@@ -154,9 +218,16 @@ jobs:
           esac
 
       - name: Download prebuilt canary image
+        if: inputs.scope != 'ui-only'
         uses: actions/download-artifact@v4
         with:
           name: api-canary-image-${{ github.sha }}
+          path: /tmp
+
+      - name: Download prebuilt UI canary image
+        uses: actions/download-artifact@v4
+        with:
+          name: ui-canary-image-${{ github.sha }}
           path: /tmp
 
       # The production image is stored once in the existing us-central1
@@ -166,6 +237,7 @@ jobs:
           gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
 
       - name: Load and push production image
+        if: inputs.scope != 'ui-only'
         id: image
         run: |
           set -euo pipefail
@@ -179,21 +251,59 @@ jobs:
 
           echo "image=${IMAGE}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
 
+      - name: Load and push production UI image
+        id: ui_image
+        run: |
+          set -euo pipefail
+          gzip -dc /tmp/ui-canary-image.tar.gz | docker load
+          IMAGE="us-central1-docker.pkg.dev/rayai-prod/superserve/ui-canary"
+          docker tag ui-canary:${GITHUB_SHA} "${IMAGE}:${GITHUB_SHA}"
+          docker push "${IMAGE}:${GITHUB_SHA}"
+          echo "image=${IMAGE}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_wrapper: false
 
       - name: Apply production
+        env:
+          DEPLOY_SCOPE: ${{ inputs.scope }}
+          API_IMAGE: ${{ steps.image.outputs.image }}
+          UI_IMAGE: ${{ steps.ui_image.outputs.image }}
         run: |
           set -euo pipefail
           cd infra/envs/production
           terraform init -input=false
-          terraform apply             -input=false             -auto-approve             -var="image=${{ steps.image.outputs.image }}"
+          args=()
+          if [[ "$DEPLOY_SCOPE" == "ui-only" ]]; then
+            args+=(-target=module.ui_canary)
+            API_IMAGE=$(gcloud run jobs describe api-canary-production-us-west2 --project=rayai-prod --region=us-west2 --format='value(spec.template.spec.template.spec.containers[0].image)')
+          fi
+          terraform apply \
+            -input=false \
+            -auto-approve \
+            "${args[@]}" \
+            -var="image=$API_IMAGE" \
+            -var="ui_canary_image=$UI_IMAGE"
 
       # East4 is isolated in its own root because it does not use VPC access.
       - name: Apply production east
+        env:
+          DEPLOY_SCOPE: ${{ inputs.scope }}
+          API_IMAGE: ${{ steps.image.outputs.image }}
+          UI_IMAGE: ${{ steps.ui_image.outputs.image }}
         run: |
           set -euo pipefail
           cd infra/envs/production/us-east4
           terraform init -input=false
-          terraform apply             -input=false             -auto-approve             -var="image=${{ steps.image.outputs.image }}"
+          args=()
+          if [[ "$DEPLOY_SCOPE" == "ui-only" ]]; then
+            args+=(-target=module.ui_canary)
+            API_IMAGE=$(gcloud run jobs describe api-canary-production-us-east4 --project=rayai-prod --region=us-east4 --format='value(spec.template.spec.template.spec.containers[0].image)')
+          fi
+          terraform apply \
+            -input=false \
+            -auto-approve \
+            "${args[@]}" \
+            -var="image=$API_IMAGE" \
+            -var="ui_canary_image=$UI_IMAGE"

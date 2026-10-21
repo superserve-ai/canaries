@@ -52,6 +52,30 @@ module "lifecycle" {
   ]
 }
 
+module "ui_canary" {
+  source = "../../../modules/ui_canary"
+
+  project_id              = var.project_id
+  job_region              = var.job_region
+  target_name             = "production-us-east4"
+  environment             = "production"
+  target_region           = "us-east4"
+  console_url             = "https://console.superserve.ai"
+  sandbox_id_prefix       = "sb-use-"
+  team_label              = "superserve.canary@gmail.com · US East"
+  image                   = var.ui_canary_image
+  scheduler_enabled       = var.ui_scheduler_enabled
+  ui_email_secret_name    = "ui-canary-email-production-us-east4"
+  ui_password_secret_name = "ui-canary-password-production-us-east4"
+  api_key_secret_name     = module.lifecycle.api_key_secret_name
+  api_base_url            = "https://api.superserve.ai"
+  lock_bucket_name        = "${var.project_id}-api-canary-locks"
+  otlp_metrics_endpoint   = local.otlp_endpoint
+  labels                  = local.labels
+  vpc_connector           = null
+  depends_on              = [google_project_service.telemetry]
+}
+
 module "template" {
   source = "../../../modules/canary_target"
 

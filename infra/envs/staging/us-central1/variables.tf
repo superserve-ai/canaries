@@ -17,6 +17,17 @@ variable "load_runner_image" {
   type        = string
 }
 
+variable "ui_canary_image" {
+  type        = string
+  description = "Dedicated Playwright UI canary image"
+}
+
+variable "ui_scheduler_enabled" {
+  description = "Whether the Cloud Scheduler job for UI canary is enabled"
+  type        = bool
+  default     = true
+}
+
 variable "deployment_service_account_email" {
   type = string
 }

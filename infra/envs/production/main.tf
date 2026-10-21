@@ -95,6 +95,34 @@ module "lifecycle" {
   depends_on                = [google_project_iam_member.deployment_alerting]
 }
 
+module "ui_canary" {
+  for_each = local.lifecycle_targets
+  source   = "../../modules/ui_canary"
+
+  project_id              = var.project_id
+  job_region              = each.value.job_region
+  target_name             = each.key
+  environment             = "production"
+  target_region           = each.value.target_region
+  console_url             = "https://console.superserve.ai"
+  sandbox_id_prefix       = "sb-usw-"
+  team_label              = "Canary West · US West"
+  image                   = var.ui_canary_image
+  scheduler_enabled       = var.ui_scheduler_enabled
+  ui_email_secret_name    = "ui-canary-email-${each.key}"
+  ui_password_secret_name = "ui-canary-password-${each.key}"
+  api_key_secret_name     = module.lifecycle[each.key].api_key_secret_name
+  api_base_url            = each.value.api_base_url
+  lock_bucket_name        = google_storage_bucket.locks.name
+  otlp_metrics_endpoint   = each.value.otlp_endpoint
+  labels                  = merge(local.labels, { region = each.value.target_region })
+  vpc_connector           = try(each.value.vpc_connector, null)
+  vpc_egress              = try(each.value.vpc_egress, "ALL_TRAFFIC")
+  vpc_network             = try(each.value.vpc_network, null)
+  vpc_subnetwork          = try(each.value.vpc_subnetwork, null)
+  vpc_tags                = try(each.value.vpc_tags, [])
+}
+
 module "template" {
   for_each = local.lifecycle_targets
   source   = "../../modules/canary_target"

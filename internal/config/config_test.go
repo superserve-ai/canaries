@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -239,6 +240,130 @@ func TestLoad(t *testing.T) {
 		t.Setenv("CANARY_RETAIN_FAILED_SANDBOX_TTL", "25h")
 		if _, err := Load("lifecycle"); err == nil {
 			t.Fatal("expected error")
+		}
+	})
+}
+
+func TestLoadTargetValidation(t *testing.T) {
+	uiBase := func() {
+		t.Setenv("CANARY_TARGET", "staging-us-central1")
+		t.Setenv("CANARY_ENVIRONMENT", "staging")
+		t.Setenv("CANARY_REGION", "us-central1")
+		t.Setenv("GCP_PROJECT_ID", "rayai-dev")
+		t.Setenv("CANARY_RUNTIME", "local")
+		t.Setenv("CANARY_METRICS_EXPORTER", "none")
+		t.Setenv("CANARY_LOCK_BACKEND", "none")
+	}
+
+	t.Run("valid env-region tuple accepted", func(t *testing.T) {
+		uiBase()
+		if _, err := Load("ui-lifecycle"); err != nil {
+			t.Fatalf("unexpected error for valid target: %v", err)
+		}
+	})
+
+	t.Run("malformed target without hyphen rejected", func(t *testing.T) {
+		uiBase()
+		t.Setenv("CANARY_TARGET", "prod")
+		if _, err := Load("ui-lifecycle"); err == nil {
+			t.Fatal("expected error for malformed target 'prod'")
+		}
+	})
+
+	t.Run("target environment part mismatch rejected", func(t *testing.T) {
+		uiBase()
+		t.Setenv("CANARY_TARGET", "production-us-central1")
+		t.Setenv("CANARY_ENVIRONMENT", "staging")
+		t.Setenv("CANARY_REGION", "us-central1")
+		if _, err := Load("ui-lifecycle"); err == nil {
+			t.Fatal("expected error when target environment part mismatches CANARY_ENVIRONMENT")
+		}
+	})
+
+	t.Run("target region part mismatch rejected", func(t *testing.T) {
+		uiBase()
+		t.Setenv("CANARY_TARGET", "staging-us-east4")
+		t.Setenv("CANARY_ENVIRONMENT", "staging")
+		t.Setenv("CANARY_REGION", "us-central1")
+		if _, err := Load("ui-lifecycle"); err == nil {
+			t.Fatal("expected error when target region part mismatches CANARY_REGION")
+		}
+	})
+
+	t.Run("lifecycle mode also validates target format", func(t *testing.T) {
+		t.Setenv("CANARY_TARGET", "invalid-target")
+		t.Setenv("CANARY_ENVIRONMENT", "staging")
+		t.Setenv("CANARY_REGION", "us-central1")
+		t.Setenv("GCP_PROJECT_ID", "rayai-dev")
+		t.Setenv("API_BASE_URL", "https://api-staging.superserve.ai")
+		t.Setenv("PREVIEW_DOMAIN", "staging-sandbox.superserve.ai")
+		t.Setenv("CANARY_API_KEY", "ss_test")
+		t.Setenv("CANARY_RUNTIME", "local")
+		t.Setenv("CANARY_METRICS_EXPORTER", "none")
+		if _, err := Load("lifecycle"); err == nil {
+			t.Fatal("expected lifecycle mode to reject invalid target format")
+		}
+	})
+}
+
+func TestUILifecycleCloudRunLockingAndTagging(t *testing.T) {
+	base := func() {
+		t.Setenv("CANARY_TARGET", "staging-us-central1")
+		t.Setenv("CANARY_ENVIRONMENT", "staging")
+		t.Setenv("CANARY_REGION", "us-central1")
+		t.Setenv("GCP_PROJECT_ID", "rayai-dev")
+		t.Setenv("CANARY_RUNTIME", "cloud-run")
+		t.Setenv("CANARY_METRICS_EXPORTER", "otlp")
+		t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "https://collector.example/v1/metrics")
+		t.Setenv("CANARY_API_KEY", "test-api-key")
+		t.Setenv("API_BASE_URL", "https://api-staging.superserve.ai")
+	}
+
+	t.Run("ui-lifecycle on cloud-run with lock=none rejected", func(t *testing.T) {
+		base()
+		t.Setenv("CANARY_LOCK_BACKEND", "none")
+		if _, err := Load("ui-lifecycle"); err == nil {
+			t.Fatal("expected error: ui-lifecycle on cloud-run requires gcs lock")
+		}
+	})
+
+	t.Run("ui-lifecycle on cloud-run missing CANARY_API_KEY rejected", func(t *testing.T) {
+		base()
+		t.Setenv("CANARY_LOCK_BACKEND", "gcs")
+		t.Setenv("LOCK_BUCKET", "canary-locks")
+		t.Setenv("CANARY_API_KEY", "")
+		if _, err := Load("ui-lifecycle"); err == nil || !strings.Contains(err.Error(), "requires CANARY_API_KEY") {
+			t.Fatalf("expected error requiring CANARY_API_KEY, got %v", err)
+		}
+	})
+
+	t.Run("ui-lifecycle on cloud-run missing API_BASE_URL rejected", func(t *testing.T) {
+		base()
+		t.Setenv("CANARY_LOCK_BACKEND", "gcs")
+		t.Setenv("LOCK_BUCKET", "canary-locks")
+		t.Setenv("API_BASE_URL", "")
+		if _, err := Load("ui-lifecycle"); err == nil || !strings.Contains(err.Error(), "requires API_BASE_URL") {
+			t.Fatalf("expected error requiring API_BASE_URL, got %v", err)
+		}
+	})
+
+	t.Run("ui-lifecycle on cloud-run with gcs lock, bucket, and api credentials accepted", func(t *testing.T) {
+		base()
+		t.Setenv("CANARY_LOCK_BACKEND", "gcs")
+		t.Setenv("LOCK_BUCKET", "canary-locks")
+		if _, err := Load("ui-lifecycle"); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("ui-lifecycle on local runtime allows missing API credentials", func(t *testing.T) {
+		t.Setenv("CANARY_RUNTIME", "local")
+		t.Setenv("CANARY_API_KEY", "")
+		t.Setenv("API_BASE_URL", "")
+		t.Setenv("CANARY_METRICS_EXPORTER", "none")
+		t.Setenv("CANARY_LOCK_BACKEND", "none")
+		if _, err := Load("ui-lifecycle"); err != nil {
+			t.Fatalf("unexpected error: %v", err)
 		}
 	})
 }

@@ -26,3 +26,14 @@ variable "create_alerts" {
   type        = bool
   default     = true
 }
+
+variable "ui_canary_image" {
+  type        = string
+  description = "Dedicated Playwright UI canary image"
+}
+
+variable "ui_scheduler_enabled" {
+  type        = bool
+  default     = true
+  description = "Enable the five-minute UI schedule after credentials and a manual run are verified"
+}
