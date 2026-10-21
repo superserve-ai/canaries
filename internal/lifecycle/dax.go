@@ -75,6 +75,20 @@ func (r Runner) runDax(ctx context.Context, runID string) (res RunResult) {
 	resources.SandboxID = sb.ID
 	res.SandboxID = sb.ID
 
+	// The row turns active just after create returns; file writes 409 until then.
+	logStep("create_wait_active")
+	if err := ops.WaitForStatusTimed(ctx, sb.ID, WaitForStatusOptions{
+		Want:         "active",
+		Step:         "create_wait_active",
+		PollInterval: r.Config.PollInterval,
+		Timeout:      r.Config.CommandTimeout,
+		Telemetry:    telemetry,
+	}); err != nil {
+		res.Err = fmt.Errorf("waiting for sandbox to become active: %w", err)
+		res.FailedStep = "create_wait_active"
+		return res
+	}
+
 	logStep("upload_dax_script")
 	if err := ops.WriteSandboxFileWithRetry(ctx, sb.ID, sb.AccessToken, daxScriptPath, daxScript); err != nil {
 		res.Err = fmt.Errorf("uploading dax script: %w", err)
