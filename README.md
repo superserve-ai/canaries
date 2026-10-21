@@ -21,6 +21,8 @@ The canary binary supports:
 - `lifecycle` (API lifecycle canary)
 - `template`
 - `snapshot`
+- `burst`
+- `dax`
 - `janitor` (API orphan cleanup)
 - `ui-lifecycle` (Headless browser UI lifecycle canary)
 
@@ -54,6 +56,13 @@ The snapshot canary runs every 15 minutes as its own Cloud Run Job with its own 
 5. deletes the fork, the snapshot, then the source
 
 Snapshots carry no metadata and outlive their sandbox, so the source keeps pointing at its snapshot until the snapshot is gone. A failed snapshot delete leaves the source in place, and the janitor deletes the snapshot before any stale sandbox that still names one.
+
+The `burst` and `dax` scenarios run the public [ComputeSDK benchmarks](https://github.com/computesdk/benchmarks) daily on each production target and post the result to Slack through the webhook in the `canary-benchmark-slack-webhook` secret (Terraform creates the container; add the webhook URL as a version).
+
+- `burst` creates `CANARY_BURST_SIZE` (default 100) sandboxes from `superserve/node-22` at once and times each from the create request until `node -v` succeeds. The score uses the benchmark's formula: trim the fastest and slowest 5%, score median/p95/p99 against a 10s ceiling with weights 0.60/0.25/0.15, and multiply by the success rate. The run fails if any sandbox fails.
+- `dax` runs the benchmark's own build script (vendored in `internal/lifecycle/benchmarks/`) in a sandbox from the 8 vCPU / 16 GiB `benchmark-dax-node22-8cpu-16gb` template, which the first run builds and later runs reuse. It reports each build phase: prepare, cache clear, Bun download and unpack, clone, install, typecheck.
+
+Numbers run lower than the public leaderboard for `burst`, since the job calls the API from inside Google Cloud rather than from the benchmark's runners. The canary team needs room for the burst (`max_sandboxes` above the burst size plus the other scenarios) and an 8 vCPU / 16 GiB template limit for `dax`.
 
 The janitor:
 1. lists canary-owned sandboxes and canary-named templates for the environment

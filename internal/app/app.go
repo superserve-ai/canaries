@@ -21,7 +21,7 @@ import (
 
 func Run(ctx context.Context, args []string) (err error) {
 	fs := flag.NewFlagSet("api-canary", flag.ContinueOnError)
-	mode := fs.String("mode", envDefault("CANARY_MODE", "lifecycle"), "lifecycle, template, snapshot, janitor, or ui-lifecycle")
+	mode := fs.String("mode", envDefault("CANARY_MODE", "lifecycle"), "lifecycle, template, snapshot, burst, dax, janitor, or ui-lifecycle")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -53,7 +53,7 @@ func Run(ctx context.Context, args []string) (err error) {
 	}()
 
 	switch cfg.Mode {
-	case config.ModeLifecycle, config.ModeTemplate, config.ModeSnapshot:
+	case config.ModeLifecycle, config.ModeTemplate, config.ModeSnapshot, config.ModeBurst, config.ModeDax:
 		httpClient := &http.Client{Timeout: cfg.HTTPTimeout}
 		apiClient := canaryapi.NewClient(httpClient, cfg.APIBaseURL, cfg.APIKey, cfg.PreviewDomain)
 

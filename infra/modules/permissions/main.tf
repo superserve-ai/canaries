@@ -69,3 +69,24 @@ resource "google_project_iam_member" "snapshot_service_usage_consumer" {
   role    = "roles/serviceusage.serviceUsageConsumer"
   member  = "serviceAccount:${var.snapshot_runtime_service_account_email}"
 }
+
+resource "google_storage_bucket_iam_member" "benchmark_lock_admin" {
+  for_each = var.benchmark_runtime_service_account_emails
+  bucket   = var.lock_bucket_name
+  role     = "roles/storage.objectAdmin"
+  member   = "serviceAccount:${each.value}"
+}
+
+resource "google_project_iam_member" "benchmark_metrics_writer" {
+  for_each = var.benchmark_runtime_service_account_emails
+  project  = var.project_id
+  role     = "roles/monitoring.metricWriter"
+  member   = "serviceAccount:${each.value}"
+}
+
+resource "google_project_iam_member" "benchmark_service_usage_consumer" {
+  for_each = var.benchmark_runtime_service_account_emails
+  project  = var.project_id
+  role     = "roles/serviceusage.serviceUsageConsumer"
+  member   = "serviceAccount:${each.value}"
+}

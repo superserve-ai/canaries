@@ -193,6 +193,93 @@ module "snapshot" {
   depends_on                = [google_project_iam_member.deployment_alerting]
 }
 
+# Daily runs of the public burst and dax benchmarks; each posts its result to
+# Slack. Terraform creates the webhook secret container only.
+resource "google_secret_manager_secret" "benchmark_slack_webhook" {
+  project   = var.project_id
+  secret_id = "canary-benchmark-slack-webhook"
+
+  replication {
+    auto {}
+  }
+
+  labels = local.labels
+}
+
+module "burst" {
+  for_each = local.lifecycle_targets
+  source   = "../../modules/canary_target"
+
+  scenario                  = "burst"
+  create_api_key_secret     = false
+  scheduler_cron            = "0 12 * * *"
+  job_timeout               = "900s"
+  run_timeout               = "10m"
+  lock_ttl                  = "15m"
+  missing_runs_window       = "25h"
+  extra_env                 = { HTTP_TIMEOUT = "2m" }
+  slack_webhook_secret_name = google_secret_manager_secret.benchmark_slack_webhook.secret_id
+  create_alerts             = var.create_alerts
+  project_id                = var.project_id
+  job_region                = each.value.job_region
+  target_name               = each.key
+  environment               = "production"
+  target_region             = each.value.target_region
+  api_base_url              = each.value.api_base_url
+  preview_domain            = each.value.preview_domain
+  image                     = var.image
+  api_key_secret_name       = module.lifecycle[each.key].api_key_secret_name
+  lock_bucket_name          = google_storage_bucket.locks.name
+  otlp_metrics_endpoint     = each.value.otlp_endpoint
+  retain_failed_sandbox     = local.retain_failed_sandbox
+  retain_failed_sandbox_ttl = local.retain_failed_sandbox_ttl
+  notification_channel_ids  = var.notification_channel_ids
+  labels                    = merge(local.labels, { region = each.value.target_region })
+  vpc_connector             = try(each.value.vpc_connector, null)
+  vpc_egress                = try(each.value.vpc_egress, "ALL_TRAFFIC")
+  vpc_network               = try(each.value.vpc_network, null)
+  vpc_subnetwork            = try(each.value.vpc_subnetwork, null)
+  vpc_tags                  = try(each.value.vpc_tags, [])
+  depends_on                = [google_project_iam_member.deployment_alerting]
+}
+
+module "dax" {
+  for_each = local.lifecycle_targets
+  source   = "../../modules/canary_target"
+
+  scenario                  = "dax"
+  create_api_key_secret     = false
+  scheduler_cron            = "30 12 * * *"
+  job_timeout               = "2700s"
+  run_timeout               = "40m"
+  lock_ttl                  = "45m"
+  missing_runs_window       = "25h"
+  extra_env                 = { HTTP_TIMEOUT = "11m" }
+  slack_webhook_secret_name = google_secret_manager_secret.benchmark_slack_webhook.secret_id
+  create_alerts             = var.create_alerts
+  project_id                = var.project_id
+  job_region                = each.value.job_region
+  target_name               = each.key
+  environment               = "production"
+  target_region             = each.value.target_region
+  api_base_url              = each.value.api_base_url
+  preview_domain            = each.value.preview_domain
+  image                     = var.image
+  api_key_secret_name       = module.lifecycle[each.key].api_key_secret_name
+  lock_bucket_name          = google_storage_bucket.locks.name
+  otlp_metrics_endpoint     = each.value.otlp_endpoint
+  retain_failed_sandbox     = local.retain_failed_sandbox
+  retain_failed_sandbox_ttl = local.retain_failed_sandbox_ttl
+  notification_channel_ids  = var.notification_channel_ids
+  labels                    = merge(local.labels, { region = each.value.target_region })
+  vpc_connector             = try(each.value.vpc_connector, null)
+  vpc_egress                = try(each.value.vpc_egress, "ALL_TRAFFIC")
+  vpc_network               = try(each.value.vpc_network, null)
+  vpc_subnetwork            = try(each.value.vpc_subnetwork, null)
+  vpc_tags                  = try(each.value.vpc_tags, [])
+  depends_on                = [google_project_iam_member.deployment_alerting]
+}
+
 module "janitor" {
   for_each = local.lifecycle_targets
   source   = "../../modules/janitor"
@@ -237,6 +324,10 @@ module "permissions" {
   janitor_runtime_service_account_email   = module.janitor[each.key].runtime_service_account_email
   template_runtime_service_account_email  = module.template[each.key].runtime_service_account_email
   snapshot_runtime_service_account_email  = module.snapshot[each.key].runtime_service_account_email
+  benchmark_runtime_service_account_emails = {
+    burst = module.burst[each.key].runtime_service_account_email
+    dax   = module.dax[each.key].runtime_service_account_email
+  }
 }
 
 resource "google_project_iam_member" "deployment_alerting" {

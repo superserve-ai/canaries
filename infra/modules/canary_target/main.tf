@@ -5,8 +5,8 @@ locals {
   name_suffix         = var.scenario == "lifecycle" ? "" : "-${var.scenario}"
   lifecycle_job_name  = "api-canary${local.name_suffix}-${var.target_name}"
   scheduler_name      = "api-canary${local.name_suffix}-schedule-${var.target_name}"
-  runtime_sa_prefix   = { lifecycle = "apicn", template = "apicnt", snapshot = "apicnsnap" }[var.scenario]
-  scheduler_sa_prefix = { lifecycle = "apicns", template = "apicnts", snapshot = "apicnsnaps" }[var.scenario]
+  runtime_sa_prefix   = { lifecycle = "apicn", template = "apicnt", snapshot = "apicnsnap", burst = "apicnb", dax = "apicnd" }[var.scenario]
+  scheduler_sa_prefix = { lifecycle = "apicns", template = "apicnts", snapshot = "apicnsnaps", burst = "apicnbs", dax = "apicnds" }[var.scenario]
   api_key_secret_id   = var.create_api_key_secret ? google_secret_manager_secret.api_key[0].secret_id : var.api_key_secret_name
   lifecycle_run_logs_query = format(
     "resource.type%%3D%%22cloud_run_job%%22%%0Aresource.labels.job_name%%3D%%22%s%%22%%0Alabels.%%22run.googleapis.com/execution_name%%22%%3D%%22$${log.extracted_label.execution_name}%%22",
@@ -63,6 +63,14 @@ resource "google_secret_manager_secret_iam_member" "runtime_accessor" {
   member    = "serviceAccount:${google_service_account.runtime.email}"
 }
 
+resource "google_secret_manager_secret_iam_member" "slack_webhook_accessor" {
+  count     = var.slack_webhook_secret_name != "" ? 1 : 0
+  project   = var.project_id
+  secret_id = var.slack_webhook_secret_name
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.runtime.email}"
+}
+
 resource "google_cloud_run_v2_job" "lifecycle" {
   project             = var.project_id
   name                = local.lifecycle_job_name
@@ -70,7 +78,8 @@ resource "google_cloud_run_v2_job" "lifecycle" {
   labels              = local.labels
   deletion_protection = false
   depends_on = [
-    google_secret_manager_secret_iam_member.runtime_accessor
+    google_secret_manager_secret_iam_member.runtime_accessor,
+    google_secret_manager_secret_iam_member.slack_webhook_accessor,
   ]
 
   template {
@@ -189,6 +198,27 @@ resource "google_cloud_run_v2_job" "lifecycle" {
         env {
           name  = "MANUAL_STAGING_OPT_IN"
           value = tostring(var.manual_staging_opt_in)
+        }
+        dynamic "env" {
+          for_each = var.extra_env
+
+          content {
+            name  = env.key
+            value = env.value
+          }
+        }
+        dynamic "env" {
+          for_each = var.slack_webhook_secret_name != "" ? [var.slack_webhook_secret_name] : []
+
+          content {
+            name = "CANARY_SLACK_WEBHOOK_URL"
+            value_source {
+              secret_key_ref {
+                secret  = env.value
+                version = "latest"
+              }
+            }
+          }
         }
         env {
           name = "CANARY_API_KEY"
