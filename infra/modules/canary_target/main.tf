@@ -250,7 +250,7 @@ resource "google_cloud_scheduler_job" "lifecycle" {
   name        = local.scheduler_name
   description = "Runs API ${var.scenario} canary for ${var.target_name}"
   schedule    = var.scheduler_cron
-  time_zone   = "Etc/UTC"
+  time_zone   = var.scheduler_time_zone
 
   http_target {
     uri         = "https://run.googleapis.com/v2/projects/${var.project_id}/locations/${var.job_region}/jobs/${google_cloud_run_v2_job.lifecycle.name}:run"

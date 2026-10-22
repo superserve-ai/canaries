@@ -62,6 +62,11 @@ variable "scheduler_cron" {
   default = "*/5 * * * *"
 }
 
+variable "scheduler_time_zone" {
+  type    = string
+  default = "Etc/UTC"
+}
+
 variable "scheduler_enabled" {
   type    = bool
   default = true
