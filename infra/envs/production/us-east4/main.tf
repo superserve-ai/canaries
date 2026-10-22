@@ -155,7 +155,7 @@ module "burst" {
   job_timeout               = "900s"
   run_timeout               = "10m"
   lock_ttl                  = "15m"
-  missing_runs_window       = "25h"
+  missing_runs_window       = "27h"
   extra_env                 = { HTTP_TIMEOUT = "2m" }
   slack_webhook_secret_name = local.benchmark_slack_webhook_secret_name
   create_alerts             = var.create_alerts
@@ -191,7 +191,7 @@ module "dax" {
   job_timeout               = "2700s"
   run_timeout               = "40m"
   lock_ttl                  = "45m"
-  missing_runs_window       = "25h"
+  missing_runs_window       = "27h"
   extra_env                 = { HTTP_TIMEOUT = "11m" }
   slack_webhook_secret_name = local.benchmark_slack_webhook_secret_name
   create_alerts             = var.create_alerts
