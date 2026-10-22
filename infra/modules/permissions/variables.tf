@@ -23,3 +23,9 @@ variable "snapshot_runtime_service_account_email" {
   type    = string
   default = ""
 }
+
+variable "benchmark_runtime_service_account_emails" {
+  type        = map(string)
+  default     = {}
+  description = "Runtime service accounts of the benchmark scenarios, keyed by scenario"
+}

@@ -111,8 +111,8 @@ variable "scenario" {
   default = "lifecycle"
 
   validation {
-    condition     = contains(["lifecycle", "template", "snapshot"], var.scenario)
-    error_message = "scenario must be lifecycle, template, or snapshot"
+    condition     = contains(["lifecycle", "template", "snapshot", "burst", "dax"], var.scenario)
+    error_message = "scenario must be lifecycle, template, snapshot, burst, or dax"
   }
 }
 
@@ -139,4 +139,15 @@ variable "lock_ttl" {
 variable "missing_runs_window" {
   type    = string
   default = "15m"
+}
+
+variable "extra_env" {
+  type    = map(string)
+  default = {}
+}
+
+variable "slack_webhook_secret_name" {
+  type        = string
+  default     = ""
+  description = "Secret holding a Slack incoming webhook; the run posts its benchmark summary there"
 }

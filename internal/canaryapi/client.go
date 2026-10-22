@@ -90,6 +90,9 @@ type BuildSpec struct {
 
 type CreateTemplateRequest struct {
 	Name      string    `json:"name"`
+	Vcpu      int       `json:"vcpu,omitempty"`
+	MemoryMib int       `json:"memory_mib,omitempty"`
+	DiskMib   int       `json:"disk_mib,omitempty"`
 	BuildSpec BuildSpec `json:"build_spec"`
 }
 

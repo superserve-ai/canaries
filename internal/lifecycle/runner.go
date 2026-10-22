@@ -16,6 +16,7 @@ import (
 	"github.com/superserve-ai/canaries/internal/lock"
 	"github.com/superserve-ai/canaries/internal/metrics"
 	"github.com/superserve-ai/canaries/internal/sandboxmetadata"
+	"github.com/superserve-ai/canaries/internal/slack"
 )
 
 type Runner struct {
@@ -44,6 +45,8 @@ type RunResult struct {
 	BuildError string
 	SnapshotID string
 	ForkID     string
+	// Report is the benchmark summary posted to Slack, success or failure.
+	Report string
 }
 
 type ExecValidationError struct {
@@ -84,6 +87,13 @@ func (r Runner) operations() Operations {
 	}
 }
 
+func (r Runner) httpClient() *http.Client {
+	if r.HTTP != nil {
+		return r.HTTP
+	}
+	return http.DefaultClient
+}
+
 func (r Runner) telemetry() TelemetryContext {
 	return TelemetryContext{
 		Environment: r.Config.Environment,
@@ -95,7 +105,7 @@ func (r Runner) telemetry() TelemetryContext {
 
 func (r Runner) scenario() string {
 	switch r.Config.Mode {
-	case config.ModeTemplate, config.ModeSnapshot:
+	case config.ModeTemplate, config.ModeSnapshot, config.ModeBurst, config.ModeDax:
 		return string(r.Config.Mode)
 	}
 	return "lifecycle"
@@ -124,6 +134,7 @@ type Client interface {
 	CreateTemplate(context.Context, canaryapi.CreateTemplateRequest) (canaryapi.Template, error)
 	GetTemplateBuild(context.Context, string, string) (canaryapi.TemplateBuild, error)
 	DeleteTemplate(context.Context, string) error
+	ListTemplates(context.Context, map[string]string) ([]canaryapi.Template, error)
 	CreateSnapshot(context.Context, string, canaryapi.CreateSnapshotRequest) (canaryapi.Snapshot, error)
 	GetSnapshot(context.Context, string) (canaryapi.Snapshot, error)
 	DeleteSnapshot(context.Context, string) error
@@ -172,6 +183,10 @@ func (r Runner) Run(ctx context.Context) error {
 		runResult = r.runTemplate(ctx, runID)
 	case config.ModeSnapshot:
 		runResult = r.runSnapshot(ctx, runID)
+	case config.ModeBurst:
+		runResult = r.runBurst(ctx, runID)
+	case config.ModeDax:
+		runResult = r.runDax(ctx, runID)
 	default:
 		runResult = r.runLifecycle(ctx, runID)
 	}
@@ -180,6 +195,11 @@ func (r Runner) Run(ctx context.Context) error {
 		result = "success"
 	}
 	duration := r.Clock().Sub(start)
+	if runResult.Report != "" && r.Config.SlackWebhookURL != "" {
+		if err := slack.Post(context.Background(), r.httpClient(), r.Config.SlackWebhookURL, runResult.Report); err != nil {
+			log.Warn().Err(err).Str("run_id", runID).Msg("slack post failed")
+		}
+	}
 	r.Metrics.RecordRun(ctx, r.Config.Environment, r.Config.Region, r.Config.Target, scenario, result, duration)
 
 	if err != nil {

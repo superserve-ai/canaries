@@ -23,6 +23,8 @@ const (
 	ModeTemplate    Mode = "template"
 	ModeSnapshot    Mode = "snapshot"
 	ModeUILifecycle Mode = "ui-lifecycle"
+	ModeBurst       Mode = "burst"
+	ModeDax         Mode = "dax"
 
 	RuntimeLocal    Runtime = "local"
 	RuntimeCloudRun Runtime = "cloud-run"
@@ -68,6 +70,8 @@ type Config struct {
 	DeleteTimeout                   time.Duration
 	PreviewTimeout                  time.Duration
 	JanitorThreshold                time.Duration
+	BurstSize                       int
+	SlackWebhookURL                 string
 }
 
 type metricsConfig struct {
@@ -79,7 +83,7 @@ func Load(rawMode string) (Config, error) {
 	loadDotEnv()
 
 	mode := Mode(strings.TrimSpace(rawMode))
-	if mode != ModeLifecycle && mode != ModeJanitor && mode != ModeTemplate && mode != ModeSnapshot && mode != ModeUILifecycle {
+	if mode != ModeLifecycle && mode != ModeJanitor && mode != ModeTemplate && mode != ModeSnapshot && mode != ModeUILifecycle && mode != ModeBurst && mode != ModeDax {
 		return Config{}, fmt.Errorf("invalid mode %q", rawMode)
 	}
 
@@ -170,6 +174,8 @@ func Load(rawMode string) (Config, error) {
 		DeleteTimeout:                   getenvDuration("DELETE_TIMEOUT", 45*time.Second),
 		PreviewTimeout:                  getenvDuration("PREVIEW_TIMEOUT", 20*time.Second),
 		JanitorThreshold:                getenvDuration("JANITOR_STALE_THRESHOLD", 1*time.Hour),
+		BurstSize:                       getenvInt("CANARY_BURST_SIZE", 100),
+		SlackWebhookURL:                 strings.TrimSpace(os.Getenv("CANARY_SLACK_WEBHOOK_URL")),
 		Metrics: metricsConfig{
 			ServiceName: envDefault("OTEL_SERVICE_NAME", "superserve-api-canary"),
 			Environment: envDefault("OTEL_ENVIRONMENT", environment),

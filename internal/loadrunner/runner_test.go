@@ -294,3 +294,7 @@ func (f *fakeLoadClient) GetSnapshot(context.Context, string) (canaryapi.Snapsho
 }
 
 func (f *fakeLoadClient) DeleteSnapshot(context.Context, string) error { return errors.New("not used") }
+
+func (f *fakeLoadClient) ListTemplates(context.Context, map[string]string) ([]canaryapi.Template, error) {
+	return nil, errors.New("not used")
+}

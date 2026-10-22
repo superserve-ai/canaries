@@ -1135,3 +1135,7 @@ func (f *fakeClient) DeleteSnapshot(ctx context.Context, id string) error {
 	}
 	return f.deleteSnapshotFn(ctx, id)
 }
+
+func (f *fakeClient) ListTemplates(context.Context, map[string]string) ([]canaryapi.Template, error) {
+	return nil, nil
+}
