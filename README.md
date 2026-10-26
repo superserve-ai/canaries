@@ -42,7 +42,7 @@ Per run it:
 
 The template canary runs hourly as its own Cloud Run Job with its own lock and alerts. Per run it:
 1. creates a template whose single build step writes the run token to `/opt/canary/build-token`
-2. polls the build until it is ready, failed, or cancelled
+2. polls the build until it is ready, failed, or cancelled; a status poll that hits a connection reset, EOF, timeout, or 502/503/504 is retried up to four times with short backoff inside the run deadline before the run fails
 3. creates a sandbox from the template and reads the token back, which proves the build steps ran
 4. deletes the sandbox, then the template
 
