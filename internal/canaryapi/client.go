@@ -233,8 +233,11 @@ func (c *Client) PauseSandbox(ctx context.Context, id string) error {
 }
 
 func (c *Client) DeleteSandbox(ctx context.Context, id string) error {
+	if err := c.doNoContent(ctx, http.MethodDelete, "/sandboxes/"+url.PathEscape(id)); err != nil {
+		return err
+	}
 	c.routingHints.Delete(id)
-	return c.doNoContent(ctx, http.MethodDelete, "/sandboxes/"+url.PathEscape(id))
+	return nil
 }
 
 func (c *Client) ResumeSandbox(ctx context.Context, id string) (ResumeResponse, error) {
