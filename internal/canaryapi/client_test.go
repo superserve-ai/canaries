@@ -228,3 +228,48 @@ func TestDeleteSnapshotAcceptsDeferredDelete(t *testing.T) {
 		t.Fatalf("a deferred delete is a success, got %v", err)
 	}
 }
+
+func TestDataPlaneRequestsSendLatestRoutingHint(t *testing.T) {
+	t.Parallel()
+
+	var execHints []string
+	httpClient := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		status, body := http.StatusOK, `{}`
+		switch req.URL.Host + req.URL.Path {
+		case "api.example/sandboxes":
+			status, body = http.StatusCreated, `{"id":"sb-123","access_token":"t","routing_hint":"hint-create"}`
+		case "api.example/sandboxes/sb-123/resume":
+			body = `{"id":"sb-123","access_token":"t","routing_hint":"hint-resume"}`
+		case "preview.example/exec":
+			execHints = append(execHints, req.Header.Get("X-Superserve-Routing-Hint"))
+			body = `{"exit_code":0}`
+		case "api.example/sandboxes/sb-123":
+			return &http.Response{StatusCode: http.StatusNoContent, Body: io.NopCloser(strings.NewReader("")), Header: make(http.Header), Request: req}, nil
+		}
+		return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header), Request: req}, nil
+	})}
+	client := NewClient(httpClient, "https://api.example", "api-key", "preview.example")
+	ctx := context.Background()
+	exec := func() {
+		t.Helper()
+		if _, err := client.Exec(ctx, "sb-123", "t", ExecRequest{Command: "true"}); err != nil {
+			t.Fatalf("Exec returned %v", err)
+		}
+	}
+
+	if _, err := client.CreateSandbox(ctx, CreateSandboxRequest{Name: "example"}); err != nil {
+		t.Fatalf("CreateSandbox returned %v", err)
+	}
+	exec()
+	if _, err := client.ResumeSandbox(ctx, "sb-123"); err != nil {
+		t.Fatalf("ResumeSandbox returned %v", err)
+	}
+	exec()
+	if err := client.DeleteSandbox(ctx, "sb-123"); err != nil {
+		t.Fatalf("DeleteSandbox returned %v", err)
+	}
+	exec()
+	if want := []string{"hint-create", "hint-resume", ""}; strings.Join(execHints, ",") != strings.Join(want, ",") {
+		t.Fatalf("exec routing hints = %q, want %q", execHints, want)
+	}
+}
