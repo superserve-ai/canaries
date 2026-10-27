@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -18,6 +19,9 @@ type Client struct {
 	baseURL       string
 	apiKey        string
 	previewDomain string
+	// routingHints holds the latest signed hint per sandbox, as the SDK does,
+	// so data-plane requests route directly instead of via an ownership lookup.
+	routingHints sync.Map
 }
 
 func NewClient(httpClient *http.Client, baseURL, apiKey, previewDomain string) *Client {
@@ -34,6 +38,7 @@ type Sandbox struct {
 	Name             string            `json:"name"`
 	Status           string            `json:"status"`
 	AccessToken      string            `json:"access_token"`
+	RoutingHint      string            `json:"routing_hint,omitempty"`
 	Metadata         map[string]string `json:"metadata"`
 	AutoDeleteAt     *time.Time        `json:"auto_delete_at"`
 	TimeoutSeconds   *int              `json:"timeout_seconds,omitempty"`
@@ -77,6 +82,7 @@ type ResumeResponse struct {
 	ID          string `json:"id"`
 	Status      string `json:"status"`
 	AccessToken string `json:"access_token"`
+	RoutingHint string `json:"routing_hint,omitempty"`
 }
 
 type BuildStep struct {
@@ -145,6 +151,7 @@ func (e *HTTPStatusError) Error() string {
 func (c *Client) CreateSandbox(ctx context.Context, req CreateSandboxRequest) (Sandbox, error) {
 	var out Sandbox
 	err := c.doJSON(ctx, http.MethodPost, "/sandboxes", req, &out)
+	c.rememberRoutingHint(out.ID, out.RoutingHint)
 	return out, err
 }
 
@@ -226,13 +233,30 @@ func (c *Client) PauseSandbox(ctx context.Context, id string) error {
 }
 
 func (c *Client) DeleteSandbox(ctx context.Context, id string) error {
-	return c.doNoContent(ctx, http.MethodDelete, "/sandboxes/"+url.PathEscape(id))
+	if err := c.doNoContent(ctx, http.MethodDelete, "/sandboxes/"+url.PathEscape(id)); err != nil {
+		return err
+	}
+	c.routingHints.Delete(id)
+	return nil
 }
 
 func (c *Client) ResumeSandbox(ctx context.Context, id string) (ResumeResponse, error) {
 	var out ResumeResponse
 	err := c.doJSON(ctx, http.MethodPost, "/sandboxes/"+url.PathEscape(id)+"/resume", map[string]any{}, &out)
+	c.rememberRoutingHint(id, out.RoutingHint)
 	return out, err
+}
+
+func (c *Client) rememberRoutingHint(sandboxID, hint string) {
+	if sandboxID != "" && hint != "" {
+		c.routingHints.Store(sandboxID, hint)
+	}
+}
+
+func (c *Client) setRoutingHint(req *http.Request, sandboxID string) {
+	if hint, ok := c.routingHints.Load(sandboxID); ok {
+		req.Header.Set("X-Superserve-Routing-Hint", hint.(string))
+	}
 }
 
 func (c *Client) UpdateSandbox(ctx context.Context, id string, req UpdateSandboxRequest) error {
@@ -278,6 +302,7 @@ func (c *Client) Exec(ctx context.Context, sandboxID, accessToken string, req Ex
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("X-Access-Token", accessToken)
 	httpReq.Header.Set("X-Superserve-Sandbox-Id", sandboxID)
+	c.setRoutingHint(httpReq, sandboxID)
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
 		return out, err
@@ -307,6 +332,7 @@ func (c *Client) WriteFile(ctx context.Context, sandboxID, accessToken, path str
 	req.Header.Set("Content-Type", "application/octet-stream")
 	req.Header.Set("X-Access-Token", accessToken)
 	req.Header.Set("X-Superserve-Sandbox-Id", sandboxID)
+	c.setRoutingHint(req, sandboxID)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return err
