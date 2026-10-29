@@ -146,6 +146,12 @@ variable "missing_runs_window" {
   default = "15m"
 }
 
+variable "missing_runs_duration" {
+  type        = string
+  default     = "600s"
+  description = "How long the missing-run condition must hold before it pages; a single empty evaluation is not a stalled canary"
+}
+
 variable "extra_env" {
   type    = map(string)
   default = {}
