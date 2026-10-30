@@ -20,23 +20,21 @@ import (
 	"github.com/superserve-ai/canaries/internal/config"
 	"github.com/superserve-ai/canaries/internal/lock"
 	"github.com/superserve-ai/canaries/internal/metrics"
-	"github.com/superserve-ai/canaries/internal/sandboxmetadata"
 )
 
-// SandboxTagger is an optional dependency for tagging sandbox ownership metadata
-// via the API immediately after the sandbox ID is recovered from the browser URL.
-// This ensures the janitor can discover and reap sandboxes that leak if a run
-// crashes before reaching the delete step.
+// SandboxTagger verifies regional ownership after browser ID discovery.
+// Creation-time metadata already makes the sandbox discoverable by the janitor.
 type SandboxTagger interface {
 	TagSandbox(ctx context.Context, sandboxID string, metadata map[string]string) error
 }
 
 type Runner struct {
-	Config  Config
-	Locker  lock.Lock
-	Metrics metrics.Provider
-	Clock   func() time.Time
-	Tagger  SandboxTagger // optional; if nil, metadata tagging is skipped
+	Config   Config
+	Locker   lock.Lock
+	Metrics  metrics.Provider
+	Clock    func() time.Time
+	Tagger   SandboxTagger
+	Recovery SandboxRecovery
 }
 
 type RunResult struct {
@@ -371,7 +369,8 @@ func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) 
 		return r.deleteSandboxInUI(cleanupCtx, cleanupPage, id, name, stepTimeoutMs)
 	}
 
-	// Guaranteed deferred cleanup if sandbox was created but not successfully deleted
+	creationMetadata := r.creationMetadata(runID)
+	// Recover by durable run ownership even if the browser never discovers an ID.
 	defer func() {
 		cleanupMu.Lock()
 		idToClean := createdSandboxID
@@ -379,13 +378,22 @@ func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) 
 		isDel := sandboxDeleted
 		cleanupMu.Unlock()
 
-		if idToClean != "" && !isDel {
+		if isDel || nameToClean == "" {
+			return
+		}
+		if idToClean != "" {
 			log.Info().Str("sandbox_id", idToClean).Str("sandbox_name", nameToClean).Msg("executing deferred sandbox cleanup on failure/exit")
 			if err := cleanupSandbox(idToClean, nameToClean); err != nil {
 				log.Error().Err(err).Str("sandbox_id", idToClean).Msg("deferred UI cleanup failed; sandbox may require janitor recovery")
 			} else {
 				log.Info().Str("sandbox_id", idToClean).Msg("deferred UI cleanup completed")
+				return
 			}
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), stepTimeout)
+		defer cancel()
+		if err := r.recoverSandbox(cleanupCtx, nameToClean, creationMetadata); err != nil {
+			log.Error().Err(err).Str("sandbox_name", nameToClean).Msg("API cleanup could not confirm recovery; ownership tags and safety timeout remain")
 		}
 	}()
 
@@ -412,12 +420,12 @@ func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) 
 
 	createStart := r.now()
 	log.Info().Msg("UI step: create_sandbox")
-	sandboxName := fmt.Sprintf("ui-canary-%d", r.now().Unix())
+	sandboxName := "ui-canary-" + runID
 	cleanupMu.Lock()
 	createdSandboxName = sandboxName
 	cleanupMu.Unlock()
 
-	sbID, err := r.createSandboxInUI(ctx, page, sandboxName, stepTimeoutMs, func(id string) {
+	sbID, err := r.createSandboxInUI(ctx, page, sandboxName, creationMetadata, stepTimeoutMs, func(id string) {
 		setCreatedID(id)
 	})
 	activeID := getCreatedID()
@@ -452,11 +460,7 @@ func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) 
 	// synchronously and abort the canary run to prevent orphaned unowned sandboxes.
 	if r.Tagger != nil && activeID != "" {
 		tagStart := r.now()
-		tagMeta := sandboxmetadata.LegacyCanaryMetadata(
-			env, region, target, runID,
-			r.now(),
-			r.now().Add(r.Config.BaseConfig.RetainFailedSandboxTTL),
-		)
+		tagMeta := creationMetadata
 		var tagErr error
 		const maxTagAttempts = 3
 		for attempt := 1; attempt <= maxTagAttempts; attempt++ {
@@ -561,7 +565,7 @@ func (r Runner) runLifecycle(ctx context.Context, runID string) (res RunResult) 
 	return res
 }
 
-func (r Runner) createSandboxInUI(ctx context.Context, page playwright.Page, sandboxName string, timeoutMs float64, onIDDiscovered func(string)) (string, error) {
+func (r Runner) createSandboxInUI(ctx context.Context, page playwright.Page, sandboxName string, metadata map[string]string, timeoutMs float64, onIDDiscovered func(string)) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
@@ -612,6 +616,10 @@ func (r Runner) createSandboxInUI(ctx context.Context, page playwright.Page, san
 	_ = nameInput.Fill("")
 	_ = nameInput.Fill(sandboxName)
 
+	if err := r.configureCreationSafety(page, metadata); err != nil {
+		return "", err
+	}
+
 	// Wait for Create Sandbox submit button inside dialog
 	submitDialogBtn := page.Locator("div[role='dialog'] button:has-text('Create Sandbox'), .dialog-popup button:has-text('Create Sandbox'), button:has-text('Create Sandbox')").Last()
 	if err := submitDialogBtn.WaitFor(playwright.LocatorWaitForOptions{
@@ -652,12 +660,16 @@ func (r Runner) createSandboxInUI(ctx context.Context, page playwright.Page, san
 			if isCreateEndpoint && resObj.Request().Method() == "POST" {
 				if resObj.Status() >= 200 && resObj.Status() < 300 {
 					body, err := resObj.Body()
-					if err == nil {
+					if err != nil {
+						log.Warn().Err(err).Int("status", resObj.Status()).Msg("could not read sandbox create response; falling back to UI discovery")
+					} else {
 						var data struct {
 							ID string `json:"id"`
 						}
 						if err := json.Unmarshal(body, &data); err == nil && data.ID != "" {
 							tracker.Set(data.ID)
+						} else {
+							log.Warn().Msg("sandbox create response had no readable ID; falling back to UI discovery")
 						}
 					}
 				} else if resObj.Status() >= 400 {
