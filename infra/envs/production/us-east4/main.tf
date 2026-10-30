@@ -156,6 +156,7 @@ module "burst" {
   run_timeout               = "10m"
   lock_ttl                  = "15m"
   missing_runs_window       = "27h"
+  missing_runs_duration     = "0s" # lookback plus retest window must be at most 25h
   extra_env                 = { HTTP_TIMEOUT = "2m" }
   slack_webhook_secret_name = local.benchmark_slack_webhook_secret_name
   create_alerts             = var.create_alerts
@@ -192,6 +193,7 @@ module "dax" {
   run_timeout               = "40m"
   lock_ttl                  = "45m"
   missing_runs_window       = "27h"
+  missing_runs_duration     = "0s" # lookback plus retest window must be at most 25h
   extra_env                 = { HTTP_TIMEOUT = "11m" }
   slack_webhook_secret_name = local.benchmark_slack_webhook_secret_name
   create_alerts             = var.create_alerts
