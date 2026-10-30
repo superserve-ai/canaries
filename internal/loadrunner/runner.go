@@ -167,6 +167,11 @@ func (r Runner) runOne(ctx context.Context, operation int) (result operationResu
 		err = &lifecycleFailure{stage: "verify_exec", sandboxID: sb.ID, err: execErr}
 		return
 	}
+	if res.ExitCode != 0 {
+		r.Ops.RecordStep(ctx, telemetry, "verify_exec", "failure", result.ExecDuration)
+		err = &lifecycleFailure{stage: "verify_exec", sandboxID: sb.ID, err: fmt.Errorf("exec command failed: exit=%d", res.ExitCode)}
+		return
+	}
 	if res.Stdout != "superserve-load-test" {
 		r.Ops.RecordStep(ctx, telemetry, "verify_exec", "failure", result.ExecDuration)
 		err = &lifecycleFailure{stage: "verify_exec", sandboxID: sb.ID, err: fmt.Errorf("unexpected exec output %q", res.Stdout)}
