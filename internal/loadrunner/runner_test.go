@@ -15,17 +15,19 @@ import (
 )
 
 type fakeLoadClient struct {
-	mu          sync.Mutex
-	created     []canaryapi.CreateSandboxRequest
-	deleted     []string
-	active      int
-	maxActive   int
-	deleteErr   error
-	createDelay time.Duration
-	status      string
-	execStdout  string
-	statusCalls map[string]int
-	waited      map[string]bool
+	mu           sync.Mutex
+	created      []canaryapi.CreateSandboxRequest
+	deleted      []string
+	active       int
+	maxActive    int
+	deleteErr    error
+	createDelay  time.Duration
+	status       string
+	execStdout   string
+	execExitCode int
+	execErr      error
+	statusCalls  map[string]int
+	waited       map[string]bool
 }
 
 func (f *fakeLoadClient) CreateSandbox(_ context.Context, req canaryapi.CreateSandboxRequest) (canaryapi.Sandbox, error) {
@@ -85,7 +87,7 @@ func (f *fakeLoadClient) Exec(_ context.Context, id string, _ string, req canary
 	if stdout == "" {
 		stdout = "superserve-load-test"
 	}
-	return canaryapi.ExecResult{Stdout: stdout, ExitCode: 0}, nil
+	return canaryapi.ExecResult{Stdout: stdout, ExitCode: f.execExitCode}, f.execErr
 }
 func (*fakeLoadClient) PauseSandbox(context.Context, string) error { return nil }
 func (*fakeLoadClient) ResumeSandbox(context.Context, string) (canaryapi.ResumeResponse, error) {
@@ -210,25 +212,82 @@ func TestRunnerReturnsWaitActiveFailureAndDeletesCreatedSandbox(t *testing.T) {
 	}
 }
 
-func TestRunnerRecordsFailedVerifyExecWhenStdoutMismatch(t *testing.T) {
-	client := &fakeLoadClient{execStdout: "unexpected"}
-	metrics := &loadMetricsRecorder{}
-	cfg := testRunnerConfig()
-	cfg.Operations = 1
-	cfg.Concurrency = 1
-
-	summary, err := (Runner{Config: cfg, Ops: lifecycle.Operations{Client: client, Metrics: metrics}, Clock: time.Now}).Run(context.Background())
-	if err == nil || summary.Failed != 1 || summary.Completed != 0 {
-		t.Fatalf("unexpected result: summary=%+v err=%v", summary, err)
-	}
-	if got := metrics.stepResult("verify_exec"); got != "failure" {
-		t.Fatalf("verify_exec telemetry result = %q, want failure", got)
+func TestRunnerVerifyExec(t *testing.T) {
+	transportErr := errors.New("exec unavailable")
+	deleteErr := errors.New("delete unavailable")
+	for _, tt := range []struct {
+		name      string
+		stdout    string
+		exitCode  int
+		execErr   error
+		deleteErr error
+		wantError string
+	}{
+		{name: "success", stdout: "superserve-load-test"},
+		{name: "nonzero exit with expected stdout", stdout: "superserve-load-test", exitCode: 42, wantError: "exec command failed: exit=42"},
+		{name: "stdout mismatch", stdout: "unexpected", wantError: `unexpected exec output "unexpected"`},
+		{name: "transport error", execErr: transportErr, wantError: "exec unavailable"},
+		{name: "canceled exec", execErr: context.Canceled, wantError: "context canceled"},
+		{name: "nonzero exit and cleanup failure", exitCode: 42, deleteErr: deleteErr, wantError: "exec command failed: exit=42"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, runSummary := range []bool{false, true} {
+				name := "lifecycle"
+				if runSummary {
+					name = "summary"
+				}
+				t.Run(name, func(t *testing.T) {
+					client := &fakeLoadClient{execStdout: tt.stdout, execExitCode: tt.exitCode, execErr: tt.execErr, deleteErr: tt.deleteErr}
+					recorder := &loadMetricsRecorder{}
+					cfg := testRunnerConfig()
+					cfg.Operations = 1
+					cfg.Concurrency = 1
+					runner := Runner{Config: cfg, Ops: lifecycle.Operations{Client: client, Metrics: recorder}}
+					wantFailure := tt.wantError != ""
+					if runSummary {
+						summary, err := runner.Run(context.Background())
+						want := Summary{Started: 1, Completed: 1}
+						if wantFailure {
+							want.Completed, want.Failed = 0, 1
+						}
+						if (err != nil) != wantFailure || summary != want {
+							t.Fatalf("Run = (%+v, %v), want summary %+v, failure %v", summary, err, want, wantFailure)
+						}
+					} else {
+						result, err := runner.runOne(context.Background(), 0)
+						if wantFailure {
+							var failure *lifecycleFailure
+							if !errors.As(err, &failure) || failure.stage != "verify_exec" || failure.sandboxID != result.SandboxID || failure.Error() != tt.wantError {
+								t.Fatalf("unexpected verification failure: result=%+v err=%v", result, err)
+							}
+							for _, cause := range []error{tt.execErr, tt.deleteErr} {
+								if cause != nil && !errors.Is(err, cause) {
+									t.Fatalf("error %v does not preserve cause %v", err, cause)
+								}
+							}
+						} else if err != nil {
+							t.Fatalf("runOne returned %v", err)
+						}
+					}
+					if len(client.created) != 1 || len(client.deleted) != 1 || client.deleted[0] != client.created[0].Name {
+						t.Fatalf("cleanup did not delete the created sandbox: created=%v deleted=%v", client.created, client.deleted)
+					}
+					wantResult := "success"
+					if wantFailure {
+						wantResult = "failure"
+					}
+					if got := recorder.stepResults("verify_exec"); len(got) != 1 || got[0] != wantResult {
+						t.Fatalf("verify_exec telemetry = %v, want exactly one %s", got, wantResult)
+					}
+				})
+			}
+		})
 	}
 }
 
 type loadMetricsRecorder struct {
 	mu    sync.Mutex
-	steps map[string]string
+	steps map[string][]string
 }
 
 func (r *loadMetricsRecorder) RecordRun(context.Context, string, string, string, string, string, time.Duration) {
@@ -238,9 +297,9 @@ func (r *loadMetricsRecorder) RecordStep(_ context.Context, _ string, _ string, 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.steps == nil {
-		r.steps = make(map[string]string)
+		r.steps = make(map[string][]string)
 	}
-	r.steps[step] = result
+	r.steps[step] = append(r.steps[step], result)
 }
 
 func (r *loadMetricsRecorder) RecordCleanup(context.Context, string, string, string, string)     {}
@@ -254,7 +313,7 @@ func (r *loadMetricsRecorder) RecordRetainedSandbox(context.Context, string, str
 func (r *loadMetricsRecorder) RecordJanitorResources(context.Context, string, string, string, int64, int64, int64) {
 }
 
-func (r *loadMetricsRecorder) stepResult(step string) string {
+func (r *loadMetricsRecorder) stepResults(step string) []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.steps[step]
