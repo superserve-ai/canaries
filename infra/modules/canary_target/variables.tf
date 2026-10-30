@@ -149,7 +149,7 @@ variable "missing_runs_window" {
 variable "missing_runs_duration" {
   type        = string
   default     = "600s"
-  description = "How long the missing-run condition must hold before it pages; a single empty evaluation is not a stalled canary"
+  description = "How long the missing-run condition must hold before it pages; a single empty evaluation is not a stalled canary. Cloud Monitoring caps missing_runs_window plus this value at 25h, so longer windows must use 0s"
 }
 
 variable "extra_env" {
