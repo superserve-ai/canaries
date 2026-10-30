@@ -2,6 +2,7 @@ package uicanary
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -53,6 +54,8 @@ type mockServerState struct {
 	rejectDelete               bool
 	hangDelete                 bool
 	rejectCreation             bool
+	hideCreatedID              bool
+	createdPayload             map[string]any
 	initialStatus              string
 	externalURL                string
 	externalReceivedBypass     string
@@ -140,7 +143,10 @@ func setupMockConsoleServer(opts ...*mockServerState) *httptest.Server {
 			state.Unlock()
 		}
 
-		submitAction := `document.getElementById('dialog').style.display='none'; document.getElementById('connect-dialog').style.display='block';`
+		submitAction := `fetch('/api/sandboxes', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(createPayload())}).then(() => {document.getElementById('dialog').style.display='none'; document.getElementById('connect-dialog').style.display='block';});`
+		if state != nil && state.hideCreatedID {
+			submitAction = `fetch('/api/sandboxes', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(createPayload())}).then(() => {document.getElementById('dialog').style.display='none';});`
+		}
 		if reject {
 			submitAction = `fetch('/api/sandboxes', {method: 'POST'}).catch(function(){}); document.getElementById('create-err-alert').style.display='block';`
 		}
@@ -156,7 +162,25 @@ func setupMockConsoleServer(opts ...*mockServerState) *httptest.Server {
   <div id="dialog" role="dialog" style="display:none;">
     <input type="text" placeholder="my-sandbox" id="name-input" />
     <div id="create-err-alert" role="alert" class="text-destructive" style="display:none;">Account quota exceeded. Upgrade required.</div>
+    <button type="button" onclick="document.getElementById('advanced').style.display='block'">Advanced Options</button>
+    <div id="advanced" style="display:none">
+      <input type="number" placeholder="No timeout" id="safety-timeout" />
+      <input type="number" placeholder="Keep forever" id="safety-delete" />
+      <div class="space-y-2" id="metadata"><span>Metadata</span><button type="button" onclick="addMetadata()">Add</button></div>
+    </div>
     <button id="submit-create" onclick="%s">Create Sandbox</button>
+    <script>
+      function addMetadata() {
+        const row=document.createElement('div');
+        row.innerHTML='<input placeholder="key"/><input placeholder="value"/>';
+        document.getElementById('metadata').appendChild(row);
+      }
+      function createPayload() {
+        const metadata={};
+        document.querySelectorAll('#metadata > div').forEach(row => {metadata[row.children[0].value]=row.children[1].value;});
+        return {name:document.getElementById('name-input').value, timeout_seconds:Number(document.getElementById('safety-timeout').value), auto_delete_seconds:Number(document.getElementById('safety-delete').value), metadata};
+      }
+    </script>
   </div>
 
   <div id="connect-dialog" role="dialog" style="display:none;">
@@ -191,8 +215,23 @@ func setupMockConsoleServer(opts ...*mockServerState) *httptest.Server {
 
 	mux.HandleFunc("/api/sandboxes", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusPaymentRequired)
-		fmt.Fprintln(w, `{"message":"Account quota exceeded. Upgrade required."}`)
+		if state != nil {
+			state.Lock()
+			defer state.Unlock()
+			_ = json.NewDecoder(r.Body).Decode(&state.createdPayload)
+			if state.rejectCreation {
+				w.WriteHeader(http.StatusPaymentRequired)
+				fmt.Fprintln(w, `{"message":"Account quota exceeded. Upgrade required."}`)
+				return
+			}
+			if state.hideCreatedID {
+				w.WriteHeader(http.StatusCreated)
+				fmt.Fprintln(w, `{}`)
+				return
+			}
+		}
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprintln(w, `{"id":"sb-mock-123"}`)
 	})
 
 	mux.HandleFunc("/sandboxes/sb-mock-123/", func(w http.ResponseWriter, r *http.Request) {

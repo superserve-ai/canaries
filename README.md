@@ -76,11 +76,11 @@ The UI canary runs automated end-to-end browser journeys against the Superserve 
 ### UI Lifecycle Scenario
 Per run it:
 1. **Authenticates**: Submits operator email and password on `/auth/signin`, verifies session cookie creation and navigates to `/sandboxes/`.
-2. **Creates Sandbox**: Opens create dialog with a timestamped sandbox name (`ui-canary-<unix>`) and asserts the **Active** status badge. In Cloud Run, durable ownership metadata is tagged immediately upon sandbox ID discovery (`tag_sandbox`). If tagging fails after bounded retries, the unowned sandbox is deleted synchronously and the run aborts.
+2. **Creates Sandbox**: Uses a unique run name (`ui-canary-<run-id>`) and fills ownership metadata in Advanced Options before submitting. A safety timeout of the run timeout plus five minutes bounds compute, and auto-delete removes sandboxes after five continuous minutes paused. Missing safety controls abort before creation. Regional API tagging verifies ownership after ID discovery, then the UI must report **Active**.
 3. **Interactive Terminal Execution**: Opens the web terminal (xterm.js), evaluates a dynamic arithmetic expression in bash (`echo "RES_UI_$((<nonceA> + <nonceB>))"` with random 4-digit nonces), and verifies the computed sum (`RES_UI_<sum>`) to eliminate false positives from keystroke echoing or hardcoded outputs.
 4. **Pauses Sandbox**: Clicks Stop and asserts the **Paused** status badge.
 5. **Resumes Sandbox**: Clicks Start and asserts the **Active** status badge.
-6. **Deletes Sandbox**: Confirms deletion dialog, waits for the dialog to dismiss and verifies the sandbox is removed from the sandboxes table. Guaranteed deferred cleanup automatically recovers and reaps sandboxes on intermediate failures.
+6. **Deletes Sandbox**: Confirms deletion dialog, waits for the dialog to dismiss and verifies the sandbox is removed from the sandboxes table. Deferred cleanup attempts UI deletion on intermediate failures, then uses the regional API to recover sandboxes matching both the exact name and durable run metadata. If the browser never discovers an ID, API recovery still runs. Creation-time tags let the janitor find late or failed recoveries; the safety timeout also bounds abandoned sandbox runtime.
 
 ### UI Canary Environment Variables
 

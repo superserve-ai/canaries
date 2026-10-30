@@ -94,20 +94,24 @@ func Run(ctx context.Context, args []string) (err error) {
 		}
 		defer closeFn()
 
-		// Wire API client as sandbox tagger when an API key is configured.
-		// Cloud Run requires credentials; local runs may omit the tagger.
+		// Cloud Run requires the regional API client for ownership verification and
+		// recovery. Local browser-only runs may omit it.
 		var tagger uicanary.SandboxTagger
+		var recovery uicanary.SandboxRecovery
 		if cfg.APIKey != "" {
 			httpClient := &http.Client{Timeout: cfg.HTTPTimeout}
-			tagger = canaryapi.NewClient(httpClient, cfg.APIBaseURL, cfg.APIKey, cfg.PreviewDomain)
+			client := canaryapi.NewClient(httpClient, cfg.APIBaseURL, cfg.APIKey, cfg.PreviewDomain)
+			tagger = client
+			recovery = client
 		}
 
 		runner := uicanary.Runner{
-			Config:  uiCfg,
-			Locker:  locker,
-			Metrics: mp,
-			Clock:   time.Now,
-			Tagger:  tagger,
+			Config:   uiCfg,
+			Locker:   locker,
+			Metrics:  mp,
+			Clock:    time.Now,
+			Tagger:   tagger,
+			Recovery: recovery,
 		}
 		return runner.Run(ctx)
 
