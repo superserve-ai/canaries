@@ -182,5 +182,5 @@ variable "overlap_skip_window" {
 variable "overlap_skip_page_without_completion" {
   type        = bool
   default     = false
-  description = "Also page when a skip within overlap_skip_window has no completed run in missing_runs_window, so a stuck lock holder still pages when skips do not repeat"
+  description = "Add a separate policy that pages when a skip falls within overlap_skip_window and no run completed within missing_runs_window, so a stuck lock holder still pages when skips do not repeat"
 }

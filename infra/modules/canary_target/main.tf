@@ -351,17 +351,41 @@ resource "google_monitoring_alert_policy" "overlap_skipped" {
     }
   }
 
-  dynamic "conditions" {
-    for_each = var.overlap_skip_page_without_completion ? [1] : []
+  alert_strategy {
+    auto_close = "1800s"
+  }
 
-    content {
-      display_name = "${title(var.scenario)} run skipped and no ${var.scenario} run completed in ${var.missing_runs_window}"
+  documentation {
+    content   = <<-EOT
+      API Canary ${var.target_name} skipped %{if var.overlap_skip_min_count == 1}a ${var.scenario} run%{else}${var.overlap_skip_min_count} or more ${var.scenario} runs in ${var.overlap_skip_window}%{endif} because another execution already held the target lock.
 
-      condition_prometheus_query_language {
-        query                     = "(((sum(max_over_time(${local.overlap_skip_selector}[${var.overlap_skip_window}])) or vector(0)) > 0) and on() ((sum(max_over_time(superserve_canary_run_total{target=\"${var.target_name}\",scenario=\"${var.scenario}\",result=~\"success|failure\"}[${var.missing_runs_window}])) or vector(0)) == 0))"
-        duration                  = "300s"
-        disable_metric_validation = true
-      }
+      This indicates overlapping executions rather than a ${var.scenario} failure.
+
+      [View Cloud Run job logs](https://console.cloud.google.com/logs/query;query=${local.lifecycle_job_logs_query};project=${var.project_id})
+      EOT
+    mime_type = "text/markdown"
+  }
+
+  user_labels = local.labels
+}
+
+# A PromQL condition must be the only condition in its policy, so the stall
+# check is a separate policy with its own hold duration.
+resource "google_monitoring_alert_policy" "overlap_stalled" {
+  count                 = var.create_alerts && var.overlap_skip_page_without_completion ? 1 : 0
+  project               = var.project_id
+  display_name          = "API Canary ${var.target_name}: overlapping run skipped with no completed run"
+  combiner              = "OR"
+  enabled               = true
+  notification_channels = var.notification_channel_ids
+
+  conditions {
+    display_name = "${title(var.scenario)} run skipped in ${var.overlap_skip_window} and no ${var.scenario} run completed in ${var.missing_runs_window}"
+
+    condition_prometheus_query_language {
+      query                     = "(((sum(max_over_time(${local.overlap_skip_selector}[${var.overlap_skip_window}])) or vector(0)) > 0) and on() ((sum(max_over_time(superserve_canary_run_total{target=\"${var.target_name}\",scenario=\"${var.scenario}\",result=~\"success|failure\"}[${var.missing_runs_window}])) or vector(0)) == 0))"
+      duration                  = "300s"
+      disable_metric_validation = true
     }
   }
 
@@ -371,9 +395,9 @@ resource "google_monitoring_alert_policy" "overlap_skipped" {
 
   documentation {
     content   = <<-EOT
-      API Canary ${var.target_name} skipped %{if var.overlap_skip_min_count == 1}a ${var.scenario} run%{else}${var.overlap_skip_min_count} or more ${var.scenario} runs in ${var.overlap_skip_window}%{endif} because another execution already held the target lock.%{if var.overlap_skip_page_without_completion} It also pages when a skip in the last ${var.overlap_skip_window} has no completed ${var.scenario} run in the last ${var.missing_runs_window}; check whether the lock holder is stuck.%{endif}
+      API Canary ${var.target_name} skipped a ${var.scenario} run in the last ${var.overlap_skip_window} because the target lock was held, and no ${var.scenario} run completed in the last ${var.missing_runs_window}.
 
-      This indicates overlapping executions rather than a ${var.scenario} failure.
+      The two windows are independent: the skip may be older than the last completed run. Check whether the lock holder is stuck, then whether the scheduler or metrics export stopped.
 
       [View Cloud Run job logs](https://console.cloud.google.com/logs/query;query=${local.lifecycle_job_logs_query};project=${var.project_id})
       EOT
@@ -384,7 +408,7 @@ resource "google_monitoring_alert_policy" "overlap_skipped" {
 
   lifecycle {
     precondition {
-      condition     = !var.overlap_skip_page_without_completion || try(local.overlap_skip_window_seconds - local.missing_runs_window_seconds >= 600, false)
+      condition     = try(local.overlap_skip_window_seconds - local.missing_runs_window_seconds >= 600, false)
       error_message = "overlap_skip_window must be at least 10m longer than missing_runs_window when overlap_skip_page_without_completion is true, so a skip stays in the lookback long enough to page."
     }
   }
