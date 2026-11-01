@@ -16,6 +16,16 @@ locals {
     "resource.type%%3D%%22cloud_run_job%%22%%0Aresource.labels.job_name%%3D%%22%s%%22",
     google_cloud_run_v2_job.lifecycle.name,
   )
+  duration_unit_seconds = { s = 1, m = 60, h = 3600 }
+  overlap_skip_window_seconds = try(
+    tonumber(regex("^([0-9]+)[smh]$", var.overlap_skip_window)[0]) * local.duration_unit_seconds[substr(var.overlap_skip_window, -1, 1)],
+    null,
+  )
+  missing_runs_window_seconds = try(
+    tonumber(regex("^([0-9]+)[smh]$", var.missing_runs_window)[0]) * local.duration_unit_seconds[substr(var.missing_runs_window, -1, 1)],
+    null,
+  )
+  overlap_skip_selector = "superserve_canary_overlap_skipped_total{target=\"${var.target_name}\",scenario=\"${var.scenario}\"}"
   labels = merge(var.labels, {
     environment = var.environment
     region      = var.target_region
@@ -331,12 +341,27 @@ resource "google_monitoring_alert_policy" "overlap_skipped" {
   notification_channels = var.notification_channel_ids
 
   conditions {
-    display_name = "${title(var.scenario)} run skipped because target lock was already held"
+    display_name = var.overlap_skip_min_count == 1 ? "${title(var.scenario)} run skipped because target lock was already held" : "${title(var.scenario)} run skipped ${var.overlap_skip_min_count} or more times in ${var.overlap_skip_window} because target lock was already held"
 
     condition_prometheus_query_language {
-      query                     = "((sum(max_over_time(superserve_canary_overlap_skipped_total{target=\"${var.target_name}\",scenario=\"${var.scenario}\"}[15m])) or vector(0)) > 0)"
+      # Each execution exports its own series, so this sum counts skipped executions in the window.
+      query                     = "((sum(max_over_time(${local.overlap_skip_selector}[${var.overlap_skip_window}])) or vector(0)) > ${var.overlap_skip_min_count - 1})"
       duration                  = "0s"
       disable_metric_validation = true
+    }
+  }
+
+  dynamic "conditions" {
+    for_each = var.overlap_skip_page_without_completion ? [1] : []
+
+    content {
+      display_name = "${title(var.scenario)} run skipped and no ${var.scenario} run completed in ${var.missing_runs_window}"
+
+      condition_prometheus_query_language {
+        query                     = "(((sum(max_over_time(${local.overlap_skip_selector}[${var.overlap_skip_window}])) or vector(0)) > 0) and on() ((sum(max_over_time(superserve_canary_run_total{target=\"${var.target_name}\",scenario=\"${var.scenario}\",result=~\"success|failure\"}[${var.missing_runs_window}])) or vector(0)) == 0))"
+        duration                  = "300s"
+        disable_metric_validation = true
+      }
     }
   }
 
@@ -346,7 +371,7 @@ resource "google_monitoring_alert_policy" "overlap_skipped" {
 
   documentation {
     content   = <<-EOT
-      API Canary ${var.target_name} skipped a ${var.scenario} run because another execution already held the target lock.
+      API Canary ${var.target_name} skipped %{if var.overlap_skip_min_count == 1}a ${var.scenario} run%{else}${var.overlap_skip_min_count} or more ${var.scenario} runs in ${var.overlap_skip_window}%{endif} because another execution already held the target lock.%{if var.overlap_skip_page_without_completion} It also pages when a skip in the last ${var.overlap_skip_window} has no completed ${var.scenario} run in the last ${var.missing_runs_window}; check whether the lock holder is stuck.%{endif}
 
       This indicates overlapping executions rather than a ${var.scenario} failure.
 
@@ -356,6 +381,13 @@ resource "google_monitoring_alert_policy" "overlap_skipped" {
   }
 
   user_labels = local.labels
+
+  lifecycle {
+    precondition {
+      condition     = !var.overlap_skip_page_without_completion || try(local.overlap_skip_window_seconds - local.missing_runs_window_seconds >= 600, false)
+      error_message = "overlap_skip_window must be at least 10m longer than missing_runs_window when overlap_skip_page_without_completion is true, so a skip stays in the lookback long enough to page."
+    }
+  }
 }
 
 resource "google_monitoring_alert_policy" "missing_runs" {

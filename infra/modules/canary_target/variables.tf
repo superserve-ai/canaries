@@ -156,3 +156,31 @@ variable "slack_webhook_secret_name" {
   default     = ""
   description = "Secret holding a Slack incoming webhook; the run posts its benchmark summary there"
 }
+
+variable "overlap_skip_min_count" {
+  type        = number
+  default     = 1
+  description = "Lock-skipped executions within overlap_skip_window needed to page; 1 pages on every skip"
+
+  validation {
+    condition     = var.overlap_skip_min_count >= 1 && floor(var.overlap_skip_min_count) == var.overlap_skip_min_count
+    error_message = "overlap_skip_min_count must be a whole number of at least 1."
+  }
+}
+
+variable "overlap_skip_window" {
+  type        = string
+  default     = "15m"
+  description = "Lookback for counting lock-skipped executions, as a whole number of s, m, or h"
+
+  validation {
+    condition     = can(regex("^[0-9]+[smh]$", var.overlap_skip_window))
+    error_message = "overlap_skip_window must be a whole number followed by s, m, or h, for example 60m."
+  }
+}
+
+variable "overlap_skip_page_without_completion" {
+  type        = bool
+  default     = false
+  description = "Also page when a skip within overlap_skip_window has no completed run in missing_runs_window, so a stuck lock holder still pages when skips do not repeat"
+}

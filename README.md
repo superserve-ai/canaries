@@ -536,6 +536,7 @@ Metrics are emitted over OTLP HTTP and intended to feed the existing GMP path.
 Alerting behavior:
 - staging enables the full canary alert set
 - production only creates the consecutive-failure lifecycle alert
+- the overlapping-run-skipped alert pages on every lock skip by default; staging lifecycle and snapshot set `overlap_skip_min_count = 2`, `overlap_skip_window = "60m"`, and `overlap_skip_page_without_completion = true`, so they page only on 2 or more skips in 60 minutes or on a skip with no completed run in `missing_runs_window`
 - the GitHub deploy service account must be granted the alert-management IAM roles in Terraform; the deploy workflow passes its service account email to Terraform as `deployment_service_account_email`
 - notification channel IDs are not managed here; pass the existing GMP/Slack channel resource names as a Terraform list literal via `TF_VAR_NOTIFICATION_CHANNEL_IDS`, for example `["projects/rayai-prod/notificationChannels/123456789"]`
 
