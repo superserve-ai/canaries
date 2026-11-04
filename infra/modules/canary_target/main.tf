@@ -371,7 +371,7 @@ resource "google_monitoring_alert_policy" "missing_runs" {
 
     condition_prometheus_query_language {
       query                     = "((sum(increase(superserve_canary_run_total{target=\"${var.target_name}\",scenario=\"${var.scenario}\",result=~\"success|failure\"}[${var.missing_runs_window}])) or vector(0)) == 0)"
-      duration                  = "0s"
+      duration                  = var.missing_runs_duration
       disable_metric_validation = true
     }
   }
