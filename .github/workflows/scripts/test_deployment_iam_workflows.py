@@ -31,9 +31,34 @@ def _run_block(workflow, job, step):
     return script
 
 
-def _change(kind, actions):
+def _change(kind, actions, after=None):
     return {"address": kind + ".example", "type": kind, "mode": "managed",
-            "change": {"actions": actions, "before": {}, "after": {}}}
+            "change": {"actions": actions, "before": None if actions == ["create"] else {},
+                       "after": after if after is not None else {}}}
+
+
+def _critical_grant(role="roles/owner"):
+    return _change("google_project_iam_member", ["create"], {
+        "project": "example-project", "role": role,
+        "member": "serviceAccount:deployer@example-project.iam.gserviceaccount.com",
+    })
+
+
+def _automated_iam_changes():
+    return [
+        _change("google_service_account", ["create"], {
+            "project": "example-project", "account_id": "runtime",
+        }),
+        _change("google_project_iam_custom_role", ["create"], {
+            "project": "example-project", "role_id": "applicationRuntime",
+            "permissions": ["logging.logEntries.create"],
+        }),
+        _change("google_service_account_iam_member", ["create"], {
+            "service_account_id": "projects/example-project/serviceAccounts/runtime@example-project.iam.gserviceaccount.com",
+            "role": "roles/iam.serviceAccountUser",
+            "member": "serviceAccount:deployer@example-project.iam.gserviceaccount.com",
+        }),
+    ]
 
 
 # The fake applies only a saved artifact written by its own plan command.
@@ -110,17 +135,28 @@ class DeploymentIamWorkflowTests(unittest.TestCase):
             records = [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
             return result, records, applied.read_text() if applied.exists() else None
 
-    def test_protected_iam_diff_aborts_before_apply(self):
-        fixture = json.dumps({"resource_changes": [
-            _change("google_service_account_iam_member", ["create"]),
-        ]})
+    def test_critical_grants_and_keys_abort_before_apply(self):
+        forbidden = [(_critical_grant(role), "critical") for role in (
+            "roles/owner", "roles/iam.serviceAccountAdmin", "roles/iam.serviceAccountUser",
+        )]
+        forbidden.append((_change("google_service_account_key", ["create"]), "key"))
+        for change, message in forbidden:
+            fixture = json.dumps({"resource_changes": [change]})
+            for job, step, _ in self.cases:
+                with self.subTest(step=step, change=change):
+                    result, records, applied = self._execute(job, step, fixture)
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn(message, result.stderr)
+                    self.assertIsNone(applied)
+                    self.assertFalse(any(record["args"][0] == "apply" for record in records))
+
+    def test_automated_identity_provisioning_applies_the_checked_saved_plan(self):
+        fixture = json.dumps({"resource_changes": _automated_iam_changes()})
         for job, step, _ in self.cases:
             with self.subTest(step=step):
                 result, records, applied = self._execute(job, step, fixture)
-                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-                self.assertIn("administrator bootstrap required", result.stderr)
-                self.assertIsNone(applied)
-                self.assertFalse(any(record["args"][0] == "apply" for record in records))
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self._assert_saved_plan_applied(records, applied)
 
     def test_allowed_workload_diff_applies_the_checked_saved_plan(self):
         for job, step, kind in self.cases:
@@ -131,17 +167,20 @@ class DeploymentIamWorkflowTests(unittest.TestCase):
             with self.subTest(step=step):
                 result, records, applied = self._execute(job, step, fixture)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                plan = next(record for record in records if record["args"][0] == "plan")
-                shows = [record for record in records if record["args"][0] == "show"]
-                applies = [record for record in records if record["args"][0] == "apply"]
-                self.assertEqual(len(applies), 1)
-                filename = next(arg.split("=", 1)[1] for arg in plan["args"] if arg.startswith("-out="))
-                self.assertTrue(shows)
-                self.assertTrue(all(record["args"][-1] == filename for record in shows))
-                self.assertEqual(applies[0]["args"][-1], filename)
-                self.assertEqual(applied, str(Path(applies[0]["cwd"]) / filename))
-                self.assertFalse(any(arg.startswith("-var") or arg.startswith("-target")
-                                     for arg in applies[0]["args"]))
+                self._assert_saved_plan_applied(records, applied)
+
+    def _assert_saved_plan_applied(self, records, applied):
+        plan = next(record for record in records if record["args"][0] == "plan")
+        shows = [record for record in records if record["args"][0] == "show"]
+        applies = [record for record in records if record["args"][0] == "apply"]
+        self.assertEqual(len(applies), 1)
+        filename = next(arg.split("=", 1)[1] for arg in plan["args"] if arg.startswith("-out="))
+        self.assertTrue(shows)
+        self.assertTrue(all(record["args"][-1] == filename for record in shows))
+        self.assertEqual(applies[0]["args"][-1], filename)
+        self.assertEqual(applied, str(Path(applies[0]["cwd"]) / filename))
+        self.assertFalse(any(arg.startswith("-var") or arg.startswith("-target")
+                             for arg in applies[0]["args"]))
 
     def test_show_failure_with_valid_json_cannot_reach_apply(self):
         fixture = json.dumps({"resource_changes": []})
