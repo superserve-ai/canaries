@@ -26,6 +26,20 @@ resource "google_service_account" "scheduler" {
   display_name = "UI Canary Scheduler ${var.target_name}"
 }
 
+resource "google_service_account_iam_member" "runtime_deploy_act_as" {
+  count              = var.deployment_service_account_email == null ? 0 : 1
+  service_account_id = google_service_account.runtime.name
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:${var.deployment_service_account_email}"
+}
+
+resource "google_service_account_iam_member" "scheduler_deploy_act_as" {
+  count              = var.deployment_service_account_email == null ? 0 : 1
+  service_account_id = google_service_account.scheduler.name
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:${var.deployment_service_account_email}"
+}
+
 resource "google_secret_manager_secret" "ui_email" {
   project   = var.project_id
   secret_id = var.ui_email_secret_name
@@ -114,6 +128,7 @@ resource "google_cloud_run_v2_job" "ui_canary" {
   labels              = local.labels
   deletion_protection = false
   depends_on = [
+    google_service_account_iam_member.runtime_deploy_act_as,
     google_project_iam_member.metrics_writer,
     google_project_iam_member.service_usage_consumer,
     google_storage_bucket_iam_member.lock_admin,
@@ -295,7 +310,10 @@ resource "google_cloud_run_v2_job_iam_member" "scheduler_invoker" {
 }
 
 resource "google_cloud_scheduler_job" "ui_canary" {
-  depends_on  = [google_cloud_run_v2_job_iam_member.scheduler_invoker]
+  depends_on = [
+    google_cloud_run_v2_job_iam_member.scheduler_invoker,
+    google_service_account_iam_member.scheduler_deploy_act_as,
+  ]
   count       = var.scheduler_enabled ? 1 : 0
   project     = var.project_id
   region      = var.job_region

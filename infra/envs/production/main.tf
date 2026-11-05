@@ -67,8 +67,9 @@ resource "google_storage_bucket" "locks" {
 }
 
 module "lifecycle" {
-  for_each = local.lifecycle_targets
-  source   = "../../modules/canary_target"
+  for_each                         = local.lifecycle_targets
+  source                           = "../../modules/canary_target"
+  deployment_service_account_email = var.deployment_service_account_email
 
   project_id                = var.project_id
   job_region                = each.value.job_region
@@ -96,8 +97,9 @@ module "lifecycle" {
 }
 
 module "ui_canary" {
-  for_each = local.lifecycle_targets
-  source   = "../../modules/ui_canary"
+  for_each                         = local.lifecycle_targets
+  source                           = "../../modules/ui_canary"
+  deployment_service_account_email = var.deployment_service_account_email
 
   project_id              = var.project_id
   job_region              = each.value.job_region
@@ -124,8 +126,9 @@ module "ui_canary" {
 }
 
 module "template" {
-  for_each = local.lifecycle_targets
-  source   = "../../modules/canary_target"
+  for_each                         = local.lifecycle_targets
+  source                           = "../../modules/canary_target"
+  deployment_service_account_email = var.deployment_service_account_email
 
   scenario                  = "template"
   create_api_key_secret     = false
@@ -159,8 +162,9 @@ module "template" {
 }
 
 module "snapshot" {
-  for_each = local.lifecycle_targets
-  source   = "../../modules/canary_target"
+  for_each                         = local.lifecycle_targets
+  source                           = "../../modules/canary_target"
+  deployment_service_account_email = var.deployment_service_account_email
 
   scenario                  = "snapshot"
   create_api_key_secret     = false
@@ -207,8 +211,9 @@ resource "google_secret_manager_secret" "benchmark_slack_webhook" {
 }
 
 module "burst" {
-  for_each = local.lifecycle_targets
-  source   = "../../modules/canary_target"
+  for_each                         = local.lifecycle_targets
+  source                           = "../../modules/canary_target"
+  deployment_service_account_email = var.deployment_service_account_email
 
   scenario                  = "burst"
   create_api_key_secret     = false
@@ -246,8 +251,9 @@ module "burst" {
 }
 
 module "dax" {
-  for_each = local.lifecycle_targets
-  source   = "../../modules/canary_target"
+  for_each                         = local.lifecycle_targets
+  source                           = "../../modules/canary_target"
+  deployment_service_account_email = var.deployment_service_account_email
 
   scenario                  = "dax"
   create_api_key_secret     = false
@@ -285,8 +291,9 @@ module "dax" {
 }
 
 module "janitor" {
-  for_each = local.lifecycle_targets
-  source   = "../../modules/janitor"
+  for_each                         = local.lifecycle_targets
+  source                           = "../../modules/janitor"
+  deployment_service_account_email = var.deployment_service_account_email
 
   project_id                = var.project_id
   job_region                = each.value.job_region

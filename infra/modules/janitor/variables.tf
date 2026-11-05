@@ -1,3 +1,16 @@
+variable "deployment_service_account_email" {
+  type        = string
+  default     = null
+  description = "Deployment service account allowed to attach this module's runtime and scheduler identities."
+
+  validation {
+    condition = var.deployment_service_account_email == null ? true : can(regex(
+      "^[a-z0-9-]+@[a-z0-9-]+\\.iam\\.gserviceaccount\\.com$", var.deployment_service_account_email
+    ))
+    error_message = "deployment_service_account_email must be a service account email or null."
+  }
+}
+
 variable "project_id" {
   type = string
 }

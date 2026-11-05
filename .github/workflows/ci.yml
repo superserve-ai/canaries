@@ -44,6 +44,20 @@ jobs:
       - name: Canary alert filter regression
         run: python3 -m unittest discover -s infra/modules/canary_target/tests -v
 
+      - name: Deployment IAM plan boundaries
+        run: python3 -m unittest discover -s .github/workflows/scripts -p 'test_deployment_iam*.py' -v
+
+      - name: Scoped deployment identity tests
+        run: |
+          set -euo pipefail
+          export TF_PLUGIN_CACHE_DIR="$RUNNER_TEMP/terraform-plugin-cache"
+          mkdir -p "$TF_PLUGIN_CACHE_DIR"
+          for module in canary_target janitor ui_canary; do
+            cp infra/envs/production/.terraform.lock.hcl "infra/modules/$module/.terraform.lock.hcl"
+            terraform -chdir="infra/modules/$module" init -backend=false -input=false -lockfile=readonly
+            terraform -chdir="infra/modules/$module" test
+          done
+
       - name: Go fmt check
         run: |
           set -euo pipefail

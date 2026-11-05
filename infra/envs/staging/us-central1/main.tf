@@ -54,7 +54,8 @@ resource "google_storage_bucket" "locks" {
 }
 
 module "lifecycle" {
-  source = "../../../modules/canary_target"
+  source                           = "../../../modules/canary_target"
+  deployment_service_account_email = var.deployment_service_account_email
 
   project_id                = var.project_id
   job_region                = var.job_region
@@ -79,7 +80,8 @@ module "lifecycle" {
 }
 
 module "ui_canary" {
-  source = "../../../modules/ui_canary"
+  source                           = "../../../modules/ui_canary"
+  deployment_service_account_email = var.deployment_service_account_email
 
   project_id                   = var.project_id
   job_region                   = var.job_region
@@ -103,7 +105,8 @@ module "ui_canary" {
 }
 
 module "template" {
-  source = "../../../modules/canary_target"
+  source                           = "../../../modules/canary_target"
+  deployment_service_account_email = var.deployment_service_account_email
 
   scenario                  = "template"
   create_api_key_secret     = false
@@ -135,7 +138,8 @@ module "template" {
 }
 
 module "snapshot" {
-  source = "../../../modules/canary_target"
+  source                           = "../../../modules/canary_target"
+  deployment_service_account_email = var.deployment_service_account_email
 
   scenario                  = "snapshot"
   create_api_key_secret     = false
@@ -172,6 +176,12 @@ resource "google_service_account" "load_runner" {
   display_name = "Sandbox Load Runner staging"
 }
 
+resource "google_service_account_iam_member" "load_runner_deploy_act_as" {
+  service_account_id = google_service_account.load_runner.name
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:${var.deployment_service_account_email}"
+}
+
 resource "google_secret_manager_secret_iam_member" "load_runner_staging_accessor" {
   project   = var.project_id
   secret_id = module.lifecycle.api_key_secret_name
@@ -190,6 +200,7 @@ resource "google_cloud_run_v2_job" "load_runner" {
   depends_on = [
     module.lifecycle,
     google_secret_manager_secret_iam_member.load_runner_staging_accessor,
+    google_service_account_iam_member.load_runner_deploy_act_as,
   ]
 
   template {
@@ -280,7 +291,8 @@ resource "google_cloud_run_v2_job" "load_runner" {
 }
 
 module "janitor" {
-  source = "../../../modules/janitor"
+  source                           = "../../../modules/janitor"
+  deployment_service_account_email = var.deployment_service_account_email
 
   project_id                = var.project_id
   job_region                = var.job_region

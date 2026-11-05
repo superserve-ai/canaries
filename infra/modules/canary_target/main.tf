@@ -37,6 +37,20 @@ resource "google_service_account" "scheduler" {
   display_name = "API Canary${local.name_suffix} Scheduler ${var.target_name}"
 }
 
+resource "google_service_account_iam_member" "runtime_deploy_act_as" {
+  count              = var.deployment_service_account_email == null ? 0 : 1
+  service_account_id = google_service_account.runtime.name
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:${var.deployment_service_account_email}"
+}
+
+resource "google_service_account_iam_member" "scheduler_deploy_act_as" {
+  count              = var.deployment_service_account_email == null ? 0 : 1
+  service_account_id = google_service_account.scheduler.name
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:${var.deployment_service_account_email}"
+}
+
 # The lifecycle instance owns the per-target secret; other scenarios on the
 # same target only reference it.
 moved {
@@ -78,6 +92,7 @@ resource "google_cloud_run_v2_job" "lifecycle" {
   labels              = local.labels
   deletion_protection = false
   depends_on = [
+    google_service_account_iam_member.runtime_deploy_act_as,
     google_secret_manager_secret_iam_member.runtime_accessor,
     google_secret_manager_secret_iam_member.slack_webhook_accessor,
   ]
@@ -244,6 +259,10 @@ resource "google_cloud_run_v2_job_iam_member" "scheduler_invoker" {
 }
 
 resource "google_cloud_scheduler_job" "lifecycle" {
+  depends_on = [
+    google_cloud_run_v2_job_iam_member.scheduler_invoker,
+    google_service_account_iam_member.scheduler_deploy_act_as,
+  ]
   count       = var.scheduler_enabled ? 1 : 0
   project     = var.project_id
   region      = var.job_region
