@@ -23,6 +23,7 @@ The canary binary supports:
 - `snapshot`
 - `burst`
 - `dax`
+- `soak`
 - `janitor` (API orphan cleanup)
 - `ui-lifecycle` (Headless browser UI lifecycle canary)
 
@@ -63,6 +64,12 @@ The `burst` and `dax` scenarios run the public [ComputeSDK benchmarks](https://g
 - `dax` runs the benchmark's own build script (vendored in `internal/lifecycle/benchmarks/`) in a sandbox from the 8 vCPU / 16 GiB `benchmark-dax-node22-8cpu-16gb` template, which the first run builds and later runs reuse. It reports each build phase: prepare, cache clear, Bun download and unpack, clone, install, typecheck.
 
 Numbers run lower than the public leaderboard for `burst`, since the job calls the API from inside Google Cloud rather than from the benchmark's runners. The canary team needs room for the burst (`max_sandboxes` above the burst size plus the other scenarios) and an 8 vCPU / 16 GiB template limit for `dax`.
+
+The `soak` scenario runs separately on the production east and west targets twice daily at 00:00 and 12:00 Pacific. It keeps one sandbox for six hours and checks it about once a minute. Its server generates an identity at startup so later checks can prove the original process survived. Setup validates one explicit pause and resume, and a 60-second idle timeout allows automatic pauses later. Each minute the job observes the sandbox status, activates it, and checks the original process. The same server listens on two ports so one authenticated preview stays published while a second preview is created, checked, and deleted each cycle. Each cycle also runs a short command. Failed checks remain visible while the remaining cycles continue; process identity is unknown when a check cannot reach the server. The summary distinguishes the explicit pause/resume check from observed automatic pauses.
+
+Soak runs use the same binary, metrics, per-scenario lock, and Slack webhook as the other benchmark canaries. Only the final summary is posted to Slack, with failures/attempts for each operation, skipped checks reported separately, process continuity, and cleanup outcome. Per-check results remain in logs and the existing `superserve_canary_step_total` and `superserve_canary_step_duration_seconds` metrics with `scenario="soak"`. Attempt totals count successes and failures; skipped checks remain separate. Missed scheduled intervals are reported and fail the run, so slow checks cannot silently reduce coverage.
+
+`CANARY_SOAK_DURATION` defaults to `6h` and `CANARY_SOAK_INTERVAL` defaults to `1m`. The scheduled job allows 6h15m for setup and the run, with a 6h20m Cloud Run task timeout and a 6h30m lock. Its sandbox expiry covers the run and cleanup grace period, so the janitor leaves it alone while the run is active and reclaims abandoned resources after expiry. The soak job deletes its sandbox on both success and failure and never retains it for debugging.
 
 The janitor:
 1. lists canary-owned sandboxes and canary-named templates for the environment
@@ -252,6 +259,7 @@ export MANUAL_STAGING_OPT_IN=true
 go run ./cmd/api-canary -mode lifecycle
 go run ./cmd/api-canary -mode template
 go run ./cmd/api-canary -mode snapshot
+go run ./cmd/api-canary -mode soak
 go run ./cmd/api-canary -mode janitor
 ```
 
@@ -574,6 +582,6 @@ Runbook:
 6. Rotate the API key if authentication failures repeat.
 7. Re-run the Cloud Run Job manually.
 
-## Future Work
+## Preview Coverage
 
-The current implementation uses deterministic public preview URLs because no separate public “expose port” control-plane API was found in the inspected `sandbox` repository. The preview verification path is isolated so future authenticated preview access can replace the direct GET without rewriting the lifecycle orchestration.
+The lifecycle canary verifies deterministic public preview URLs. The soak scenario separately exercises authenticated preview URL creation, connectivity, and deletion through the customer API.

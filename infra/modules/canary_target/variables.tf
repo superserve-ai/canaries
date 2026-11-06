@@ -116,8 +116,8 @@ variable "scenario" {
   default = "lifecycle"
 
   validation {
-    condition     = contains(["lifecycle", "template", "snapshot", "burst", "dax"], var.scenario)
-    error_message = "scenario must be lifecycle, template, snapshot, burst, or dax"
+    condition     = contains(["lifecycle", "template", "snapshot", "burst", "dax", "soak"], var.scenario)
+    error_message = "scenario must be lifecycle, template, snapshot, burst, dax, or soak"
   }
 }
 

@@ -26,6 +26,8 @@ type Runner struct {
 	Metrics metrics.Provider
 	Clock   func() time.Time
 	HTTP    *http.Client
+	// Wait allows the soak schedule to be exercised without real-time delays.
+	Wait func(context.Context, time.Duration) error
 }
 
 type RunResources struct {
@@ -105,7 +107,7 @@ func (r Runner) telemetry() TelemetryContext {
 
 func (r Runner) scenario() string {
 	switch r.Config.Mode {
-	case config.ModeTemplate, config.ModeSnapshot, config.ModeBurst, config.ModeDax:
+	case config.ModeTemplate, config.ModeSnapshot, config.ModeBurst, config.ModeDax, config.ModeSoak:
 		return string(r.Config.Mode)
 	}
 	return "lifecycle"
@@ -187,6 +189,8 @@ func (r Runner) Run(ctx context.Context) error {
 		runResult = r.runBurst(ctx, runID)
 	case config.ModeDax:
 		runResult = r.runDax(ctx, runID)
+	case config.ModeSoak:
+		runResult = r.runSoak(ctx, runID)
 	default:
 		runResult = r.runLifecycle(ctx, runID)
 	}
@@ -195,6 +199,9 @@ func (r Runner) Run(ctx context.Context) error {
 		result = "success"
 	}
 	duration := r.Clock().Sub(start)
+	if runResult.Report != "" {
+		log.Info().Str("run_id", runID).Str("summary", runResult.Report).Msg(scenario + " summary")
+	}
 	if runResult.Report != "" && r.Config.SlackWebhookURL != "" {
 		if err := slack.Post(context.Background(), r.httpClient(), r.Config.SlackWebhookURL, runResult.Report); err != nil {
 			log.Warn().Err(err).Str("run_id", runID).Msg("slack post failed")
