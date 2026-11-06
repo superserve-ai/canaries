@@ -109,11 +109,49 @@ func TestPrivatePreviewTokenAndDeleteContract(t *testing.T) {
 	if token.Token != "spv1.example.signature" || token.Header != "X-Superserve-Preview-Token" || token.Port != 18080 || token.TokenVersion != 2 || token.Access != "private" {
 		t.Fatalf("unexpected token response")
 	}
+	if token.ExpiresAt != nil {
+		t.Fatal("minting with an empty request must return a token without time expiry")
+	}
 	if err := client.DeletePreviewPort(context.Background(), "sb-123", 18080); err != nil {
 		t.Fatal(err)
 	}
 	if calls != 2 {
 		t.Fatalf("got %d requests, want token mint and delete", calls)
+	}
+}
+
+func TestDeletePreviewPortRejectsAsyncAcceptanceWithoutRetry(t *testing.T) {
+	t.Parallel()
+	calls := 0
+	httpClient := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		calls++
+		return soakResponse(req, http.StatusAccepted, `{"status":"deleting"}`), nil
+	})}
+	client := NewClient(httpClient, "https://api.example", "api-key", "preview.example")
+	err := client.DeletePreviewPort(context.Background(), "sb-123", 18080)
+	var statusErr *HTTPStatusError
+	if !errors.As(err, &statusErr) || statusErr.StatusCode != http.StatusAccepted {
+		t.Fatalf("error = %v, want an unexpected 202 status", err)
+	}
+	if calls != 1 {
+		t.Fatalf("requests = %d, want one deletion attempt without polling", calls)
+	}
+}
+
+func TestCreatePreviewTokenRejectsUnexpectedExpiryWithoutRetry(t *testing.T) {
+	t.Parallel()
+	calls := 0
+	httpClient := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		calls++
+		return soakResponse(req, http.StatusOK, `{"token":"unexpected-expiring-token","expires_at":"2026-11-06T23:00:00Z"}`), nil
+	})}
+	client := NewClient(httpClient, "https://api.example", "api-key", "preview.example")
+	token, err := client.CreatePreviewToken(context.Background(), "sb-123", 18080)
+	if err == nil || !strings.Contains(err.Error(), "unexpectedly expires") || token.Token != "" {
+		t.Fatalf("unexpected expiry was accepted: token returned=%t, error=%v", token.Token != "", err)
+	}
+	if calls != 1 {
+		t.Fatalf("requests = %d, want one token attempt without refresh", calls)
 	}
 }
 

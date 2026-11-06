@@ -318,12 +318,17 @@ func (c *Client) PublishPreviewPort(ctx context.Context, sandboxID string, req P
 
 func (c *Client) CreatePreviewToken(ctx context.Context, sandboxID string, port int) (PreviewToken, error) {
 	var out PreviewToken
+	// An empty request explicitly asks for a token without time expiry.
 	err := c.doJSON(ctx, http.MethodPost, "/sandboxes/"+url.PathEscape(sandboxID)+"/preview-ports/"+strconv.Itoa(port)+"/token", map[string]any{}, &out)
+	if err == nil && out.ExpiresAt != nil {
+		return PreviewToken{}, errors.New("preview token unexpectedly expires despite a non-expiring request")
+	}
 	return out, err
 }
 
 func (c *Client) DeletePreviewPort(ctx context.Context, sandboxID string, port int) error {
-	return c.doNoContent(ctx, http.MethodDelete, "/sandboxes/"+url.PathEscape(sandboxID)+"/preview-ports/"+strconv.Itoa(port))
+	// Preview unpublication completes synchronously with a 204 response.
+	return c.doJSON(ctx, http.MethodDelete, "/sandboxes/"+url.PathEscape(sandboxID)+"/preview-ports/"+strconv.Itoa(port), nil, nil)
 }
 
 func (c *Client) Exec(ctx context.Context, sandboxID, accessToken string, req ExecRequest) (ExecResult, error) {
