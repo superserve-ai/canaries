@@ -76,6 +76,11 @@ module "lifecycle" {
   vpc_connector             = "projects/rayai-dev/locations/us-central1/connectors/ss-vpc-conn-f1b3552"
   vpc_egress                = "ALL_TRAFFIC"
   depends_on                = [google_project_iam_member.deployment_alerting]
+
+  # A single lock skip has paged on staging and cleared itself; page on repeats or a stall.
+  overlap_skip_min_count               = 2
+  overlap_skip_window                  = "60m"
+  overlap_skip_page_without_completion = true
 }
 
 module "ui_canary" {
@@ -164,6 +169,11 @@ module "snapshot" {
   vpc_connector             = "projects/rayai-dev/locations/us-central1/connectors/ss-vpc-conn-f1b3552"
   vpc_egress                = "ALL_TRAFFIC"
   depends_on                = [google_project_iam_member.deployment_alerting]
+
+  # A single lock skip has paged on staging and cleared itself; page on repeats or a stall.
+  overlap_skip_min_count               = 2
+  overlap_skip_window                  = "60m"
+  overlap_skip_page_without_completion = true
 }
 
 resource "google_service_account" "load_runner" {
