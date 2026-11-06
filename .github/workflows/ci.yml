@@ -47,6 +47,9 @@ jobs:
       - name: Deployment IAM plan boundaries
         run: python3 -m unittest discover -s .github/workflows/scripts -p 'test_deployment_iam*.py' -v
 
+      - name: Account permission propagation tests
+        run: python3 -m unittest discover -s infra/scripts -p 'test_wait_act_as.py' -v
+
       - name: Scoped deployment identity tests
         run: |
           set -euo pipefail

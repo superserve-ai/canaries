@@ -4,8 +4,9 @@ override_resource {
   override_during = plan
   target          = google_service_account.runtime
   values = {
-    name  = "projects/example-project/serviceAccounts/runtime@example-project.iam.gserviceaccount.com"
-    email = "runtime@example-project.iam.gserviceaccount.com"
+    name      = "projects/example-project/serviceAccounts/runtime@example-project.iam.gserviceaccount.com"
+    email     = "runtime@example-project.iam.gserviceaccount.com"
+    unique_id = "123456789012345678901"
   }
 }
 
@@ -13,8 +14,9 @@ override_resource {
   override_during = plan
   target          = google_service_account.scheduler
   values = {
-    name  = "projects/example-project/serviceAccounts/scheduler@example-project.iam.gserviceaccount.com"
-    email = "scheduler@example-project.iam.gserviceaccount.com"
+    name      = "projects/example-project/serviceAccounts/scheduler@example-project.iam.gserviceaccount.com"
+    email     = "scheduler@example-project.iam.gserviceaccount.com"
+    unique_id = "223456789012345678901"
   }
 }
 
@@ -53,6 +55,18 @@ run "scoped_deployment_access" {
     )
     error_message = "Deployment access must also be scoped to the scheduler identity used by OAuth jobs."
   }
+  assert {
+    condition = (
+      length(terraform_data.runtime_deploy_act_as_ready) == 1 &&
+      length(terraform_data.scheduler_deploy_act_as_ready) == 1 &&
+      terraform_data.runtime_deploy_act_as_ready[0].triggers_replace.service_account_unique_id == google_service_account.runtime.unique_id &&
+      terraform_data.scheduler_deploy_act_as_ready[0].triggers_replace.service_account_unique_id == google_service_account.scheduler.unique_id &&
+      terraform_data.runtime_deploy_act_as_ready[0].triggers_replace.deployment_service_account_email == var.deployment_service_account_email &&
+      terraform_data.scheduler_deploy_act_as_ready[0].triggers_replace.deployment_service_account_email == var.deployment_service_account_email
+    )
+    error_message = "Readiness checks must follow the account generation and configured deployment identity."
+  }
+
 }
 
 run "existing_callers_without_principal" {
@@ -60,7 +74,9 @@ run "existing_callers_without_principal" {
   assert {
     condition = (
       length(google_service_account_iam_member.runtime_deploy_act_as) == 0 &&
-      length(google_service_account_iam_member.scheduler_deploy_act_as) == 0
+      length(google_service_account_iam_member.scheduler_deploy_act_as) == 0 &&
+      length(terraform_data.runtime_deploy_act_as_ready) == 0 &&
+      length(terraform_data.scheduler_deploy_act_as_ready) == 0
     )
     error_message = "Unconfigured callers must not create empty-principal IAM grants."
   }

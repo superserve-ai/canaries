@@ -40,6 +40,40 @@ resource "google_service_account_iam_member" "scheduler_deploy_act_as" {
   member             = "serviceAccount:${var.deployment_service_account_email}"
 }
 
+resource "terraform_data" "runtime_deploy_act_as_ready" {
+  count = var.deployment_service_account_email == null ? 0 : 1
+  triggers_replace = {
+    service_account_unique_id        = google_service_account.runtime.unique_id
+    grant_id                         = google_service_account_iam_member.runtime_deploy_act_as[0].id
+    deployment_service_account_email = var.deployment_service_account_email
+    helper_sha256                    = filesha256("${path.module}/../../scripts/wait_act_as.py")
+  }
+
+  provisioner "local-exec" {
+    command = "python3 \"${path.module}/../../scripts/wait_act_as.py\" --service-account \"$TF_ACT_AS_SERVICE_ACCOUNT\""
+    environment = {
+      TF_ACT_AS_SERVICE_ACCOUNT = google_service_account.runtime.name
+    }
+  }
+}
+
+resource "terraform_data" "scheduler_deploy_act_as_ready" {
+  count = var.deployment_service_account_email == null ? 0 : 1
+  triggers_replace = {
+    service_account_unique_id        = google_service_account.scheduler.unique_id
+    grant_id                         = google_service_account_iam_member.scheduler_deploy_act_as[0].id
+    deployment_service_account_email = var.deployment_service_account_email
+    helper_sha256                    = filesha256("${path.module}/../../scripts/wait_act_as.py")
+  }
+
+  provisioner "local-exec" {
+    command = "python3 \"${path.module}/../../scripts/wait_act_as.py\" --service-account \"$TF_ACT_AS_SERVICE_ACCOUNT\""
+    environment = {
+      TF_ACT_AS_SERVICE_ACCOUNT = google_service_account.scheduler.name
+    }
+  }
+}
+
 resource "google_secret_manager_secret" "ui_email" {
   project   = var.project_id
   secret_id = var.ui_email_secret_name
@@ -128,7 +162,7 @@ resource "google_cloud_run_v2_job" "ui_canary" {
   labels              = local.labels
   deletion_protection = false
   depends_on = [
-    google_service_account_iam_member.runtime_deploy_act_as,
+    terraform_data.runtime_deploy_act_as_ready,
     google_project_iam_member.metrics_writer,
     google_project_iam_member.service_usage_consumer,
     google_storage_bucket_iam_member.lock_admin,
@@ -312,7 +346,7 @@ resource "google_cloud_run_v2_job_iam_member" "scheduler_invoker" {
 resource "google_cloud_scheduler_job" "ui_canary" {
   depends_on = [
     google_cloud_run_v2_job_iam_member.scheduler_invoker,
-    google_service_account_iam_member.scheduler_deploy_act_as,
+    terraform_data.scheduler_deploy_act_as_ready,
   ]
   count       = var.scheduler_enabled ? 1 : 0
   project     = var.project_id

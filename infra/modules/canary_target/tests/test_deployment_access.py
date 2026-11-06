@@ -47,8 +47,30 @@ class DeploymentAccessWiringTest(unittest.TestCase):
         job = resources[("google_cloud_run_v2_job", "load_runner")]
         self.assertRegex(
             job,
-            r"(?s)depends_on\s*=\s*\[.*?google_service_account_iam_member\.load_runner_deploy_act_as.*?\]",
+            r"(?s)depends_on\s*=\s*\[.*?terraform_data\.load_runner_deploy_act_as_ready.*?\]",
         )
+
+
+    def test_consumers_wait_for_effective_permission_and_account_replacement(self):
+        for module, job in (("canary_target", "lifecycle"), ("janitor", "janitor"), ("ui_canary", "ui_canary")):
+            source = (INFRA / "modules" / module / "main.tf").read_text()
+            resources = {(kind, name): body for kind, name, body in blocks(source, "resource")}
+            for identity, consumer in (("runtime", "google_cloud_run_v2_job"), ("scheduler", "google_cloud_scheduler_job")):
+                with self.subTest(module=module, identity=identity):
+                    readiness = resources[("terraform_data", identity + "_deploy_act_as_ready")]
+                    self.assertIn(f"google_service_account.{identity}.unique_id", readiness)
+                    self.assertIn(f"google_service_account_iam_member.{identity}_deploy_act_as[0].id", readiness)
+                    self.assertIn("wait_act_as.py", readiness)
+                    self.assertIn(f"TF_ACT_AS_SERVICE_ACCOUNT = google_service_account.{identity}.name", readiness)
+                    body = resources[(consumer, job)]
+                    self.assertRegex(body, rf"(?s)depends_on\s*=\s*\[.*?terraform_data\.{identity}_deploy_act_as_ready.*?\]")
+
+        staging = (ROOTS[2] / "main.tf").read_text()
+        resources = {(kind, name): body for kind, name, body in blocks(staging, "resource")}
+        readiness = resources[("terraform_data", "load_runner_deploy_act_as_ready")]
+        self.assertIn("google_service_account.load_runner.unique_id", readiness)
+        self.assertIn("google_service_account_iam_member.load_runner_deploy_act_as.id", readiness)
+        self.assertIn("wait_act_as.py", readiness)
 
 
 if __name__ == "__main__":

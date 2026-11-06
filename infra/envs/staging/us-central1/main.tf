@@ -182,6 +182,22 @@ resource "google_service_account_iam_member" "load_runner_deploy_act_as" {
   member             = "serviceAccount:${var.deployment_service_account_email}"
 }
 
+resource "terraform_data" "load_runner_deploy_act_as_ready" {
+  triggers_replace = {
+    service_account_unique_id        = google_service_account.load_runner.unique_id
+    grant_id                         = google_service_account_iam_member.load_runner_deploy_act_as.id
+    deployment_service_account_email = var.deployment_service_account_email
+    helper_sha256                    = filesha256("${path.module}/../../../scripts/wait_act_as.py")
+  }
+
+  provisioner "local-exec" {
+    command = "python3 \"${path.module}/../../../scripts/wait_act_as.py\" --service-account \"$TF_ACT_AS_SERVICE_ACCOUNT\""
+    environment = {
+      TF_ACT_AS_SERVICE_ACCOUNT = google_service_account.load_runner.name
+    }
+  }
+}
+
 resource "google_secret_manager_secret_iam_member" "load_runner_staging_accessor" {
   project   = var.project_id
   secret_id = module.lifecycle.api_key_secret_name
@@ -200,7 +216,7 @@ resource "google_cloud_run_v2_job" "load_runner" {
   depends_on = [
     module.lifecycle,
     google_secret_manager_secret_iam_member.load_runner_staging_accessor,
-    google_service_account_iam_member.load_runner_deploy_act_as,
+    terraform_data.load_runner_deploy_act_as_ready,
   ]
 
   template {
