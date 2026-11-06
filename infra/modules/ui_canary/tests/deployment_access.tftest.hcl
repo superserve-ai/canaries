@@ -34,7 +34,7 @@ variables {
   target_region           = "us-central1"
   console_url             = "https://console.example.com"
   ui_email_secret_name    = "example-ui-email"
-  ui_password_secret_name = "example-ui-password"
+  ui_password_secret_name = "test"
 }
 
 run "scoped_deployment_access" {

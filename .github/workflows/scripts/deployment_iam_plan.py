@@ -12,7 +12,8 @@ _CRITICAL_ROLES = {
     "roles/owner", "roles/editor", "roles/viewer", "roles/billing.admin",
     "roles/iam.organizationRoleAdmin", "roles/iam.roleAdmin", "roles/iam.securityAdmin",
     "roles/iam.serviceAccountAdmin", "roles/iam.serviceAccountKeyAdmin",
-    "roles/iam.serviceAccountUser", "roles/resourcemanager.organizationAdmin",
+    "roles/iam.serviceAccountUser", "roles/iam.serviceAccountTokenCreator",
+    "roles/resourcemanager.organizationAdmin",
     "roles/resourcemanager.folderAdmin", "roles/resourcemanager.folderEditor",
     "roles/resourcemanager.folderMover",
 }
@@ -210,17 +211,9 @@ def _check_account_policy(change, kind, actions):
         if not isinstance(before, dict) or _role(before.get("role")) not in _ACCOUNT_POLICY_ROLES:
             raise ValueError("service-account policy changes may modify only deployment and token-creator roles")
     member_field = "member" if kind == "member" else "members"
-    # New service-account names and member emails can be computed during the
-    # same apply. The inherited IAM condition constrains changed roles, not
-    # recipients; rejecting computed recipients would require manual setup.
     if _field_unknown(change, member_field):
-        known = after.get(member_field)
-        if kind == "member":
-            members = {known} if isinstance(known, str) else set()
-        else:
-            members = {member for member in known if isinstance(member, str)} if isinstance(known, list) else set()
-    else:
-        members = _members([after.get("member")] if kind == "member" else after.get("members"))
+        raise ValueError("service-account IAM change has unresolved policy recipients")
+    members = _members([after.get("member")] if kind == "member" else after.get("members"))
     if members & _PUBLIC_MEMBERS:
         raise ValueError("service-account policy cannot grant access to public principals")
 

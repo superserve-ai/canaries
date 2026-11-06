@@ -67,14 +67,25 @@ class DeploymentIamPlanTests(unittest.TestCase):
             GUARD.check(plan(resource("google_service_account_iam_binding", after=binding(role))))
             GUARD.check(plan(resource("google_service_account_iam_policy", after=policy(binding(role)))))
 
-    def test_computed_new_account_targets_and_members_do_not_require_manual_setup(self):
+    def test_new_account_targets_with_known_recipients_do_not_require_manual_setup(self):
         for kind, after, unknown in (
-            ("google_service_account_iam_member", {"role": TOKEN},
-             {"service_account_id": True, "member": True}),
-            ("google_service_account_iam_binding", {"role": USER, "members": [None, DEPLOYER]},
-             {"service_account_id": True, "members": [True, False]}),
+            ("google_service_account_iam_member", {"role": TOKEN, "member": DEPLOYER},
+             {"service_account_id": True}),
+            ("google_service_account_iam_binding", {"role": USER, "members": [DEPLOYER]},
+             {"service_account_id": True}),
         ):
             GUARD.check(plan(resource(kind, after=after, unknown=unknown)))
+
+    def test_unresolved_account_policy_recipients_fail_closed(self):
+        for kind, after, unknown in (
+            ("google_service_account_iam_member", {"role": TOKEN}, {"member": True}),
+            ("google_service_account_iam_member", member(), {"member": True}),
+            ("google_service_account_iam_binding", {"role": USER}, {"members": True}),
+            ("google_service_account_iam_binding", {"role": TOKEN, "members": [None, DEPLOYER]},
+             {"members": [True, False]}),
+        ):
+            with self.subTest(kind=kind, unknown=unknown), self.assertRaisesRegex(ValueError, "unresolved"):
+                GUARD.check(plan(resource(kind, after=after, unknown=unknown)))
 
     def test_unresolved_account_policy_roles_fail_closed(self):
         for kind, after, unknown in (
@@ -97,7 +108,7 @@ class DeploymentIamPlanTests(unittest.TestCase):
                 GUARD.check(plan(resource(kind, after=value)))
         for public in ("allUsers", "allAuthenticatedUsers"):
             for unknown in ({}, {"member": True}):
-                with self.subTest(public=public, unknown=unknown), self.assertRaisesRegex(ValueError, "public"):
+                with self.subTest(public=public, unknown=unknown), self.assertRaisesRegex(ValueError, "public|unresolved"):
                     GUARD.check(plan(resource("google_service_account_iam_member",
                                              after=member(who=public), unknown=unknown)))
             with self.assertRaisesRegex(ValueError, "public"):
@@ -137,6 +148,15 @@ class DeploymentIamPlanTests(unittest.TestCase):
         broad["type"] = "google_project_iam_member"
         with self.assertRaisesRegex(ValueError, "critical"):
             GUARD.check(plan(broad))
+
+    def test_broad_token_creator_grants_cannot_bypass_account_scoping(self):
+        for scope in ("project", "folder", "organization"):
+            for who in (DEPLOYER, "allUsers", "allAuthenticatedUsers"):
+                for kind, value in (("member", member(TOKEN, who)),
+                                    ("binding", binding(TOKEN, [who])),
+                                    ("policy", policy(binding(TOKEN, [who])))):
+                    with self.subTest(scope=scope, who=who, kind=kind), self.assertRaisesRegex(ValueError, "critical"):
+                        GUARD.check(plan(resource("google_" + scope + "_iam_" + kind, after=value)))
 
     def test_critical_grant_cleanup_and_existing_unchanged_grants_are_allowed(self):
         for kind, value in (("member", member("roles/owner")), ("binding", binding("roles/owner")),
