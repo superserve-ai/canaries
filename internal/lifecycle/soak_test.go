@@ -198,6 +198,56 @@ func TestSoakMissedCadenceFailsWithoutBurstingCatchupChecks(t *testing.T) {
 	}
 }
 
+func TestSoakDeadlineAccountsForUnexecutedScheduledChecks(t *testing.T) {
+	tests := []struct {
+		name          string
+		duration      time.Duration
+		slowCycle     int
+		cycleDuration time.Duration
+		cycles        int
+		missed        int
+	}{
+		{"last minute overruns deadline", 6 * time.Hour, 360, 70 * time.Second, 360, 1},
+		{"last minute finishes exactly at deadline", 6 * time.Hour, 360, time.Minute, 360, 1},
+		{"first cycle overruns whole duration", 6 * time.Hour, 1, 6*time.Hour + 10*time.Second, 1, 360},
+		{"overrun includes clamped final check", 150 * time.Second, 2, 100 * time.Second, 2, 2},
+		{"large overrun stops counting at clamped deadline", 150 * time.Second, 1, time.Hour, 1, 3},
+		{"final scheduled check may finish late", 2 * time.Minute, 3, 70 * time.Second, 3, 0},
+		{"clamped final check may finish late", 150 * time.Second, 4, 70 * time.Second, 4, 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSoakFixture(t)
+			f.runner.Config.SoakDuration = tc.duration
+			f.onActivate = func(attempt int) error {
+				if attempt == tc.slowCycle {
+					f.now = f.now.Add(tc.cycleDuration)
+				}
+				return nil
+			}
+			err := f.runner.Run(context.Background())
+			status := "passed"
+			if tc.missed > 0 {
+				status = "failed"
+				want := fmt.Sprintf("missed %d scheduled soak check intervals", tc.missed)
+				if err == nil || !strings.Contains(err.Error(), want) {
+					t.Fatalf("error = %v, want %q", err, want)
+				}
+			} else if err != nil {
+				t.Fatalf("the actual final check was completed: %v", err)
+			}
+			f.wantSummary(
+				fmt.Sprintf("%s · %d check cycles", status, tc.cycles),
+				fmt.Sprintf("missed intervals: %d", tc.missed),
+				fmt.Sprintf("Original preview connections: 0/%d failed", tc.cycles),
+			)
+			if f.activateCalls != tc.cycles || f.shortCalls != tc.cycles || f.previewDeletes != tc.cycles || f.deleteCalls != 1 {
+				t.Fatalf("actual attempts/cleanup changed: activate=%d short=%d previews=%d cleanup=%d", f.activateCalls, f.shortCalls, f.previewDeletes, f.deleteCalls)
+			}
+		})
+	}
+}
+
 func TestSoakCancellationDuringCycleDoesNotInventAttempts(t *testing.T) {
 	f := newSoakFixture(t)
 	ctx, cancel := context.WithCancel(context.Background())

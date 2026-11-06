@@ -240,6 +240,14 @@ func (r Runner) runSoak(ctx context.Context, runID string) (res RunResult) {
 			return res
 		}
 		if !r.Clock().Before(deadline) {
+			// An earlier tick can overrun later checks, including the final
+			// check clamped to the deadline when the interval does not divide it.
+			if remaining := deadline.Sub(next); remaining > 0 {
+				summary.MissedChecks += int(remaining / r.Config.SoakInterval)
+				if remaining%r.Config.SoakInterval != 0 {
+					summary.MissedChecks++
+				}
+			}
 			break
 		}
 		next = next.Add(r.Config.SoakInterval)
