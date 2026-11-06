@@ -13,7 +13,15 @@ variable "image" {
 }
 
 variable "deployment_service_account_email" {
-  type = string
+  type     = string
+  nullable = false
+
+  validation {
+    condition = can(regex(
+      "^[a-z0-9-]+@[a-z0-9-]+\\.iam\\.gserviceaccount\\.com$", var.deployment_service_account_email
+    ))
+    error_message = "deployment_service_account_email must be a service account email."
+  }
 }
 
 variable "notification_channel_ids" {

@@ -157,20 +157,21 @@ jobs:
           set -euo pipefail
           cd infra/envs/staging/us-central1
           terraform init -input=false
-          args=()
+          args=(-input=false)
           LOAD_IMAGE="$API_IMAGE"
           if [[ "$DEPLOY_SCOPE" == "ui-only" ]]; then
             args+=(-target=module.ui_canary)
             API_IMAGE=$(gcloud run jobs describe api-canary-staging-us-central1 --project=rayai-dev --region=us-central1 --format='value(spec.template.spec.template.spec.containers[0].image)')
             LOAD_IMAGE=$(gcloud run jobs describe sandbox-load-runner-staging-us-central1 --project=rayai-dev --region=us-central1 --format='value(spec.template.spec.template.spec.containers[0].image)')
           fi
-          terraform apply \
-            -input=false \
-            -auto-approve \
+          terraform plan \
+            -out=tfplan \
             "${args[@]}" \
             -var="image=$API_IMAGE" \
             -var="load_runner_image=$LOAD_IMAGE" \
             -var="ui_canary_image=$UI_IMAGE"
+          terraform show -json tfplan | python3 "$GITHUB_WORKSPACE/.github/workflows/scripts/deployment_iam_plan.py" --check -
+          terraform apply -input=false -auto-approve tfplan
 
   deploy-production:
     runs-on: ubuntu-latest
@@ -274,17 +275,18 @@ jobs:
           set -euo pipefail
           cd infra/envs/production
           terraform init -input=false
-          args=()
+          args=(-input=false)
           if [[ "$DEPLOY_SCOPE" == "ui-only" ]]; then
             args+=(-target=module.ui_canary)
             API_IMAGE=$(gcloud run jobs describe api-canary-production-us-west2 --project=rayai-prod --region=us-west2 --format='value(spec.template.spec.template.spec.containers[0].image)')
           fi
-          terraform apply \
-            -input=false \
-            -auto-approve \
+          terraform plan \
+            -out=tfplan \
             "${args[@]}" \
             -var="image=$API_IMAGE" \
             -var="ui_canary_image=$UI_IMAGE"
+          terraform show -json tfplan | python3 "$GITHUB_WORKSPACE/.github/workflows/scripts/deployment_iam_plan.py" --check -
+          terraform apply -input=false -auto-approve tfplan
 
       # East4 is isolated in its own root because it does not use VPC access.
       - name: Apply production east
@@ -296,14 +298,15 @@ jobs:
           set -euo pipefail
           cd infra/envs/production/us-east4
           terraform init -input=false
-          args=()
+          args=(-input=false)
           if [[ "$DEPLOY_SCOPE" == "ui-only" ]]; then
             args+=(-target=module.ui_canary)
             API_IMAGE=$(gcloud run jobs describe api-canary-production-us-east4 --project=rayai-prod --region=us-east4 --format='value(spec.template.spec.template.spec.containers[0].image)')
           fi
-          terraform apply \
-            -input=false \
-            -auto-approve \
+          terraform plan \
+            -out=tfplan \
             "${args[@]}" \
             -var="image=$API_IMAGE" \
             -var="ui_canary_image=$UI_IMAGE"
+          terraform show -json tfplan | python3 "$GITHUB_WORKSPACE/.github/workflows/scripts/deployment_iam_plan.py" --check -
+          terraform apply -input=false -auto-approve tfplan

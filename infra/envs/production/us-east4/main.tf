@@ -29,7 +29,8 @@ resource "google_project_service" "telemetry" {
 }
 
 module "lifecycle" {
-  source = "../../../modules/canary_target"
+  source                           = "../../../modules/canary_target"
+  deployment_service_account_email = var.deployment_service_account_email
 
   project_id                = var.project_id
   job_region                = var.job_region
@@ -56,7 +57,8 @@ module "lifecycle" {
 }
 
 module "ui_canary" {
-  source = "../../../modules/ui_canary"
+  source                           = "../../../modules/ui_canary"
+  deployment_service_account_email = var.deployment_service_account_email
 
   project_id              = var.project_id
   job_region              = var.job_region
@@ -80,7 +82,8 @@ module "ui_canary" {
 }
 
 module "template" {
-  source = "../../../modules/canary_target"
+  source                           = "../../../modules/canary_target"
+  deployment_service_account_email = var.deployment_service_account_email
 
   scenario                  = "template"
   create_api_key_secret     = false
@@ -113,7 +116,8 @@ module "template" {
 }
 
 module "snapshot" {
-  source = "../../../modules/canary_target"
+  source                           = "../../../modules/canary_target"
+  deployment_service_account_email = var.deployment_service_account_email
 
   scenario                  = "snapshot"
   create_api_key_secret     = false
@@ -146,7 +150,8 @@ module "snapshot" {
 }
 
 module "burst" {
-  source = "../../../modules/canary_target"
+  source                           = "../../../modules/canary_target"
+  deployment_service_account_email = var.deployment_service_account_email
 
   scenario                  = "burst"
   create_api_key_secret     = false
@@ -183,7 +188,8 @@ module "burst" {
 }
 
 module "dax" {
-  source = "../../../modules/canary_target"
+  source                           = "../../../modules/canary_target"
+  deployment_service_account_email = var.deployment_service_account_email
 
   scenario                  = "dax"
   create_api_key_secret     = false
@@ -261,7 +267,8 @@ module "soak" {
 }
 
 module "janitor" {
-  source = "../../../modules/janitor"
+  source                           = "../../../modules/janitor"
+  deployment_service_account_email = var.deployment_service_account_email
 
   project_id                = var.project_id
   job_region                = var.job_region
