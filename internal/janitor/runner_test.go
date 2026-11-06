@@ -94,6 +94,76 @@ func TestJanitorPreservesUnexpiredManagedSandbox(t *testing.T) {
 	}
 }
 
+func TestJanitorProtectsSoakUntilExpiryThenReclaimsIt(t *testing.T) {
+	createdAt := time.Date(2026, 11, 6, 0, 0, 0, 0, time.UTC)
+	expiresAt := createdAt.Add(6*time.Hour + 30*time.Minute)
+	for _, status := range []string{"active", "paused"} {
+		t.Run(status, func(t *testing.T) {
+			now := createdAt.Add(3 * time.Hour)
+			var deleteCalls int
+			metrics := &janitorMetricsRecorder{}
+			sandbox := canaryapi.Sandbox{
+				ID:       "sb-soak",
+				Status:   status,
+				Metadata: sandboxmetadata.LegacyCanaryMetadata("production", "us-west2", "production-us-west2", "run-soak", createdAt, expiresAt),
+			}
+			sandbox.Metadata["scenario"] = "soak"
+			r := Runner{
+				Config: config.Config{
+					Environment:            "production",
+					Region:                 "us-west2",
+					Target:                 "production-us-west2",
+					ResourceTTL:            time.Hour,
+					RetainFailedSandboxTTL: 2 * time.Hour,
+				},
+				Client: &fakeJanitorClient{
+					listSandboxesFn: func(_ context.Context, query map[string]string) ([]canaryapi.Sandbox, error) {
+						if query["metadata.managed_by"] != sandboxmetadata.ManagedByCanaryLegacy || deleteCalls > 0 {
+							return nil, nil
+						}
+						return []canaryapi.Sandbox{sandbox}, nil
+					},
+					deleteSandboxFn: func(_ context.Context, id string) error {
+						if id != sandbox.ID {
+							t.Fatalf("deleted sandbox %q, want %q", id, sandbox.ID)
+						}
+						deleteCalls++
+						return nil
+					},
+				},
+				Metrics: metrics,
+				Clock:   func() time.Time { return now },
+			}
+
+			for i, sweepAt := range []time.Time{now, expiresAt.Add(-time.Nanosecond)} {
+				now = sweepAt
+				if err := r.Run(context.Background()); err != nil {
+					t.Fatalf("protected sweep at %s: %v", now, err)
+				}
+				if deleteCalls != 0 || metrics.examined != int64(i+1) || metrics.deleted != 0 || metrics.deleteFailures != 0 {
+					t.Fatalf("soak must remain protected at %s: deleteCalls=%d metrics=%+v", now, deleteCalls, metrics)
+				}
+			}
+
+			now = expiresAt
+			if err := r.Run(context.Background()); err != nil {
+				t.Fatalf("expiry sweep: %v", err)
+			}
+			if deleteCalls != 1 || metrics.examined != 3 || metrics.deleted != 1 || metrics.deleteFailures != 0 {
+				t.Fatalf("abandoned soak must be reclaimed at expiry: deleteCalls=%d metrics=%+v", deleteCalls, metrics)
+			}
+
+			now = expiresAt.Add(time.Hour)
+			if err := r.Run(context.Background()); err != nil {
+				t.Fatalf("subsequent sweep: %v", err)
+			}
+			if deleteCalls != 1 || metrics.examined != 3 || metrics.deleted != 1 {
+				t.Fatalf("reclaimed soak must not be counted again: deleteCalls=%d metrics=%+v", deleteCalls, metrics)
+			}
+		})
+	}
+}
+
 func TestJanitorSkipsUnownedSandboxWithCoincidentalMetadata(t *testing.T) {
 	now := time.Date(2026, 7, 14, 20, 0, 0, 0, time.UTC)
 	deleteCalled := false

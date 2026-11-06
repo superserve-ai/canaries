@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -34,25 +35,29 @@ func NewClient(httpClient *http.Client, baseURL, apiKey, previewDomain string) *
 }
 
 type Sandbox struct {
-	ID               string            `json:"id"`
-	Name             string            `json:"name"`
-	Status           string            `json:"status"`
-	AccessToken      string            `json:"access_token"`
-	RoutingHint      string            `json:"routing_hint,omitempty"`
-	Metadata         map[string]string `json:"metadata"`
-	AutoDeleteAt     *time.Time        `json:"auto_delete_at"`
-	TimeoutSeconds   *int              `json:"timeout_seconds,omitempty"`
-	AutoDeleteSecond *int              `json:"auto_delete_seconds,omitempty"`
-	SourceSnapshotID string            `json:"source_snapshot_id,omitempty"`
+	ID                 string            `json:"id"`
+	Name               string            `json:"name"`
+	Status             string            `json:"status"`
+	AccessToken        string            `json:"access_token"`
+	RoutingHint        string            `json:"routing_hint,omitempty"`
+	Metadata           map[string]string `json:"metadata"`
+	AutoDeleteAt       *time.Time        `json:"auto_delete_at"`
+	TimeoutSeconds     *int              `json:"timeout_seconds,omitempty"`
+	IdleTimeoutSeconds *int              `json:"idle_timeout_seconds,omitempty"`
+	PreviewAccess      string            `json:"preview_access,omitempty"`
+	AutoDeleteSecond   *int              `json:"auto_delete_seconds,omitempty"`
+	SourceSnapshotID   string            `json:"source_snapshot_id,omitempty"`
 }
 
 type CreateSandboxRequest struct {
-	Name              string            `json:"name"`
-	FromTemplate      string            `json:"from_template,omitempty"`
-	FromSnapshot      string            `json:"from_snapshot,omitempty"`
-	TimeoutSeconds    int               `json:"timeout_seconds,omitempty"`
-	AutoDeleteSeconds int               `json:"auto_delete_seconds,omitempty"`
-	Metadata          map[string]string `json:"metadata,omitempty"`
+	Name               string            `json:"name"`
+	FromTemplate       string            `json:"from_template,omitempty"`
+	FromSnapshot       string            `json:"from_snapshot,omitempty"`
+	TimeoutSeconds     int               `json:"timeout_seconds,omitempty"`
+	AutoDeleteSeconds  int               `json:"auto_delete_seconds,omitempty"`
+	IdleTimeoutSeconds *int              `json:"idle_timeout_seconds,omitempty"`
+	PreviewAccess      string            `json:"preview_access,omitempty"`
+	Metadata           map[string]string `json:"metadata,omitempty"`
 }
 
 type UpdateSandboxRequest struct {
@@ -64,6 +69,17 @@ type UpdateSandboxRequest struct {
 type PublishPreviewPortRequest struct {
 	Port   int    `json:"port"`
 	Access string `json:"access"`
+}
+
+type PreviewToken struct {
+	Token         string     `json:"token"`
+	Port          int        `json:"port"`
+	Header        string     `json:"header"`
+	QueryParam    string     `json:"query_param"`
+	Access        string     `json:"access"`
+	PreviewAccess string     `json:"preview_access"`
+	TokenVersion  int64      `json:"token_version"`
+	ExpiresAt     *time.Time `json:"expires_at,omitempty"`
 }
 
 type ExecRequest struct {
@@ -247,6 +263,18 @@ func (c *Client) ResumeSandbox(ctx context.Context, id string) (ResumeResponse, 
 	return out, err
 }
 
+// ActivateSandbox is the SDK connect path: it resumes a paused sandbox and is
+// idempotent when the sandbox is already active. Data-plane calls alone do not
+// resume it.
+func (c *Client) ActivateSandbox(ctx context.Context, id string) (Sandbox, error) {
+	var out Sandbox
+	err := c.doJSON(ctx, http.MethodPost, "/sandboxes/"+url.PathEscape(id)+"/activate", map[string]any{}, &out)
+	if err == nil {
+		c.rememberRoutingHint(id, out.RoutingHint)
+	}
+	return out, err
+}
+
 func (c *Client) rememberRoutingHint(sandboxID, hint string) {
 	if sandboxID != "" && hint != "" {
 		c.routingHints.Store(sandboxID, hint)
@@ -286,6 +314,21 @@ func (c *Client) PublishPreviewPort(ctx context.Context, sandboxID string, req P
 	}
 	defer resp.Body.Close()
 	return require2xx(http.MethodPost, "/sandboxes/"+url.PathEscape(sandboxID)+"/preview-ports", resp)
+}
+
+func (c *Client) CreatePreviewToken(ctx context.Context, sandboxID string, port int) (PreviewToken, error) {
+	var out PreviewToken
+	// An empty request explicitly asks for a token without time expiry.
+	err := c.doJSON(ctx, http.MethodPost, "/sandboxes/"+url.PathEscape(sandboxID)+"/preview-ports/"+strconv.Itoa(port)+"/token", map[string]any{}, &out)
+	if err == nil && out.ExpiresAt != nil {
+		return PreviewToken{}, errors.New("preview token unexpectedly expires despite a non-expiring request")
+	}
+	return out, err
+}
+
+func (c *Client) DeletePreviewPort(ctx context.Context, sandboxID string, port int) error {
+	// Preview unpublication completes synchronously with a 204 response.
+	return c.doJSON(ctx, http.MethodDelete, "/sandboxes/"+url.PathEscape(sandboxID)+"/preview-ports/"+strconv.Itoa(port), nil, nil)
 }
 
 func (c *Client) Exec(ctx context.Context, sandboxID, accessToken string, req ExecRequest) (ExecResult, error) {
@@ -375,7 +418,7 @@ func (c *Client) doJSON(ctx context.Context, method, path string, in, out any) e
 	}
 	switch method {
 	case http.MethodPost:
-		if strings.HasSuffix(path, "/resume") {
+		if strings.HasSuffix(path, "/resume") || strings.HasSuffix(path, "/activate") {
 			if err := requireStatus(method, path, resp, http.StatusOK); err != nil {
 				return err
 			}

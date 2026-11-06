@@ -25,6 +25,7 @@ const (
 	ModeUILifecycle Mode = "ui-lifecycle"
 	ModeBurst       Mode = "burst"
 	ModeDax         Mode = "dax"
+	ModeSoak        Mode = "soak"
 
 	RuntimeLocal    Runtime = "local"
 	RuntimeCloudRun Runtime = "cloud-run"
@@ -72,6 +73,8 @@ type Config struct {
 	JanitorThreshold                time.Duration
 	BurstSize                       int
 	SlackWebhookURL                 string
+	SoakDuration                    time.Duration
+	SoakInterval                    time.Duration
 }
 
 type metricsConfig struct {
@@ -83,7 +86,7 @@ func Load(rawMode string) (Config, error) {
 	loadDotEnv()
 
 	mode := Mode(strings.TrimSpace(rawMode))
-	if mode != ModeLifecycle && mode != ModeJanitor && mode != ModeTemplate && mode != ModeSnapshot && mode != ModeUILifecycle && mode != ModeBurst && mode != ModeDax {
+	if mode != ModeLifecycle && mode != ModeJanitor && mode != ModeTemplate && mode != ModeSnapshot && mode != ModeUILifecycle && mode != ModeBurst && mode != ModeDax && mode != ModeSoak {
 		return Config{}, fmt.Errorf("invalid mode %q", rawMode)
 	}
 
@@ -182,6 +185,12 @@ func Load(rawMode string) (Config, error) {
 		},
 	}
 
+	if mode == ModeSoak {
+		if err := loadSoakConfig(&cfg); err != nil {
+			return Config{}, err
+		}
+	}
+
 	var requiredItems []struct {
 		value string
 		name  string
@@ -265,6 +274,49 @@ func Load(rawMode string) (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func loadSoakConfig(cfg *Config) error {
+	var err error
+	if cfg.SoakDuration, err = getenvDurationStrict("CANARY_SOAK_DURATION", 6*time.Hour); err != nil {
+		return err
+	}
+	if cfg.SoakDuration <= 0 || cfg.SoakDuration > 24*time.Hour {
+		return errors.New("CANARY_SOAK_DURATION must be positive and at most 24h")
+	}
+	if cfg.SoakInterval, err = getenvDurationStrict("CANARY_SOAK_INTERVAL", time.Minute); err != nil {
+		return err
+	}
+	if cfg.SoakInterval <= 0 || cfg.SoakInterval > cfg.SoakDuration {
+		return errors.New("CANARY_SOAK_INTERVAL must be positive and no longer than CANARY_SOAK_DURATION")
+	}
+	if cfg.RunTimeout, err = getenvDurationStrict("RUN_TIMEOUT", cfg.SoakDuration+15*time.Minute); err != nil {
+		return err
+	}
+	if cfg.RunTimeout <= cfg.SoakDuration || cfg.RunTimeout > cfg.SoakDuration+time.Hour {
+		return errors.New("soak RUN_TIMEOUT must exceed CANARY_SOAK_DURATION by at most 1h")
+	}
+	if cfg.LockTTL, err = getenvDurationStrict("LOCK_TTL", cfg.RunTimeout+15*time.Minute); err != nil {
+		return err
+	}
+	if cfg.LockTTL < cfg.RunTimeout+cfg.DeleteTimeout+time.Minute {
+		return errors.New("soak LOCK_TTL must cover RUN_TIMEOUT, DELETE_TIMEOUT, and a 1m reporting grace period")
+	}
+	if cfg.ResourceTTL, err = getenvDurationStrict("RESOURCE_TTL", cfg.RunTimeout+15*time.Minute); err != nil {
+		return err
+	}
+	if cfg.ResourceTTL < cfg.RunTimeout+cfg.DeleteTimeout+time.Minute || cfg.ResourceTTL > cfg.RunTimeout+time.Hour {
+		return errors.New("soak RESOURCE_TTL must cover RUN_TIMEOUT, DELETE_TIMEOUT, and a 1m grace period, and exceed RUN_TIMEOUT by at most 1h")
+	}
+	if cfg.PreviewPort < 1024 || cfg.PreviewPort >= 65535 {
+		return errors.New("soak PREVIEW_PORT must be between 1024 and 65534 (two consecutive ports are required)")
+	}
+	if cfg.CommandTimeout <= 0 || cfg.DeleteTimeout <= 0 || cfg.PreviewTimeout <= 0 {
+		return errors.New("soak command, delete, and preview timeouts must be positive")
+	}
+	// Soak resources always go through cleanup, including failed runs.
+	cfg.RetainFailedSandbox = false
+	return nil
 }
 
 func validMetricsExporter(v MetricsExporter) bool {

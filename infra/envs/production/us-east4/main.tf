@@ -219,6 +219,47 @@ module "dax" {
   ]
 }
 
+# Keep the six-hour run separate from the short lifecycle canaries.
+module "soak" {
+  source = "../../../modules/canary_target"
+
+  scenario              = "soak"
+  create_api_key_secret = false
+  scheduler_cron        = "0 0,12 * * *"
+  scheduler_time_zone   = "America/Los_Angeles"
+  job_timeout           = "22800s"
+  run_timeout           = "6h15m"
+  lock_ttl              = "6h30m"
+  missing_runs_window   = "19h"
+  extra_env = {
+    CANARY_SOAK_DURATION = "6h"
+    CANARY_SOAK_INTERVAL = "1m"
+    RESOURCE_TTL         = "6h30m"
+  }
+  slack_webhook_secret_name = local.benchmark_slack_webhook_secret_name
+  create_alerts             = var.create_alerts
+  project_id                = var.project_id
+  job_region                = var.job_region
+  target_name               = "production-us-east4"
+  environment               = "production"
+  target_region             = "us-east4"
+  api_base_url              = "https://api.superserve.ai"
+  preview_domain            = "sandbox.superserve.ai"
+  image                     = var.image
+  api_key_secret_name       = module.lifecycle.api_key_secret_name
+  lock_bucket_name          = "${var.project_id}-api-canary-locks"
+  otlp_metrics_endpoint     = local.otlp_endpoint
+  retain_failed_sandbox     = false
+  retain_failed_sandbox_ttl = local.retain_failed_sandbox_ttl
+  notification_channel_ids  = var.notification_channel_ids
+  labels                    = local.labels
+  vpc_connector             = null
+  depends_on = [
+    google_project_service.telemetry,
+    google_project_iam_member.deployment_alerting,
+  ]
+}
+
 module "janitor" {
   source = "../../../modules/janitor"
 
@@ -261,6 +302,7 @@ module "permissions" {
   benchmark_runtime_service_account_emails = {
     burst = module.burst.runtime_service_account_email
     dax   = module.dax.runtime_service_account_email
+    soak  = module.soak.runtime_service_account_email
   }
 }
 
