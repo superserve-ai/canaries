@@ -44,6 +44,11 @@ jobs:
       - name: Canary alert filter regression
         run: python3 -m unittest discover -s infra/modules/canary_target/tests -v
 
+      - name: Daily load deployment regression
+        run: |
+          python3 -m unittest discover -s infra/modules/load_runner/tests -v
+          python3 -m unittest discover -s .github/scripts/tests -v
+
       - name: Go fmt check
         run: |
           set -euo pipefail
@@ -138,10 +143,7 @@ jobs:
           cd "${{ matrix.workdir }}"
           terraform init -input=false
 
-          plan_args=("-var=image=api-canary:pr-${GITHUB_SHA}" "-var=ui_canary_image=ui-canary:pr-${GITHUB_SHA}")
-          if [[ "${{ matrix.name }}" == "staging" ]]; then
-            plan_args+=("-var=load_runner_image=api-canary:pr-${GITHUB_SHA}")
-          fi
+          plan_args=("-var=image=api-canary:pr-${GITHUB_SHA}" "-var=load_runner_image=api-canary:pr-${GITHUB_SHA}" "-var=ui_canary_image=ui-canary:pr-${GITHUB_SHA}")
 
           set +e
           terraform plan -input=false -lock=false -detailed-exitcode -no-color -out=tfplan "${plan_args[@]}" > /tmp/plan.log

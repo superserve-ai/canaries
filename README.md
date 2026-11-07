@@ -4,7 +4,6 @@ This repository deploys independent scheduled API lifecycle canaries for Superse
 
 Current targets:
 - `staging/us-central1`
-- `production/us-central1`
 - `production/us-east4`
 - `production/us-west2`
 
@@ -170,14 +169,13 @@ CI installs `playwright-core@1.57.0` from npm, matching `playwright-go v0.5700.1
 
 ## Target Inventory
 
-Discovered from `sandbox`:
+Active canary targets:
 
 | Target | Project | Region | API base URL | Preview domain |
 | --- | --- | --- | --- | --- |
 | staging | `rayai-dev` | `us-central1` | `https://api-staging.superserve.ai` | `staging-sandbox.superserve.ai` |
-| production central | `rayai-prod` | `us-central1` | `https://api.superserve.ai` | `sandbox.superserve.ai` |
-| production east | `rayai-prod` | `us-east4` | `https://api.superserve.ai` | `use-sandbox.superserve.ai` |
-| production west | `rayai-prod` | `us-west2` | `https://usw-api.superserve.ai` | `usw-sandbox.superserve.ai` |
+| production east | `rayai-prod` | `us-east4` | `https://api.superserve.ai` | `sandbox.superserve.ai` |
+| production west | `rayai-prod` | `us-west2` | `https://api-usw.superserve.ai` | `usw-sandbox.superserve.ai` |
 
 ## Required Secrets
 
@@ -185,7 +183,6 @@ Terraform creates secret containers only. Populate versions manually after apply
 
 Expected API canary secret names:
 - `api-canary-key-staging-us-central1`
-- `api-canary-key-production-us-central1`
 - `api-canary-key-production-us-east4`
 - `api-canary-key-production-us-west2`
 
@@ -267,7 +264,27 @@ Manual staging execution creates and deletes real resources. Use a dedicated can
 
 ### Load runner
 
-The load runner can also be run directly from a local checkout. It uses the same `CANARY_API_KEY` as the regular canary. Staging is the default deployment target, but the binary is not staging-only: it supports the current target inventory above. Production runs require the explicit `LOAD_TEST_PRODUCTION_OPT_IN=true` guard.
+The load runner uses the same API credentials, lifecycle operations, metrics, and janitor ownership as the canaries. Daily jobs run 1,000 complete lifecycles with up to 100 workers per target. Each lifecycle creates a sandbox, waits for active, verifies a short command, pauses and waits for paused, resumes and verifies execution with fresh credentials, then deletes and waits for deletion. Production runs require `LOAD_TEST_PRODUCTION_OPT_IN=true`.
+
+| Target | Daily start, America/Los_Angeles | Allowed window | Job |
+| --- | --- | --- | --- |
+| staging/us-central1 | 07:45 | 07:45–08:12 | `sandbox-daily-load-staging-us-central1` |
+| production/us-east4 | 07:45 | 07:45–08:12 | `sandbox-daily-load-production-us-east4` |
+| production/us-west2 | 08:15 | 08:15–08:42 | `sandbox-daily-load-production-us-west2` |
+
+Staging and production use separate projects. A project-wide GCS lease serializes production regions. Scheduled runs have a 20-minute workload budget, two-minute cleanup budget, one minute reserved for reporting, a 25-minute Cloud Run task limit, and 45-minute leases. Late dispatches are rejected unless the full budget fits. A separate admission lease remains through the daily window after completion, preventing duplicate deliveries from starting another run. The work context has an absolute deadline before cleanup/reporting time, so delays cannot extend the assigned window. The runtime also borrows the existing target burst/dax/soak leases; it blocks if a benchmark is already active and prevents a new local heavy benchmark from racing the load. Routine lifecycle canaries continue independently.
+
+Scheduling excludes the [public Friday TTI](https://github.com/computesdk/benchmarks/blob/master/.github/workflows/sandbox-tti-benchmarks.yml) and [DAX](https://github.com/computesdk/benchmarks/blob/master/.github/workflows/sandbox-dax-benchmarks.yml) windows (13:00/13:30 UTC with one-hour job limits and a buffer), observed private bursts near 00:00/01:00 and 17:00 UTC, and conservative historical Lindy windows around 10:55 UTC/07:00 Eastern and 09:00 Pacific. Lindy changed its workload in August, so these are historical exclusions rather than a verified current customer cron. A bounded public GitHub preflight also rejects active or queued ComputeSDK sandbox workflows; unavailable or incomplete status fails closed. [Continuous minute reliability probes](https://www.computesdk.com/benchmarks/sandboxes/reliability) are allowed. Private/on-demand work that is not visible in public metadata and ordinary shared-customer traffic cannot be fully isolated by this scheduler.
+
+One final **Load Testing Results** summary goes to `#benchmark-results`, using the existing populated production webhook. The fenced monospace table lists create/pause/resume/delete/lifecycle p50, p95, p99 and successful sample counts in milliseconds. It also reports target, configured/peak concurrency, configured/started/succeeded/failed/unstarted sandboxes, duration, success rate, successful lifecycle throughput, failure stages, and cleanup failures. Exact untrimmed percentiles and throughput are computed from in-process observations, with no extra sandbox requests for aggregation. Failed and unattempted phases do not contribute invented zero latencies.
+
+Failures, blocked runs, summary-delivery failures, metrics-export failures, startup/task failures, and Scheduler dispatch errors alert the existing `#on-call` channels. Per-operation errors do not trigger separate log notifications. There is no pre-first-run missing-result alert.
+
+Cleanup runs independently after cancellation. Scheduled sandboxes have a one-minute active-session timeout and idle timeout to limit orphaned compute after a crashed runner; ownership and paused auto-delete retention remain two hours for the janitor. These platform reapers are best effort during failures. Uncertain creation outcomes or cleanup failures stop replacement dispatch rather than accumulating unobserved sandboxes above the worker limit. Verify canary-team quota headroom for 100 load workers plus routine canaries before enabling a new target; this workflow does not change team quotas.
+
+Deployment first applies the narrow production secret-access grant for the existing staging load identity, then deploys staging, then production. UI-only deployment skips that grant and leaves load jobs/images alone. All roots require `load_runner_image`, pinned independently from API canary rollbacks; normal deployment supplies the shared image containing `/load-runner`. The default daily schedules are enabled after normal deployment. Set `daily_load_scheduler_enabled=false` to pause them.
+
+For local/manual use, `LOAD_TEST_SCENARIO=create` remains the default and preserves the existing create/verify/delete workload; choose `lifecycle` for pause/resume and deletion-completion samples. The staging manual Cloud Run job retains its 100/10 defaults and uses shared/external guards without requiring the daily slot. Unguarded local runs remain explicit operator responsibility.
 
 For a minimal staging run, start with one operation and one worker:
 
@@ -291,7 +308,7 @@ export CANARY_TARGET=production-us-east4
 export CANARY_ENVIRONMENT=production
 export CANARY_REGION=us-east4
 export API_BASE_URL=https://api.superserve.ai
-export PREVIEW_DOMAIN=use-sandbox.superserve.ai
+export PREVIEW_DOMAIN=sandbox.superserve.ai
 export CANARY_API_KEY=ss_live_...
 export LOAD_TEST_PRODUCTION_OPT_IN=true
 export LOAD_TEST_OPERATIONS=1
@@ -456,12 +473,12 @@ To manually clear retained sandboxes, rerun the janitor job after the retention 
 
 Production lifecycle canaries are scheduled automatically after the production Terraform roots have been applied and the production API key secrets have been populated.
 
-The load-runner binary supports production targets, but this PR does not require a production load-runner deployment. A production job can be added independently later using the same `/load-runner` binary, the appropriate production secret and routing values, and `LOAD_TEST_PRODUCTION_OPT_IN=true`.
+The production roots deploy the daily lifecycle load jobs in east and west, using `/load-runner` and explicit production opt-in. Their benchmark summaries and on-call alerts use separate destinations as described above.
 
 The east production region uses the public Google Telemetry API instead of the private collector path, so it does not need VPC access.
 
 Checklist:
-1. Confirm the production lifecycle and janitor jobs were created for all three regions.
+1. Confirm the production lifecycle and janitor jobs were created for both regions.
 2. Populate the production Secret Manager secret versions with the canary API keys.
 3. Verify the scheduled lifecycle executions start after the secrets are populated.
 4. Inspect the job logs for the created run ID, sandbox ID, and cleanup outcome.
@@ -471,16 +488,6 @@ Checklist:
 Exact production job commands:
 
 ```bash
-gcloud run jobs execute api-canary-production-us-central1 \
-  --project rayai-prod \
-  --region us-central1 \
-  --wait
-
-gcloud run jobs execute api-canary-janitor-production-us-central1 \
-  --project rayai-prod \
-  --region us-central1 \
-  --wait
-
 gcloud run jobs execute api-canary-production-us-east4 \
   --project rayai-prod \
   --region us-east4 \

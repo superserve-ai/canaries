@@ -234,6 +234,34 @@ resource "google_cloud_run_v2_job" "load_runner" {
           value = "staging-sandbox.superserve.ai"
         }
         env {
+          name  = "CANARY_RUNTIME"
+          value = "cloud-run"
+        }
+        env {
+          name  = "CANARY_LOCK_BACKEND"
+          value = "gcs"
+        }
+        env {
+          name  = "LOCK_BUCKET"
+          value = google_storage_bucket.locks.name
+        }
+        env {
+          name  = "LOAD_TEST_LOCK_TTL"
+          value = "45m"
+        }
+        env {
+          name  = "LOAD_TEST_BENCHMARK_GUARD"
+          value = "true"
+        }
+        env {
+          name  = "LOAD_TEST_EXTERNAL_BENCHMARK_GUARD"
+          value = "true"
+        }
+        env {
+          name  = "LOAD_TEST_GLOBAL_LOCK"
+          value = "true"
+        }
+        env {
           name  = "LOAD_TEST_OPERATIONS"
           value = "100"
         }
@@ -277,6 +305,40 @@ resource "google_cloud_run_v2_job" "load_runner" {
       }
     }
   }
+}
+
+module "daily_load" {
+  source = "../../../modules/load_runner"
+
+  project_id                     = var.project_id
+  job_region                     = var.job_region
+  target_name                    = "staging-us-central1"
+  environment                    = "staging"
+  target_region                  = "us-central1"
+  api_base_url                   = "https://api-staging.superserve.ai"
+  preview_domain                 = "staging-sandbox.superserve.ai"
+  image                          = var.load_runner_image
+  api_key_secret_name            = module.lifecycle.api_key_secret_name
+  lock_bucket_name               = google_storage_bucket.locks.name
+  otlp_metrics_endpoint          = local.otlp_endpoint
+  create_runtime_service_account = false
+  runtime_service_account_email  = google_service_account.load_runner.email
+  manage_api_key_access          = false
+  manage_slack_webhook_access    = false
+  slack_webhook_secret_name      = "projects/887554770957/secrets/canary-benchmark-slack-webhook"
+  scheduler_enabled              = var.daily_load_scheduler_enabled
+  scheduler_cron                 = "45 7 * * *"
+  daily_window_start             = "07:45"
+  daily_window_end               = "08:12"
+  notification_channel_ids       = var.oncall_notification_channel_ids
+  create_alerts                  = var.create_alerts
+  labels                         = local.labels
+  vpc_connector                  = "projects/rayai-dev/locations/us-central1/connectors/ss-vpc-conn-f1b3552"
+  vpc_egress                     = "ALL_TRAFFIC"
+  depends_on = [
+    google_secret_manager_secret_iam_member.load_runner_staging_accessor,
+    google_project_iam_member.deployment_alerting,
+  ]
 }
 
 module "janitor" {
