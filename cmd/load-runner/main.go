@@ -80,6 +80,11 @@ func runConfigured(ctx context.Context, cfg loadrunner.Config, deps runDependenc
 	var provider metrics.Provider = metrics.NoopProvider{}
 	shutdown := func(context.Context) error { return nil }
 	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := shutdown(shutdownCtx); err != nil {
+			runErr = errors.Join(runErr, errors.New("load test metrics export failed"))
+		}
 		report := summary.Report(cfg, runErr)
 		log.Info().Str("run_id", cfg.RunID).Str("summary", report).Msg("load testing summary")
 		if cfg.SlackWebhookURL != "" {
@@ -93,13 +98,9 @@ func runConfigured(ctx context.Context, cfg loadrunner.Config, deps runDependenc
 		if runErr != nil {
 			result = "failure"
 		}
-		provider.RecordRun(context.Background(), cfg.Environment, cfg.Region, cfg.Target, scenario, result, summary.Duration)
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := shutdown(shutdownCtx); err != nil {
-			runErr = errors.Join(runErr, errors.New("load test metrics export failed"))
-			result = "failure"
-		}
+		// Overall success cannot be exported through a provider whose shutdown
+		// may still fail. The terminal log and Cloud Run execution metric cover
+		// the full job outcome, including metrics and summary delivery.
 		event := log.Info()
 		if runErr != nil {
 			event = log.Error().Err(runErr)

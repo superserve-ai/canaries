@@ -81,28 +81,29 @@ func (e *cliEvents) snapshot() []string {
 
 type cliMetrics struct {
 	metrics.NoopProvider
-	mu       sync.Mutex
-	events   *cliEvents
-	runs     []string
-	scenario []string
-	deltas   []int64
-	overlaps int
-	ctxErrs  []error
+	mu                 sync.Mutex
+	events             *cliEvents
+	runs               []string
+	deltas             []int64
+	executionScenarios []string
+	overlaps           int
+	overlapScenarios   []string
+	ctxErrs            []error
 }
 
-func (m *cliMetrics) RecordRun(ctx context.Context, _, _, _, scenario, result string, _ time.Duration) {
+func (m *cliMetrics) RecordRun(ctx context.Context, _, _, _, _, result string, _ time.Duration) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.runs = append(m.runs, result)
-	m.scenario = append(m.scenario, scenario)
 	m.ctxErrs = append(m.ctxErrs, ctx.Err())
 	m.events.add("run_metric:" + result)
 }
 
-func (m *cliMetrics) RecordExecutionDelta(ctx context.Context, _, _, _, _ string, delta int64) {
+func (m *cliMetrics) RecordExecutionDelta(ctx context.Context, _, _, _, scenario string, delta int64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.deltas = append(m.deltas, delta)
+	m.executionScenarios = append(m.executionScenarios, scenario)
 	m.ctxErrs = append(m.ctxErrs, ctx.Err())
 	if delta > 0 {
 		m.events.add("execution_start")
@@ -111,10 +112,11 @@ func (m *cliMetrics) RecordExecutionDelta(ctx context.Context, _, _, _, _ string
 	}
 }
 
-func (m *cliMetrics) RecordOverlapSkip(ctx context.Context, _, _, _, _ string) {
+func (m *cliMetrics) RecordOverlapSkip(ctx context.Context, _, _, _, scenario string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.overlaps++
+	m.overlapScenarios = append(m.overlapScenarios, scenario)
 	m.ctxErrs = append(m.ctxErrs, ctx.Err())
 	m.events.add("overlap_skip")
 }
@@ -299,6 +301,9 @@ func (h *cliHarness) assertTerminal(t *testing.T, result string) {
 	if len(h.unexpected) != 0 {
 		t.Fatalf("unexpected requests: %v", h.unexpected)
 	}
+	if len(h.metrics.runs) != 0 {
+		t.Fatalf("load runner emitted overall run metrics before its full job outcome was known: %v", h.metrics.runs)
+	}
 	var terminal, summaryLogs int
 	for _, line := range strings.Split(strings.TrimSpace(h.logs.String()), "\n") {
 		var entry map[string]any
@@ -363,19 +368,19 @@ func TestRunConfiguredPostsOneFinalSummaryAfterCleanupAndLeaseRelease(t *testing
 			if h.creates != 1 || h.locker.acquires != 1 || h.locker.releases != 1 || h.locker.closeCalls != 1 || h.shutdownCalls != 1 {
 				t.Fatalf("creates=%d acquire=%d release=%d close=%d shutdown=%d", h.creates, h.locker.acquires, h.locker.releases, h.locker.closeCalls, h.shutdownCalls)
 			}
-			if !reflect.DeepEqual(h.locker.acquiredKeys, []string{h.cfg.Target + "-loadtest"}) || !reflect.DeepEqual(h.metrics.deltas, []int64{1, -1}) || !reflect.DeepEqual(h.metrics.runs, []string{wantResult}) || h.metrics.overlaps != 0 || !reflect.DeepEqual(h.metrics.scenario, []string{"loadtest-create"}) {
-				t.Fatalf("unexpected coordination or terminal telemetry: keys=%v deltas=%v runs=%v overlap=%d scenarios=%v", h.locker.acquiredKeys, h.metrics.deltas, h.metrics.runs, h.metrics.overlaps, h.metrics.scenario)
+			if !reflect.DeepEqual(h.locker.acquiredKeys, []string{h.cfg.Target + "-loadtest"}) || !reflect.DeepEqual(h.metrics.deltas, []int64{1, -1}) || h.metrics.overlaps != 0 || !reflect.DeepEqual(h.metrics.executionScenarios, []string{"loadtest-create", "loadtest-create"}) {
+				t.Fatalf("unexpected coordination or terminal telemetry: keys=%v deltas=%v runs=%v overlap=%d scenarios=%v", h.locker.acquiredKeys, h.metrics.deltas, h.metrics.runs, h.metrics.overlaps, h.metrics.executionScenarios)
 			}
 			if h.createFail {
 				if h.deletes != 0 {
 					t.Fatal("failed create without ID should not issue deletion")
 				}
-				assertEventOrder(t, h.events.snapshot(), "create", "execution_end", "lease_release", "locker_close", "summary_post", "run_metric:failure", "metrics_shutdown")
+				assertEventOrder(t, h.events.snapshot(), "create", "execution_end", "lease_release", "locker_close", "metrics_shutdown", "summary_post")
 			} else {
 				if h.deletes != 1 {
 					t.Fatal("created sandbox did not receive exactly one cleanup attempt")
 				}
-				assertEventOrder(t, h.events.snapshot(), "delete", "execution_end", "lease_release", "locker_close", "summary_post", "run_metric:"+wantResult, "metrics_shutdown")
+				assertEventOrder(t, h.events.snapshot(), "delete", "execution_end", "lease_release", "locker_close", "metrics_shutdown", "summary_post")
 			}
 			if wantResult == "success" && !strings.Contains(h.summaries[0], "Sandboxes: 1 total, 1 started, 1 succeeded, 0 failed, 0 unstarted") {
 				t.Fatal("successful summary has incorrect final counts")
@@ -396,13 +401,13 @@ func TestRunConfiguredGuardBlockedPostsFailureWithoutSandboxRequests(t *testing.
 		t.Fatalf("runConfigured error=%v, want blocked guard", err)
 	}
 	h.assertTerminal(t, "failure")
-	if h.sandboxRequests != 0 || h.locker.releases != 0 || h.locker.closeCalls != 1 || h.metrics.overlaps != 1 || len(h.metrics.deltas) != 0 || !reflect.DeepEqual(h.metrics.runs, []string{"failure"}) {
+	if h.sandboxRequests != 0 || h.locker.releases != 0 || h.locker.closeCalls != 1 || h.metrics.overlaps != 1 || !reflect.DeepEqual(h.metrics.overlapScenarios, []string{"loadtest-create"}) || len(h.metrics.deltas) != 0 {
 		t.Fatalf("blocked run performed workload or incorrect telemetry: requests=%d releases=%d closes=%d overlaps=%d deltas=%v runs=%v", h.sandboxRequests, h.locker.releases, h.locker.closeCalls, h.metrics.overlaps, h.metrics.deltas, h.metrics.runs)
 	}
 	if !strings.Contains(h.summaries[0], "Sandboxes: 100 total, 0 started, 0 succeeded, 0 failed, 100 unstarted") || !strings.Contains(h.summaries[0], "Outcome: failed") {
 		t.Fatal("blocked summary omitted failure or unstarted count")
 	}
-	assertEventOrder(t, h.events.snapshot(), "lease_acquire", "overlap_skip", "locker_close", "summary_post", "run_metric:failure", "metrics_shutdown")
+	assertEventOrder(t, h.events.snapshot(), "lease_acquire", "overlap_skip", "locker_close", "metrics_shutdown", "summary_post")
 }
 
 func TestRunConfiguredCanceledWorkStillCleansAndReports(t *testing.T) {
@@ -425,7 +430,7 @@ func TestRunConfiguredCanceledWorkStillCleansAndReports(t *testing.T) {
 	if !strings.Contains(h.summaries[0], "Sandboxes: 100 total, 1 started, 0 succeeded, 1 failed, 99 unstarted") || !strings.Contains(h.summaries[0], "Outcome: canceled") {
 		t.Fatal("canceled summary omitted final counts or cancellation outcome")
 	}
-	if !reflect.DeepEqual(h.metrics.deltas, []int64{1, -1}) || !reflect.DeepEqual(h.metrics.runs, []string{"failure"}) || h.metrics.overlaps != 0 {
+	if !reflect.DeepEqual(h.metrics.deltas, []int64{1, -1}) || h.metrics.overlaps != 0 {
 		t.Fatal("canceled run did not balance execution telemetry")
 	}
 	for _, ctxErr := range h.metrics.ctxErrs {
@@ -433,7 +438,7 @@ func TestRunConfiguredCanceledWorkStillCleansAndReports(t *testing.T) {
 			t.Fatal("terminal telemetry inherited a canceled context")
 		}
 	}
-	assertEventOrder(t, h.events.snapshot(), "delete", "execution_end", "lease_release", "locker_close", "summary_post", "run_metric:failure", "metrics_shutdown")
+	assertEventOrder(t, h.events.snapshot(), "delete", "execution_end", "lease_release", "locker_close", "metrics_shutdown", "summary_post")
 }
 
 func TestRunConfiguredSummaryDeliveryFailureIsGenericAndAlertable(t *testing.T) {
@@ -453,10 +458,10 @@ func TestRunConfiguredSummaryDeliveryFailureIsGenericAndAlertable(t *testing.T) 
 				t.Fatal("summary delivery error exposed webhook URL")
 			}
 			h.assertTerminal(t, "failure")
-			if !reflect.DeepEqual(h.metrics.runs, []string{"failure"}) || !reflect.DeepEqual(h.metrics.deltas, []int64{1, -1}) || h.shutdownCalls != 1 || h.deletes != 1 || h.locker.releases != 1 {
+			if !reflect.DeepEqual(h.metrics.deltas, []int64{1, -1}) || h.shutdownCalls != 1 || h.deletes != 1 || h.locker.releases != 1 {
 				t.Fatal("summary delivery failure was not reflected in terminal telemetry or skipped finalization")
 			}
-			assertEventOrder(t, h.events.snapshot(), "delete", "lease_release", "summary_post", "run_metric:failure", "metrics_shutdown")
+			assertEventOrder(t, h.events.snapshot(), "delete", "lease_release", "locker_close", "metrics_shutdown", "summary_post")
 		})
 	}
 }
@@ -465,14 +470,23 @@ func TestRunConfiguredMetricsShutdownFailureFailsJob(t *testing.T) {
 	h := newCLIHarness(t)
 	h.shutdownErr = errors.New("private-metrics-exporter-error")
 	err := runConfigured(context.Background(), h.cfg, h.deps())
-	if err == nil || !strings.Contains(err.Error(), "load test metrics export failed") || strings.Contains(err.Error(), "private-metrics-exporter-error") {
+	if err == nil || err.Error() != "load test metrics export failed" {
 		t.Fatalf("unexpected metrics shutdown result: %v", err)
 	}
 	h.assertTerminal(t, "failure")
-	if h.shutdownCalls != 1 || len(h.metrics.runs) != 1 || h.deletes != 1 || h.locker.releases != 1 || !reflect.DeepEqual(h.metrics.deltas, []int64{1, -1}) {
+	if h.shutdownCalls != 1 || h.deletes != 1 || h.locker.releases != 1 || !reflect.DeepEqual(h.metrics.deltas, []int64{1, -1}) {
 		t.Fatal("metrics export failure skipped or duplicated finalization")
 	}
-	assertEventOrder(t, h.events.snapshot(), "delete", "lease_release", "summary_post", "metrics_shutdown")
+	if !strings.Contains(h.summaries[0], "Outcome: failed") || strings.Contains(h.summaries[0], "Outcome: succeeded") {
+		t.Fatal("metrics export failure was omitted from the single final summary")
+	}
+	if !strings.Contains(h.summaries[0], "Sandboxes: 1 total, 1 started, 1 succeeded, 0 failed, 0 unstarted") {
+		t.Fatal("metrics export failure incorrectly changed successful lifecycle counts")
+	}
+	if strings.Contains(h.summaries[0], "private-metrics-exporter-error") || strings.Contains(h.logs.String(), "private-metrics-exporter-error") {
+		t.Fatal("metrics export failure exposed the private exporter error")
+	}
+	assertEventOrder(t, h.events.snapshot(), "delete", "execution_end", "lease_release", "locker_close", "metrics_shutdown", "summary_post")
 }
 
 func TestRunConfiguredInitializationFailureStillPostsUnstartedSummary(t *testing.T) {
@@ -492,8 +506,13 @@ func TestRunConfiguredInitializationFailureStillPostsUnstartedSummary(t *testing
 			if h.sandboxRequests != 0 || h.locker.acquires != 0 || len(h.metrics.deltas) != 0 || !strings.Contains(h.summaries[0], "Sandboxes: 100 total, 0 started, 0 succeeded, 0 failed, 100 unstarted") {
 				t.Fatal("initialization failure started workload or omitted unstarted count")
 			}
-			if mode == "locker" && (!reflect.DeepEqual(h.metrics.runs, []string{"failure"}) || h.shutdownCalls != 1) {
-				t.Fatal("coordination initialization failure did not finalize initialized metrics")
+			if mode == "locker" {
+				if h.shutdownCalls != 1 {
+					t.Fatal("coordination initialization failure did not finalize initialized metrics")
+				}
+				assertEventOrder(t, h.events.snapshot(), "metrics_init", "locker_init", "metrics_shutdown", "summary_post")
+			} else if h.shutdownCalls != 0 {
+				t.Fatal("metrics initialization failure shut down an uninitialized provider")
 			}
 		})
 	}
