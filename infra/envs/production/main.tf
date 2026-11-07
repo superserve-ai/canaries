@@ -206,6 +206,46 @@ resource "google_secret_manager_secret" "benchmark_slack_webhook" {
   labels = local.labels
 }
 
+# This existing staging runtime identity must read the populated production
+# reporting secret before the staging daily job is created.
+resource "google_secret_manager_secret_iam_member" "staging_load_reporting_accessor" {
+  project   = var.project_id
+  secret_id = google_secret_manager_secret.benchmark_slack_webhook.secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:sbx-load-runner-staging@rayai-dev.iam.gserviceaccount.com"
+}
+
+module "daily_load" {
+  for_each = local.lifecycle_targets
+  source   = "../../modules/load_runner"
+
+  project_id                = var.project_id
+  job_region                = each.value.job_region
+  target_name               = each.key
+  environment               = "production"
+  target_region             = each.value.target_region
+  api_base_url              = each.value.api_base_url
+  preview_domain            = each.value.preview_domain
+  image                     = var.load_runner_image
+  api_key_secret_name       = module.lifecycle[each.key].api_key_secret_name
+  lock_bucket_name          = google_storage_bucket.locks.name
+  otlp_metrics_endpoint     = each.value.otlp_endpoint
+  slack_webhook_secret_name = google_secret_manager_secret.benchmark_slack_webhook.secret_id
+  scheduler_enabled         = var.daily_load_scheduler_enabled
+  scheduler_cron            = "15 8 * * *"
+  daily_window_start        = "08:15"
+  daily_window_end          = "08:42"
+  notification_channel_ids  = var.oncall_notification_channel_ids
+  create_alerts             = var.create_alerts
+  labels                    = merge(local.labels, { region = each.value.target_region })
+  vpc_connector             = try(each.value.vpc_connector, null)
+  vpc_egress                = try(each.value.vpc_egress, "ALL_TRAFFIC")
+  vpc_network               = try(each.value.vpc_network, null)
+  vpc_subnetwork            = try(each.value.vpc_subnetwork, null)
+  vpc_tags                  = try(each.value.vpc_tags, [])
+  depends_on                = [google_project_iam_member.deployment_alerting]
+}
+
 module "burst" {
   for_each = local.lifecycle_targets
   source   = "../../modules/canary_target"

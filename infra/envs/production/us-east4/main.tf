@@ -145,6 +145,35 @@ module "snapshot" {
   ]
 }
 
+module "daily_load" {
+  source = "../../../modules/load_runner"
+
+  project_id                = var.project_id
+  job_region                = var.job_region
+  target_name               = "production-us-east4"
+  environment               = "production"
+  target_region             = "us-east4"
+  api_base_url              = "https://api.superserve.ai"
+  preview_domain            = "sandbox.superserve.ai"
+  image                     = var.load_runner_image
+  api_key_secret_name       = module.lifecycle.api_key_secret_name
+  lock_bucket_name          = "${var.project_id}-api-canary-locks"
+  otlp_metrics_endpoint     = local.otlp_endpoint
+  slack_webhook_secret_name = local.benchmark_slack_webhook_secret_name
+  scheduler_enabled         = var.daily_load_scheduler_enabled
+  scheduler_cron            = "45 7 * * *"
+  daily_window_start        = "07:45"
+  daily_window_end          = "08:12"
+  notification_channel_ids  = var.oncall_notification_channel_ids
+  create_alerts             = var.create_alerts
+  labels                    = local.labels
+  vpc_connector             = null
+  depends_on = [
+    google_project_service.telemetry,
+    google_project_iam_member.deployment_alerting,
+  ]
+}
+
 module "burst" {
   source = "../../../modules/canary_target"
 

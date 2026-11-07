@@ -18,7 +18,9 @@ import (
 	"github.com/superserve-ai/canaries/internal/config"
 	"github.com/superserve-ai/canaries/internal/lifecycle"
 	"github.com/superserve-ai/canaries/internal/loadrunner"
+	"github.com/superserve-ai/canaries/internal/lock"
 	"github.com/superserve-ai/canaries/internal/metrics"
+	"github.com/superserve-ai/canaries/internal/slack"
 )
 
 func main() {
@@ -37,21 +39,7 @@ func run() int {
 	}
 	log.Info().Str("run_id", cfg.RunID).Str("environment", cfg.Environment).Int("operations", cfg.Operations).Int("concurrency", cfg.Concurrency).Dur("run_timeout", cfg.RunTimeout).Msg("starting load test")
 
-	metricsCfg := loadrunnerMetricsConfig()
-	mp, shutdownMetrics, err := metrics.NewProvider(ctx, metricsCfg)
-	if err != nil {
-		return fail(err)
-	}
-	defer func() {
-		if shutdownErr := shutdownMetrics(context.Background()); shutdownErr != nil {
-			log.Warn().Err(shutdownErr).Msg("metrics shutdown failed")
-		}
-	}()
-
-	httpClient := &http.Client{Timeout: cfg.HTTPTimeout}
-	client := canaryapi.NewClient(httpClient, cfg.APIBaseURL, cfg.APIKey, cfg.PreviewDomain)
-	runner := loadrunner.Runner{Config: cfg, Ops: lifecycle.Operations{Client: client, Metrics: mp, Clock: time.Now, HTTP: httpClient}, Clock: time.Now}
-	_, err = runner.Run(ctx)
+	err = runConfigured(ctx, cfg, runDependencies{})
 	if err != nil && !errors.Is(err, context.Canceled) {
 		return fail(err)
 	}
@@ -60,6 +48,105 @@ func run() int {
 		return 1
 	}
 	return 0
+}
+
+type runDependencies struct {
+	Now        func() time.Time
+	HTTP       *http.Client
+	NewMetrics func(context.Context, config.Config) (metrics.Provider, func(context.Context) error, error)
+	NewLocker  func(context.Context, lock.Config) (lock.Lock, func(), error)
+}
+
+func runConfigured(ctx context.Context, cfg loadrunner.Config, deps runDependencies) (runErr error) {
+	if deps.Now == nil {
+		deps.Now = time.Now
+	}
+	if deps.HTTP == nil {
+		deps.HTTP = &http.Client{Timeout: cfg.HTTPTimeout}
+	}
+	if deps.NewMetrics == nil {
+		deps.NewMetrics = metrics.NewProvider
+	}
+	if deps.NewLocker == nil {
+		deps.NewLocker = lock.New
+	}
+	scenario := "loadtest-create"
+	if cfg.Scenario == "lifecycle" {
+		scenario = "loadtest-lifecycle"
+	}
+	summary := loadrunner.Summary{
+		ConfiguredOperations: int64(cfg.Operations), ConfiguredConcurrency: int64(cfg.Concurrency), Unstarted: int64(cfg.Operations),
+	}
+	var provider metrics.Provider = metrics.NoopProvider{}
+	shutdown := func(context.Context) error { return nil }
+	defer func() {
+		report := summary.Report(cfg, runErr)
+		log.Info().Str("run_id", cfg.RunID).Str("summary", report).Msg("load testing summary")
+		if cfg.SlackWebhookURL != "" {
+			if err := slack.Post(context.Background(), deps.HTTP, cfg.SlackWebhookURL, report); err != nil {
+				// HTTP errors can contain the secret webhook URL. Keep them out
+				// of logs, returned errors, and the public result summary.
+				runErr = errors.Join(runErr, errors.New("load test summary delivery failed"))
+			}
+		}
+		result := "success"
+		if runErr != nil {
+			result = "failure"
+		}
+		provider.RecordRun(context.Background(), cfg.Environment, cfg.Region, cfg.Target, scenario, result, summary.Duration)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := shutdown(shutdownCtx); err != nil {
+			runErr = errors.Join(runErr, errors.New("load test metrics export failed"))
+			result = "failure"
+		}
+		event := log.Info()
+		if runErr != nil {
+			event = log.Error().Err(runErr)
+		}
+		event.Str("run_id", cfg.RunID).Str("environment", cfg.Environment).Str("region", cfg.Region).
+			Str("target", cfg.Target).Str("result", result).Int("configured_operations", cfg.Operations).
+			Int("configured_concurrency", cfg.Concurrency).Int64("started", summary.Started).
+			Int64("completed", summary.Completed).Int64("failed", summary.Failed).Int64("unstarted", summary.Unstarted).
+			Int64("peak_in_flight", summary.PeakInFlight).Int64("cleanup_failures", summary.CleanupFailures).
+			Dur("duration", summary.Duration).Msg("load test completed")
+	}()
+
+	mp, closeMetrics, err := deps.NewMetrics(ctx, loadrunnerMetricsConfig())
+	if err != nil {
+		return fmt.Errorf("initialize load test metrics: %w", err)
+	}
+	provider, shutdown = mp, closeMetrics
+	locker, closeLocker, err := deps.NewLocker(ctx, lock.Config{Backend: cfg.LockBackend, Bucket: cfg.LockBucket, FilePath: cfg.LockFile})
+	if err != nil {
+		return fmt.Errorf("initialize load test coordination: %w", err)
+	}
+	defer closeLocker()
+
+	guard, err := loadrunner.AcquireGuard(ctx, cfg, locker, deps.Now, deps.HTTP)
+	if err != nil {
+		if errors.Is(err, loadrunner.ErrGuardBlocked) {
+			provider.RecordOverlapSkip(context.Background(), cfg.Environment, cfg.Region, cfg.Target, scenario)
+		}
+		return err
+	}
+	// This scope releases all leases while the lock client is still open and
+	// before the final report is posted, including cancellation/failure paths.
+	return func() (err error) {
+		defer func() { err = errors.Join(err, guard.Release(context.Background())) }()
+		provider.RecordExecutionDelta(ctx, cfg.Environment, cfg.Region, cfg.Target, scenario, 1)
+		defer provider.RecordExecutionDelta(context.Background(), cfg.Environment, cfg.Region, cfg.Target, scenario, -1)
+		workCtx := ctx
+		if !guard.Deadline.IsZero() {
+			var cancel context.CancelFunc
+			workCtx, cancel = context.WithDeadline(ctx, guard.Deadline)
+			defer cancel()
+		}
+		client := canaryapi.NewClient(deps.HTTP, cfg.APIBaseURL, cfg.APIKey, cfg.PreviewDomain)
+		runner := loadrunner.Runner{Config: cfg, Ops: lifecycle.Operations{Client: client, Metrics: provider, Clock: deps.Now, HTTP: deps.HTTP}, Clock: deps.Now}
+		summary, err = runner.Run(workCtx)
+		return err
+	}()
 }
 
 func fail(err error) int {

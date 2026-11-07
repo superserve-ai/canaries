@@ -53,10 +53,37 @@ jobs:
           path: /tmp/ui-canary-image.tar.gz
           if-no-files-found: error
 
+  prepare-load-reporting-access:
+    if: inputs.scope != 'ui-only'
+    runs-on: ubuntu-latest
+    environment: production
+    needs: build
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      TF_VAR_deployment_service_account_email: ${{ vars.GCP_SERVICE_ACCOUNT }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate production reporting access
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Grant staging access to the existing result webhook
+        run: bash .github/scripts/grant-load-reporting-access.sh
+
   deploy-staging:
+    if: ${{ !cancelled() && needs.build.result == 'success' && (needs['prepare-load-reporting-access'].result == 'success' || (inputs.scope == 'ui-only' && needs['prepare-load-reporting-access'].result == 'skipped')) }}
     runs-on: ubuntu-latest
     environment: staging
-    needs: build
+    needs: [build, prepare-load-reporting-access]
     permissions:
       contents: read
       id-token: write
@@ -173,6 +200,7 @@ jobs:
             -var="ui_canary_image=$UI_IMAGE"
 
   deploy-production:
+    if: ${{ !cancelled() && needs.build.result == 'success' && needs['deploy-staging'].result == 'success' }}
     runs-on: ubuntu-latest
     environment: production
     needs: [build, deploy-staging]
@@ -275,15 +303,18 @@ jobs:
           cd infra/envs/production
           terraform init -input=false
           args=()
+          LOAD_IMAGE="$API_IMAGE"
           if [[ "$DEPLOY_SCOPE" == "ui-only" ]]; then
             args+=(-target=module.ui_canary)
             API_IMAGE=$(gcloud run jobs describe api-canary-production-us-west2 --project=rayai-prod --region=us-west2 --format='value(spec.template.spec.template.spec.containers[0].image)')
+            LOAD_IMAGE=$(gcloud run jobs describe sandbox-daily-load-production-us-west2 --project=rayai-prod --region=us-west2 --format='value(spec.template.spec.template.spec.containers[0].image)' 2>/dev/null) || LOAD_IMAGE="$API_IMAGE"
           fi
           terraform apply \
             -input=false \
             -auto-approve \
             "${args[@]}" \
             -var="image=$API_IMAGE" \
+            -var="load_runner_image=$LOAD_IMAGE" \
             -var="ui_canary_image=$UI_IMAGE"
 
       # East4 is isolated in its own root because it does not use VPC access.
@@ -297,13 +328,16 @@ jobs:
           cd infra/envs/production/us-east4
           terraform init -input=false
           args=()
+          LOAD_IMAGE="$API_IMAGE"
           if [[ "$DEPLOY_SCOPE" == "ui-only" ]]; then
             args+=(-target=module.ui_canary)
             API_IMAGE=$(gcloud run jobs describe api-canary-production-us-east4 --project=rayai-prod --region=us-east4 --format='value(spec.template.spec.template.spec.containers[0].image)')
+            LOAD_IMAGE=$(gcloud run jobs describe sandbox-daily-load-production-us-east4 --project=rayai-prod --region=us-east4 --format='value(spec.template.spec.template.spec.containers[0].image)' 2>/dev/null) || LOAD_IMAGE="$API_IMAGE"
           fi
           terraform apply \
             -input=false \
             -auto-approve \
             "${args[@]}" \
             -var="image=$API_IMAGE" \
+            -var="load_runner_image=$LOAD_IMAGE" \
             -var="ui_canary_image=$UI_IMAGE"

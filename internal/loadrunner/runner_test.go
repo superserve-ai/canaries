@@ -2,7 +2,11 @@ package loadrunner
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"net/http"
 	"strings"
 	"sync"
 	"testing"
@@ -118,6 +122,9 @@ func TestRunnerRunsConcurrentDeterministicLifecycles(t *testing.T) {
 	}
 	client.mu.Lock()
 	defer client.mu.Unlock()
+	if summary.ConfiguredOperations != int64(cfg.Operations) || summary.ConfiguredConcurrency != int64(cfg.Concurrency) || summary.InFlight != 0 || summary.Unstarted != 0 || len(summary.Create.Durations) != cfg.Operations || len(summary.LifecycleDurations) != cfg.Operations || len(summary.Delete.Durations) != 0 || summary.Pause.Attempts != 0 || summary.Resume.Attempts != 0 {
+		t.Fatalf("unexpected create-only aggregation: %+v", summary)
+	}
 	if client.maxActive > cfg.Concurrency {
 		t.Fatalf("max concurrency %d exceeded configured %d", client.maxActive, cfg.Concurrency)
 	}
@@ -250,7 +257,7 @@ func TestRunnerVerifyExec(t *testing.T) {
 						if wantFailure {
 							want.Completed, want.Failed = 0, 1
 						}
-						if (err != nil) != wantFailure || summary != want {
+						if (err != nil) != wantFailure || summary.Started != want.Started || summary.Completed != want.Completed || summary.Failed != want.Failed || summary.InFlight != want.InFlight {
 							t.Fatalf("Run = (%+v, %v), want summary %+v, failure %v", summary, err, want, wantFailure)
 						}
 					} else {
@@ -356,4 +363,426 @@ func (f *fakeLoadClient) DeleteSnapshot(context.Context, string) error { return 
 
 func (f *fakeLoadClient) ListTemplates(context.Context, map[string]string) ([]canaryapi.Template, error) {
 	return nil, errors.New("not used")
+}
+
+// lifecycleLoadClient models asynchronous transitions and rotates credentials.
+// active counts sandboxes through terminal deletion, rather than DELETE ACK.
+type lifecycleLoadClient struct {
+	fakeLoadClient
+	states         map[string]*loadSandboxState
+	failureStage   string
+	deletePolls    int
+	deleteNotFound bool
+	deleteNever    bool
+	execTokens     []string
+	cleanupContext []error
+	onCreate       func(string)
+	onExec         func(context.Context, string)
+}
+
+type loadSandboxState struct {
+	phase       string
+	polls       int
+	execs       int
+	deleted     bool
+	deletePolls int
+}
+
+func (f *lifecycleLoadClient) CreateSandbox(ctx context.Context, req canaryapi.CreateSandboxRequest) (canaryapi.Sandbox, error) {
+	if f.failureStage == "create_request" {
+		return canaryapi.Sandbox{}, errors.New("create unavailable")
+	}
+	sb, err := f.fakeLoadClient.CreateSandbox(ctx, req)
+	f.mu.Lock()
+	if f.states == nil {
+		f.states = make(map[string]*loadSandboxState)
+	}
+	f.states[sb.ID] = &loadSandboxState{phase: "creating"}
+	f.mu.Unlock()
+	if f.onCreate != nil {
+		f.onCreate(sb.ID)
+	}
+	return sb, err
+}
+
+func (f *lifecycleLoadClient) GetSandbox(_ context.Context, id string) (canaryapi.Sandbox, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	s := f.states[id]
+	if s == nil {
+		return canaryapi.Sandbox{}, canaryapi.ErrNotFound
+	}
+	f.statusCalls[id]++
+	s.polls++
+	status := s.phase
+	switch s.phase {
+	case "creating":
+		if f.failureStage == "wait_active" {
+			status = "failed"
+		} else if s.polls > 1 {
+			status, s.phase = "active", "active"
+			f.waited[id] = true
+		}
+	case "pausing":
+		if f.failureStage == "pause_wait_paused" {
+			status = "failed"
+		} else if s.polls > 1 {
+			status, s.phase = "paused", "paused"
+		}
+	case "resuming":
+		if f.failureStage == "resume_wait_active" {
+			status = "failed"
+		} else if s.polls > 1 {
+			status, s.phase = "active", "active"
+		}
+	case "deleting":
+		s.deletePolls++
+		if !f.deleteNever && s.deletePolls > f.deletePolls {
+			if !s.deleted {
+				f.active--
+				s.deleted = true
+			}
+			if f.deleteNotFound {
+				return canaryapi.Sandbox{}, fmt.Errorf("fetch sandbox: %w", canaryapi.ErrNotFound)
+			}
+			status = "deleted"
+		}
+	}
+	return canaryapi.Sandbox{ID: id, Status: status}, nil
+}
+
+func (f *lifecycleLoadClient) PauseSandbox(_ context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failureStage == "pause_request" {
+		return errors.New("pause unavailable")
+	}
+	f.states[id].phase, f.states[id].polls = "pausing", 0
+	return nil
+}
+
+func (f *lifecycleLoadClient) ResumeSandbox(_ context.Context, id string) (canaryapi.ResumeResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failureStage == "resume_request" {
+		return canaryapi.ResumeResponse{}, errors.New("resume unavailable")
+	}
+	f.states[id].phase, f.states[id].polls = "resuming", 0
+	return canaryapi.ResumeResponse{Status: "active", AccessToken: "fresh-resume-token"}, nil
+}
+
+func (f *lifecycleLoadClient) Exec(ctx context.Context, id, token string, _ canaryapi.ExecRequest) (canaryapi.ExecResult, error) {
+	f.mu.Lock()
+	s := f.states[id]
+	s.execs++
+	execNumber := s.execs
+	phase := s.phase
+	f.execTokens = append(f.execTokens, token)
+	f.mu.Unlock()
+	if phase != "active" {
+		return canaryapi.ExecResult{}, errors.New("exec before active")
+	}
+	if execNumber == 1 && token != "token" || execNumber == 2 && token != "fresh-resume-token" {
+		return canaryapi.ExecResult{}, errors.New("stale credentials")
+	}
+	if f.onExec != nil {
+		f.onExec(ctx, id)
+	}
+	if execNumber == 1 && f.failureStage == "verify_exec" || execNumber == 2 && f.failureStage == "verify_exec_after_resume" {
+		return canaryapi.ExecResult{}, errors.New("verification unavailable")
+	}
+	return canaryapi.ExecResult{Stdout: "superserve-load-test"}, ctx.Err()
+}
+
+func (f *lifecycleLoadClient) DeleteSandbox(ctx context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.deleted = append(f.deleted, id)
+	f.cleanupContext = append(f.cleanupContext, ctx.Err())
+	if f.failureStage == "delete_request" {
+		return errors.New("delete unavailable")
+	}
+	f.states[id].phase, f.states[id].polls = "deleting", 0
+	return nil
+}
+
+func lifecycleRunnerConfig() Config {
+	cfg := testRunnerConfig()
+	cfg.Scenario = "lifecycle"
+	cfg.Operations, cfg.Concurrency = 1, 1
+	return cfg
+}
+
+func TestRunnerFullLifecycleUsesFreshCredentialsAndWaitsForDelete(t *testing.T) {
+	for _, notFound := range []bool{false, true} {
+		t.Run(fmt.Sprintf("not_found_%v", notFound), func(t *testing.T) {
+			client := &lifecycleLoadClient{deletePolls: 2, deleteNotFound: notFound}
+			cfg := lifecycleRunnerConfig()
+			summary, err := (Runner{Config: cfg, Ops: lifecycle.Operations{Client: client}}).Run(context.Background())
+			if err != nil || summary.Completed != 1 || summary.InFlight != 0 || summary.Unstarted != 0 {
+				t.Fatalf("Run = (%+v, %v)", summary, err)
+			}
+			for name, phase := range map[string]PhaseSummary{"create": summary.Create, "pause": summary.Pause, "resume": summary.Resume, "delete": summary.Delete} {
+				if phase.Attempts != 1 || phase.Failures != 0 || len(phase.Durations) != 1 {
+					t.Errorf("%s phase = %+v", name, phase)
+				}
+			}
+			if len(summary.LifecycleDurations) != 1 || summary.Delete.Durations[0] < 2*cfg.PollInterval {
+				t.Fatalf("did not measure completion polling: %+v", summary)
+			}
+			if got := strings.Join(client.execTokens, ","); got != "token,fresh-resume-token" {
+				t.Fatalf("exec tokens = %q", got)
+			}
+			if client.active != 0 || len(client.deleted) != 1 || client.states[client.deleted[0]].deletePolls != 3 {
+				t.Fatalf("delete did not reach terminal state: active=%d deleted=%v", client.active, client.deleted)
+			}
+		})
+	}
+}
+
+func TestRunnerSuccessfulPhaseSamplesSurviveLaterFailures(t *testing.T) {
+	for _, tt := range []struct {
+		stage          string
+		attempts       [4]int64
+		failures       [4]int64
+		samples        [4]int
+		cleanupFailure bool
+	}{
+		{stage: "create_request", attempts: [4]int64{1, 0, 0, 0}, failures: [4]int64{1, 0, 0, 0}},
+		{stage: "wait_active", attempts: [4]int64{1, 0, 0, 1}, failures: [4]int64{1, 0, 0, 0}, samples: [4]int{0, 0, 0, 1}},
+		{stage: "verify_exec", attempts: [4]int64{1, 0, 0, 1}, samples: [4]int{1, 0, 0, 1}},
+		{stage: "pause_request", attempts: [4]int64{1, 1, 0, 1}, failures: [4]int64{0, 1, 0, 0}, samples: [4]int{1, 0, 0, 1}},
+		{stage: "pause_wait_paused", attempts: [4]int64{1, 1, 0, 1}, failures: [4]int64{0, 1, 0, 0}, samples: [4]int{1, 0, 0, 1}},
+		{stage: "resume_request", attempts: [4]int64{1, 1, 1, 1}, failures: [4]int64{0, 0, 1, 0}, samples: [4]int{1, 1, 0, 1}},
+		{stage: "resume_wait_active", attempts: [4]int64{1, 1, 1, 1}, failures: [4]int64{0, 0, 1, 0}, samples: [4]int{1, 1, 0, 1}},
+		{stage: "verify_exec_after_resume", attempts: [4]int64{1, 1, 1, 1}, samples: [4]int{1, 1, 1, 1}},
+		{stage: "delete_request", attempts: [4]int64{1, 1, 1, 1}, failures: [4]int64{0, 0, 0, 1}, samples: [4]int{1, 1, 1, 0}, cleanupFailure: true},
+		{stage: "delete_wait_deleted", attempts: [4]int64{1, 1, 1, 1}, failures: [4]int64{0, 0, 0, 1}, samples: [4]int{1, 1, 1, 0}, cleanupFailure: true},
+	} {
+		t.Run(tt.stage, func(t *testing.T) {
+			client := &lifecycleLoadClient{failureStage: tt.stage, deleteNever: tt.stage == "delete_wait_deleted"}
+			cfg := lifecycleRunnerConfig()
+			cfg.DeleteTimeout = 5 * time.Millisecond
+			summary, err := (Runner{Config: cfg, Ops: lifecycle.Operations{Client: client}}).Run(context.Background())
+			if err == nil || summary.Failed != 1 || summary.Completed != 0 || len(summary.LifecycleDurations) != 0 || summary.FailurePhases[tt.stage] != 1 {
+				t.Fatalf("Run = (%+v, %v)", summary, err)
+			}
+			if got := summary.CleanupFailures != 0; got != tt.cleanupFailure {
+				t.Errorf("CleanupFailures = %d, want failure %v", summary.CleanupFailures, tt.cleanupFailure)
+			}
+			for i, phase := range []PhaseSummary{summary.Create, summary.Pause, summary.Resume, summary.Delete} {
+				if phase.Attempts != tt.attempts[i] || phase.Failures != tt.failures[i] || len(phase.Durations) != tt.samples[i] {
+					t.Errorf("phase %d = %+v, want attempts=%d failures=%d samples=%d", i, phase, tt.attempts[i], tt.failures[i], tt.samples[i])
+				}
+			}
+		})
+	}
+}
+
+func TestRunnerLifecycleConcurrencyIncludesDeletionCompletion(t *testing.T) {
+	client := &lifecycleLoadClient{deletePolls: 2}
+	cfg := lifecycleRunnerConfig()
+	cfg.Operations, cfg.Concurrency = 20, 4
+	summary, err := (Runner{Config: cfg, Ops: lifecycle.Operations{Client: client}}).Run(context.Background())
+	if err != nil || summary.Completed != int64(cfg.Operations) || summary.InFlight != 0 || summary.PeakInFlight != int64(cfg.Concurrency) {
+		t.Fatalf("Run = (%+v, %v)", summary, err)
+	}
+	if client.maxActive > cfg.Concurrency || client.active != 0 {
+		t.Fatalf("outstanding sandboxes max=%d active=%d configured=%d", client.maxActive, client.active, cfg.Concurrency)
+	}
+}
+
+func TestRunnerCleanupFailureStopsReplacementDispatch(t *testing.T) {
+	for _, stage := range []string{"delete_request", "delete_wait_deleted"} {
+		t.Run(stage, func(t *testing.T) {
+			client := &lifecycleLoadClient{failureStage: stage, deleteNever: stage == "delete_wait_deleted"}
+			cfg := lifecycleRunnerConfig()
+			cfg.Operations, cfg.Concurrency = 100, 3
+			cfg.DeleteTimeout = 5 * time.Millisecond
+			summary, err := (Runner{Config: cfg, Ops: lifecycle.Operations{Client: client}}).Run(context.Background())
+			if err == nil || summary.Started > int64(cfg.Concurrency) || summary.Started == 0 || summary.Unstarted != int64(cfg.Operations)-summary.Started || summary.InFlight != 0 || summary.CleanupFailures != summary.Started {
+				t.Fatalf("cleanup failures did not halt replacement dispatch: summary=%+v err=%v", summary, err)
+			}
+			if len(client.deleted) != int(summary.Started) {
+				t.Fatalf("cleanup attempts=%d started=%d", len(client.deleted), summary.Started)
+			}
+		})
+	}
+}
+
+func TestRunnerCanceledLifecycleCleansIndependentlyAndCountsUnstarted(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	client := &lifecycleLoadClient{deletePolls: 1}
+	client.onExec = func(execCtx context.Context, _ string) {
+		cancel()
+		<-execCtx.Done()
+	}
+	cfg := lifecycleRunnerConfig()
+	cfg.Operations = 100
+	summary, err := (Runner{Config: cfg, Ops: lifecycle.Operations{Client: client}}).Run(ctx)
+	if !errors.Is(err, context.Canceled) || summary.Started != 1 || summary.Failed != 1 || summary.Unstarted != 99 || summary.InFlight != 0 || summary.CleanupFailures != 0 {
+		t.Fatalf("Run = (%+v, %v)", summary, err)
+	}
+	if client.active != 0 || len(client.deleted) != 1 || len(client.cleanupContext) != 1 || client.cleanupContext[0] != nil {
+		t.Fatalf("cleanup did not outlive canceled run: active=%d deleted=%v context=%v", client.active, client.deleted, client.cleanupContext)
+	}
+	if len(summary.Create.Durations) != 1 || len(summary.Delete.Durations) != 1 || summary.Pause.Attempts != 0 {
+		t.Fatalf("incorrect samples for canceled operation: %+v", summary)
+	}
+}
+
+func TestRunnerStaticClockCannotHangLifecycleCleanup(t *testing.T) {
+	client := &lifecycleLoadClient{deleteNever: true}
+	cfg := lifecycleRunnerConfig()
+	cfg.DeleteTimeout = 3 * time.Millisecond
+	fixedClock := func() time.Time { return time.Unix(100, 0) }
+	summary, err := (Runner{Config: cfg, Clock: fixedClock, Ops: lifecycle.Operations{Client: client, Clock: fixedClock}}).Run(context.Background())
+	if err == nil || summary.FailurePhases["delete_wait_deleted"] != 1 || summary.CleanupFailures != 1 || len(summary.Delete.Durations) != 0 {
+		t.Fatalf("Run = (%+v, %v)", summary, err)
+	}
+	if len(summary.Create.Durations) != 1 || summary.Create.Durations[0] != 0 {
+		t.Fatalf("successful zero-duration samples should be retained: %+v", summary.Create)
+	}
+}
+
+func TestRunnerRejectsOperationCountsBeyondSampleBound(t *testing.T) {
+	client := &fakeLoadClient{}
+	cfg := testRunnerConfig()
+	cfg.Operations = MaxOperations + 1
+	summary, err := (Runner{Config: cfg, Ops: lifecycle.Operations{Client: client}}).Run(context.Background())
+	if err == nil || summary.Started != 0 || len(client.created) != 0 {
+		t.Fatalf("unbounded run accepted: summary=%+v err=%v", summary, err)
+	}
+}
+
+func TestRunnerStaticClockCannotHangActivationWait(t *testing.T) {
+	client := &fakeLoadClient{status: "creating"}
+	cfg := testRunnerConfig()
+	cfg.Operations, cfg.Concurrency = 1, 1
+	cfg.ActiveTimeout = 3 * time.Millisecond
+	fixedClock := func() time.Time { return time.Unix(100, 0) }
+	summary, err := (Runner{Config: cfg, Clock: fixedClock, Ops: lifecycle.Operations{Client: client, Clock: fixedClock}}).Run(context.Background())
+	if err == nil || summary.FailurePhases["wait_active"] != 1 || summary.Create.Failures != 1 || len(summary.Create.Durations) != 0 || len(client.deleted) != 1 {
+		t.Fatalf("Run = (%+v, %v)", summary, err)
+	}
+}
+
+type createOutcomeClient struct {
+	fakeLoadClient
+	createErr     error
+	remoteCreated bool
+}
+
+func (f *createOutcomeClient) CreateSandbox(_ context.Context, req canaryapi.CreateSandboxRequest) (canaryapi.Sandbox, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.created = append(f.created, req)
+	if f.remoteCreated {
+		// The server committed creation, but the caller never receives an ID.
+		f.active++
+		f.maxActive = max(f.maxActive, f.active)
+	}
+	return canaryapi.Sandbox{}, f.createErr
+}
+
+func TestRunnerUncertainCreateStopsUnsafeReplacements(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		err  error
+	}{
+		{"lost response", io.ErrUnexpectedEOF},
+		{"transport failure", errors.New("connection lost after POST")},
+		{"request timeout", context.DeadlineExceeded},
+		{"HTTP request timeout", &canaryapi.HTTPStatusError{StatusCode: http.StatusRequestTimeout}},
+		{"HTTP internal failure", &canaryapi.HTTPStatusError{StatusCode: http.StatusInternalServerError}},
+		{"HTTP unavailable", &canaryapi.HTTPStatusError{StatusCode: http.StatusServiceUnavailable}},
+		{"undecodable success response", &json.SyntaxError{Offset: 1}},
+		{"missing ID success response", nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &createOutcomeClient{createErr: tt.err, remoteCreated: true}
+			cfg := testRunnerConfig()
+			cfg.Operations, cfg.Concurrency = 100, 1
+			summary, err := (Runner{Config: cfg, Ops: lifecycle.Operations{Client: client}}).Run(context.Background())
+			if err == nil || summary.Started != 1 || summary.Failed != 1 || summary.Unstarted != 99 || summary.InFlight != 0 || summary.CleanupFailures != 0 || summary.FailurePhases["create_request"] != 1 {
+				t.Fatalf("unsafe create outcome admitted replacements: summary=%+v err=%v", summary, err)
+			}
+			if len(client.created) != 1 || client.active != 1 || len(client.deleted) != 0 || summary.Delete.Attempts != 0 || len(summary.Create.Durations) != 0 {
+				t.Fatalf("unknown creation incorrectly cleaned or replaced: requests=%d outstanding=%d deleted=%d summary=%+v", len(client.created), client.active, len(client.deleted), summary)
+			}
+		})
+	}
+}
+
+func TestRunnerDefiniteCreateRejectionsContinueCollectingResults(t *testing.T) {
+	for _, status := range []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusConflict, http.StatusTooManyRequests} {
+		t.Run(fmt.Sprintf("HTTP_%d", status), func(t *testing.T) {
+			client := &createOutcomeClient{createErr: &canaryapi.HTTPStatusError{StatusCode: status}}
+			cfg := testRunnerConfig()
+			cfg.Operations, cfg.Concurrency = 8, 1
+			summary, err := (Runner{Config: cfg, Ops: lifecycle.Operations{Client: client}}).Run(context.Background())
+			if err == nil || summary.Started != int64(cfg.Operations) || summary.Failed != int64(cfg.Operations) || summary.Unstarted != 0 || summary.CleanupFailures != 0 || summary.FailurePhases["create_request"] != int64(cfg.Operations) {
+				t.Fatalf("definite rejection stopped result collection: summary=%+v err=%v", summary, err)
+			}
+			if len(client.created) != cfg.Operations || client.active != 0 || len(client.deleted) != 0 || summary.Create.Failures != int64(cfg.Operations) {
+				t.Fatalf("unexpected definite rejection accounting: requests=%d active=%d summary=%+v", len(client.created), client.active, summary)
+			}
+		})
+	}
+}
+
+func TestRunnerCreateNotFoundUsesDefiniteRejectionRepresentation(t *testing.T) {
+	// The API client represents HTTP 404 with ErrNotFound, not HTTPStatusError.
+	client := &createOutcomeClient{createErr: fmt.Errorf("POST /sandboxes: %w", canaryapi.ErrNotFound)}
+	cfg := testRunnerConfig()
+	cfg.Operations, cfg.Concurrency = 3, 1
+	summary, err := (Runner{Config: cfg, Ops: lifecycle.Operations{Client: client}}).Run(context.Background())
+	if err == nil || summary.Started != int64(cfg.Operations) || summary.Unstarted != 0 || summary.CleanupFailures != 0 || len(client.created) != cfg.Operations {
+		t.Fatalf("definite 404 representation stopped dispatch: summary=%+v err=%v", summary, err)
+	}
+}
+
+func TestRunnerScheduledLifecycleCapsEachActiveSessionAndKeepsResourceExpiry(t *testing.T) {
+	client := &lifecycleLoadClient{}
+	cfg := lifecycleRunnerConfig()
+	cfg.Scheduled = true
+	cfg.RunTimeout = 20 * time.Minute
+	cfg.DeleteTimeout = 2 * time.Minute
+	cfg.ResourceTTL = 2 * time.Hour
+	summary, err := (Runner{Config: cfg, Ops: lifecycle.Operations{Client: client}}).Run(context.Background())
+	if err != nil || summary.Completed != 1 {
+		t.Fatalf("Run = (%+v, %v)", summary, err)
+	}
+	req := client.created[0]
+	if req.TimeoutSeconds != 60 || req.TimeoutSeconds >= req.AutoDeleteSeconds {
+		t.Fatalf("active-session timeout=%ds auto-delete=%ds, want a fixed 60s active-session cap", req.TimeoutSeconds, req.AutoDeleteSeconds)
+	}
+	if len(client.execTokens) != 2 || client.execTokens[1] != "fresh-resume-token" {
+		t.Fatal("scheduled lifecycle did not complete pause/resume verification with the fixed session cap")
+	}
+	if req.AutoDeleteSeconds != 7200 || req.IdleTimeoutSeconds == nil || *req.IdleTimeoutSeconds != 60 {
+		t.Fatalf("scheduled create auto-delete=%d idle=%v, want 2h expiry and 60s idle pause", req.AutoDeleteSeconds, req.IdleTimeoutSeconds)
+	}
+	createdAt, parseErr := time.Parse(time.RFC3339, req.Metadata[sandboxmetadata.KeyCreatedAt])
+	if parseErr != nil {
+		t.Fatal(parseErr)
+	}
+	expiresAt, parseErr := time.Parse(time.RFC3339, req.Metadata[sandboxmetadata.KeyExpiresAt])
+	if parseErr != nil || expiresAt.Sub(createdAt) != cfg.ResourceTTL {
+		t.Fatalf("janitor metadata expiry changed: created=%s expires=%s error=%v", createdAt, expiresAt, parseErr)
+	}
+}
+
+func TestRunnerManualCreateKeepsConfiguredComputeTimeoutAndNoIdleOverride(t *testing.T) {
+	client := &fakeLoadClient{}
+	cfg := testRunnerConfig()
+	cfg.Operations, cfg.Concurrency = 1, 1
+	summary, err := (Runner{Config: cfg, Ops: lifecycle.Operations{Client: client}}).Run(context.Background())
+	if err != nil || summary.Completed != 1 {
+		t.Fatalf("Run = (%+v, %v)", summary, err)
+	}
+	req := client.created[0]
+	if req.TimeoutSeconds != int(cfg.ResourceTTL/time.Second) || req.AutoDeleteSeconds != req.TimeoutSeconds || req.IdleTimeoutSeconds != nil {
+		t.Fatalf("manual create timeout semantics changed: timeout=%d auto-delete=%d idle=%v", req.TimeoutSeconds, req.AutoDeleteSeconds, req.IdleTimeoutSeconds)
+	}
 }
