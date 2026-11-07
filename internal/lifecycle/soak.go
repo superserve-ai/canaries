@@ -475,9 +475,23 @@ func (s *soakSummary) report(target string, res RunResult) string {
 	fmt.Fprintf(&report, "*Soak test* · %s\n%s · %s · %d check cycles\n", target, s.Elapsed.Round(time.Second), status, s.Cycles)
 	for _, operation := range soakOperations {
 		c := s.counter(operation.key)
-		fmt.Fprintf(&report, "%s: %d/%d failed", operation.label, c.Failures, c.Attempts)
+		successes := c.Attempts - c.Failures
+		successRate := 0.0
 		if c.Attempts > 0 {
-			fmt.Fprintf(&report, " (%.1f%%)", 100*float64(c.Failures)/float64(c.Attempts))
+			successRate = 100 * float64(successes) / float64(c.Attempts)
+		}
+		circle := "🔴"
+		switch {
+		case successRate >= 100:
+			circle = "🟢"
+		case successRate >= 80:
+			circle = "🟡"
+		case successRate >= 60:
+			circle = "🟠"
+		}
+		fmt.Fprintf(&report, "%s %s: %d/%d succeeded", circle, operation.label, successes, c.Attempts)
+		if c.Attempts > 0 {
+			fmt.Fprintf(&report, " (%.1f%%)", successRate)
 		}
 		if c.Skipped > 0 {
 			fmt.Fprintf(&report, "; %d skipped", c.Skipped)
