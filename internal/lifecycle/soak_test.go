@@ -36,7 +36,7 @@ func TestSoakRunsSixHoursWithOneFinalSummary(t *testing.T) {
 	if f.tokenCalls[18080] != 1 || f.tokenCalls[18081] != 361 || f.previewDeletes != 361 {
 		t.Fatalf("persistent/churn token calls=%v and deletes=%d", f.tokenCalls, f.previewDeletes)
 	}
-	f.wantSummary("6h0m0s · passed · 361 check cycles", "Original preview connections: 0/361 failed", "Same process: 361 verified, 0 changed, 0 unknown", "Deliberate pause/resume verified: true")
+	f.wantSummary("6h0m0s · passed · 361 check cycles", "🟢 Original preview connections: 361/361 succeeded (100.0%)", "🟢 Deliberate pause: 1/1 succeeded (100.0%)", "Same process: 361 verified, 0 changed, 0 unknown", "Deliberate pause/resume verified: true")
 	if f.slackAfterCycles != 361 || f.lock.key != "staging-us-central1-soak" || !f.lock.released {
 		t.Fatalf("final summary ran at cycle %d; lock key=%q released=%t", f.slackAfterCycles, f.lock.key, f.lock.released)
 	}
@@ -72,7 +72,7 @@ func TestSoakCountsIntermittentFailuresAndCompletesObservation(t *testing.T) {
 	if f.activateCalls != 351 || f.shortCalls != 351 || f.deleteCalls != 1 {
 		t.Fatalf("stopped early: activate=%d short=%d delete=%d", f.activateCalls, f.shortCalls, f.deleteCalls)
 	}
-	f.wantSummary("failed · 351 check cycles", "Original preview connections: 15/351 failed (4.3%)", "Same process: 351 verified, 0 changed, 0 unknown")
+	f.wantSummary("failed · 351 check cycles", "🟡 Original preview connections: 336/351 succeeded (95.7%)", "Same process: 351 verified, 0 changed, 0 unknown")
 	if got := f.steps.count("soak_connect", "failure"); got != 15 {
 		t.Fatalf("connect failure metric = %d, want 15", got)
 	}
@@ -89,7 +89,7 @@ func TestSoakSeparatesSkippedChecksFromAttemptsAndDeletesAmbiguousPublication(t 
 	if err := f.runner.Run(context.Background()); err == nil {
 		t.Fatal("publication failure must fail the run")
 	}
-	f.wantSummary("Preview URL creation: 1/3 failed", "Preview token creation: 0/2 failed (0.0%); 1 skipped", "Temporary preview connections: 0/2 failed (0.0%); 1 skipped", "Preview URL deletion: 0/3 failed", "Deleted preview access rejection: 0/2 failed (0.0%); 1 skipped")
+	f.wantSummary("🟠 Preview URL creation: 2/3 succeeded (66.7%)", "🟢 Preview token creation: 2/2 succeeded (100.0%); 1 skipped", "🟢 Temporary preview connections: 2/2 succeeded (100.0%); 1 skipped", "🟢 Preview URL deletion: 3/3 succeeded (100.0%)", "🟢 Deleted preview access rejection: 2/2 succeeded (100.0%); 1 skipped")
 	if f.previewDeletes != 3 || f.steps.count("soak_preview_connect", "skipped") != 1 || f.tokenCalls[18081] != 2 {
 		t.Fatalf("ambiguous create cleanup/dependencies wrong: deletes=%d skipped=%d token calls=%v", f.previewDeletes, f.steps.count("soak_preview_connect", "skipped"), f.tokenCalls)
 	}
@@ -106,7 +106,7 @@ func TestSoakDetectsReplacementProcessWithoutRestartingIt(t *testing.T) {
 	if err := f.runner.Run(context.Background()); err == nil {
 		t.Fatal("replaced process must fail the run")
 	}
-	f.wantSummary("Same process: 1 verified, 2 changed, 0 unknown", "Original process checks: 2/3 failed")
+	f.wantSummary("Same process: 1 verified, 2 changed, 0 unknown", "🔴 Original process checks: 1/3 succeeded (33.3%)")
 	if f.startCalls != 1 || f.shortCalls != 3 {
 		t.Fatalf("server restarted or observation stopped: starts=%d short=%d", f.startCalls, f.shortCalls)
 	}
@@ -119,7 +119,7 @@ func TestSoakUnreachableProcessIsUnknownRatherThanChanged(t *testing.T) {
 	if err := f.runner.Run(context.Background()); err == nil {
 		t.Fatal("unreachable process must fail the run")
 	}
-	f.wantSummary("Same process: 0 verified, 0 changed, 3 unknown", "Original process checks: 0/0 failed; 3 skipped", "Short tasks: 3/3 failed")
+	f.wantSummary("Same process: 0 verified, 0 changed, 3 unknown", "🔴 Original process checks: 0/0 succeeded; 3 skipped", "🔴 Short tasks: 0/3 succeeded (0.0%)")
 	if f.steps.count("soak_process_identity", "failure") != 0 || f.steps.count("soak_process_identity", "skipped") != 3 {
 		t.Fatal("unreachable process was misclassified as a changed process")
 	}
@@ -152,7 +152,7 @@ func TestSoakInitialActivationFailuresDoNotCountAsIdlePauses(t *testing.T) {
 	if err := f.runner.Run(context.Background()); err == nil {
 		t.Fatal("activation failure must fail the run")
 	}
-	f.wantSummary("Sandbox connections: 2/3 failed", "Same process: 1 verified, 0 changed, 2 unknown", "observed idle pauses: 0", "Short tasks: 0/1 failed (0.0%); 2 skipped")
+	f.wantSummary("🔴 Sandbox connections: 1/3 succeeded (33.3%)", "Same process: 1 verified, 0 changed, 2 unknown", "observed idle pauses: 0", "🟢 Short tasks: 1/1 succeeded (100.0%); 2 skipped")
 	if f.activateCalls != 3 || f.shortCalls != 1 || f.previewDeletes != 3 {
 		t.Fatalf("later checks stopped: activates=%d short=%d deletes=%d", f.activateCalls, f.shortCalls, f.previewDeletes)
 	}
@@ -175,7 +175,7 @@ func TestSoakRepeatedFailedResumeCountsOneIdlePause(t *testing.T) {
 	if err := f.runner.Run(context.Background()); err == nil {
 		t.Fatal("failed resume attempts must fail the run")
 	}
-	f.wantSummary("failed · 4 check cycles", "Sandbox connections: 2/4 failed", "Same process: 2 verified, 0 changed, 2 unknown", "observed idle pauses: 1")
+	f.wantSummary("failed · 4 check cycles", "🔴 Sandbox connections: 2/4 succeeded (50.0%)", "Same process: 2 verified, 0 changed, 2 unknown", "observed idle pauses: 1")
 	if f.activateCalls != 4 || f.pausedActivations != 2 {
 		t.Fatalf("activation attempts=%d successful paused activations=%d", f.activateCalls, f.pausedActivations)
 	}
@@ -239,7 +239,7 @@ func TestSoakDeadlineAccountsForUnexecutedScheduledChecks(t *testing.T) {
 			f.wantSummary(
 				fmt.Sprintf("%s · %d check cycles", status, tc.cycles),
 				fmt.Sprintf("missed intervals: %d", tc.missed),
-				fmt.Sprintf("Original preview connections: 0/%d failed", tc.cycles),
+				fmt.Sprintf("🟢 Original preview connections: %d/%d succeeded (100.0%%)", tc.cycles, tc.cycles),
 			)
 			if f.activateCalls != tc.cycles || f.shortCalls != tc.cycles || f.previewDeletes != tc.cycles || f.deleteCalls != 1 {
 				t.Fatalf("actual attempts/cleanup changed: activate=%d short=%d previews=%d cleanup=%d", f.activateCalls, f.shortCalls, f.previewDeletes, f.deleteCalls)
@@ -262,7 +262,7 @@ func TestSoakCancellationDuringCycleDoesNotInventAttempts(t *testing.T) {
 	if err := f.runner.Run(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v, want cancellation", err)
 	}
-	f.wantSummary("Preview URL creation: 0/0 failed; 1 skipped", "Preview URL deletion: 0/0 failed; 1 skipped", "Short tasks: 0/0 failed; 1 skipped", "Same process: 0 verified, 0 changed, 1 unknown")
+	f.wantSummary("🔴 Preview URL creation: 0/0 succeeded; 1 skipped", "🔴 Preview URL deletion: 0/0 succeeded; 1 skipped", "🔴 Short tasks: 0/0 succeeded; 1 skipped", "Same process: 0 verified, 0 changed, 1 unknown")
 	if f.churnCreates != 0 || f.previewDeletes != 0 || f.shortCalls != 0 || f.deleteCalls != 1 {
 		t.Fatalf("operation ran after cancellation or cleanup missed: creates=%d previews=%d short=%d delete=%d", f.churnCreates, f.previewDeletes, f.shortCalls, f.deleteCalls)
 	}
