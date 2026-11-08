@@ -119,8 +119,7 @@ type launchAPIClient struct {
 }
 
 func (c *launchAPIClient) Wait(ctx context.Context) error {
-	_, err := c.pacer.wait(ctx)
-	return err
+	return c.pacer.wait(ctx)
 }
 
 func (c *launchAPIClient) GetSandbox(ctx context.Context, id string) (canaryapi.Sandbox, error) {
@@ -161,7 +160,7 @@ func newPacer(rate float64) *pacer {
 	return &pacer{interval: time.Duration(float64(time.Second) / rate)}
 }
 
-func (p *pacer) wait(ctx context.Context) (time.Duration, error) {
+func (p *pacer) wait(ctx context.Context) error {
 	p.mu.Lock()
 	now := time.Now()
 	slot := p.next
@@ -173,13 +172,24 @@ func (p *pacer) wait(ctx context.Context) (time.Duration, error) {
 	delay := slot.Sub(now)
 	p.calls.Add(1)
 	if delay <= 0 {
-		return 0, nil
+		return nil
 	}
 	p.waited.Add(int64(delay))
 	if err := sleepContext(ctx, delay); err != nil {
-		return delay, fmt.Errorf("%w: %w", errRequestNotSent, err)
+		return fmt.Errorf("%w: %w", errRequestNotSent, err)
 	}
-	return delay, nil
+	return nil
+}
+
+// dropReservations forgets slots handed to callers that gave up before
+// sending, so cleanup does not queue behind requests that never happen. Call
+// it only when no caller is waiting.
+func (p *pacer) dropReservations() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if limit := time.Now().Add(p.interval); p.next.After(limit) {
+		p.next = limit
+	}
 }
 
 func sleepContext(ctx context.Context, d time.Duration) error {
@@ -197,21 +207,19 @@ func sleepContext(ctx context.Context, d time.Duration) error {
 }
 
 type launchResult struct {
-	seq           int64
-	operation     int
-	sandboxID     string
-	createdAt     time.Time
-	createReq     time.Duration
-	toActive      time.Duration
-	toCommand     time.Duration
-	active        bool
-	ready         bool
-	failure       string
-	uncertain     bool
-	err           error
-	completedAt   time.Time
-	acceptedAtSec int
-	readyAtSec    int
+	seq         int64
+	operation   int
+	sandboxID   string
+	createdAt   time.Time
+	createReq   time.Duration
+	toActive    time.Duration
+	toCommand   time.Duration
+	active      bool
+	ready       bool
+	failure     string
+	uncertain   bool
+	err         error
+	completedAt time.Time
 }
 
 type launchState struct {
@@ -221,9 +229,7 @@ type launchState struct {
 }
 
 func (s *launchState) bucket(sec int) *LaunchSecond {
-	if sec < 0 {
-		sec = 0
-	}
+	sec = max(sec, 0)
 	for len(s.summary.Timeline) <= sec {
 		s.summary.Timeline = append(s.summary.Timeline, LaunchSecond{})
 	}
@@ -248,24 +254,26 @@ func (r Runner) RunLaunch(parent context.Context, monitor *PressureMonitor) (Lau
 	r.Ops.Client = api
 	telemetry := lifecycle.TelemetryContext{Environment: cfg.Environment, Region: cfg.Region, Target: cfg.Target, Scenario: launchScenarioLabel}
 
-	state.summary.Template = r.lookupTemplate(parent, api)
-
+	// The lease budget covers RunTimeout, so the template lookup runs inside it.
 	timeoutCtx, timeoutCancel := context.WithTimeout(parent, cfg.RunTimeout)
 	defer timeoutCancel()
+	state.summary.Template = r.lookupTemplate(timeoutCtx, api)
 	ctx, cancel := context.WithCancel(timeoutCtx)
 	defer cancel()
 	monitorCtx, stopMonitor := context.WithCancel(ctx)
 	defer stopMonitor()
 	var monitorDone sync.WaitGroup
 	if monitor != nil {
-		monitorDone.Add(2)
-		go func() { defer monitorDone.Done(); monitor.Run(monitorCtx) }()
+		// Read host state before the first create; an abort-level reading
+		// launches nothing and a backoff pauses the first Gate.
+		monitor.Evaluate(ctx)
+		monitorDone.Add(1)
 		go func() {
 			defer monitorDone.Done()
-			select {
-			case <-monitor.Done():
+			// Run returns as soon as the guard aborts; stop in-flight work too.
+			monitor.Run(monitorCtx)
+			if monitor.Err() != nil {
 				cancel()
-			case <-monitorCtx.Done():
 			}
 		}()
 	}
@@ -283,16 +291,20 @@ func (r Runner) RunLaunch(parent context.Context, monitor *PressureMonitor) (Lau
 	}
 	stopMonitor()
 	monitorDone.Wait()
+	// Teardown has its own budget; a deadline it crosses is not a workload
+	// timeout.
+	workloadErr, parentErr := timeoutCtx.Err(), parent.Err()
 
 	switch {
 	case monitor.Err() != nil:
 		state.summary.StopReason = monitor.Err().Error()
-	case errors.Is(timeoutCtx.Err(), context.DeadlineExceeded):
+	case errors.Is(workloadErr, context.DeadlineExceeded) && parentErr == nil:
 		state.summary.StopReason = "run timeout"
-	case parent.Err() != nil:
+	case parentErr != nil:
 		state.summary.StopReason = "canceled"
 	}
 
+	api.pacer.dropReservations()
 	teardownStart := r.now()
 	state.summary.Cleanup = r.teardownLaunch(state, api, telemetry)
 	state.summary.TeardownDuration = r.now().Sub(teardownStart)
@@ -316,10 +328,10 @@ func (r Runner) RunLaunch(parent context.Context, monitor *PressureMonitor) (Lau
 	if err := monitor.Err(); err != nil {
 		runErr = errors.Join(runErr, err)
 	}
-	if timeoutCtx.Err() != nil && parent.Err() == nil {
-		runErr = errors.Join(runErr, timeoutCtx.Err())
-	} else if parent.Err() != nil {
-		runErr = errors.Join(runErr, parent.Err())
+	if parentErr != nil {
+		runErr = errors.Join(runErr, parentErr)
+	} else if workloadErr != nil {
+		runErr = errors.Join(runErr, workloadErr)
 	}
 	if !summary.Cleanup.Verified {
 		runErr = errors.Join(runErr, fmt.Errorf("launch cleanup not verified: %d sandboxes may remain", summary.Cleanup.Leftover))
@@ -419,9 +431,21 @@ func (r Runner) launchOne(ctx context.Context, monitor *PressureMonitor, api *la
 	result.seq = seq
 	result.operation = operation
 	defer func() { result.completedAt = r.now() }()
-	if err := api.Wait(ctx); err != nil {
-		result.failure, result.err = FailureCanceled, err
-		return
+	// Re-check the guard after the API-budget wait so queued creates honor a
+	// pause or abort; a resumed worker takes a fresh slot instead of bursting.
+	for {
+		if err := api.Wait(ctx); err != nil {
+			result.failure, result.err = FailureCanceled, err
+			return
+		}
+		_, paused, err := monitor.Gate(ctx)
+		if err != nil {
+			result.failure, result.err = FailureCanceled, err
+			return
+		}
+		if !paused {
+			break
+		}
 	}
 	createdAt := r.now().UTC()
 	result.createdAt = createdAt
@@ -621,6 +645,16 @@ func (r Runner) teardownLaunch(state *launchState, api *launchAPIClient, telemet
 		return cleanup
 	}
 	pollInterval := max(cfg.PollInterval, 500*time.Millisecond)
+	// A create whose response was lost can still land after the client gave
+	// up, so an empty sweep only verifies cleanup once such creates have had
+	// HTTP_TIMEOUT to settle.
+	state.mu.Lock()
+	uncertain := state.summary.UncertainCreates
+	state.mu.Unlock()
+	var settleUntil time.Time
+	if uncertain > 0 {
+		settleUntil = time.Now().Add(cfg.HTTPTimeout)
+	}
 	for pass := 0; ; pass++ {
 		remaining, err := api.ListSandboxes(ctx, query)
 		if err != nil {
@@ -635,17 +669,20 @@ func (r Runner) teardownLaunch(state *launchState, api *launchAPIClient, telemet
 			}
 		}
 		cleanup.Leftover = int64(len(ids))
-		if len(ids) == 0 {
+		if len(ids) == 0 && !time.Now().Before(settleUntil) {
 			cleanup.Verified = true
 			return cleanup
 		}
 		if ctx.Err() != nil {
 			cleanup.Note = "teardown budget exhausted; the janitor reclaims sandboxes after expiry"
+			if len(ids) == 0 {
+				cleanup.Note = fmt.Sprintf("teardown budget ended before %d uncertain creates settled; the janitor reclaims sandboxes after expiry", uncertain)
+			}
 			return cleanup
 		}
 		// Deletes are asynchronous; give the first deletes a moment to
 		// settle before sweeping what remains.
-		if pass > 0 {
+		if pass > 0 && len(ids) > 0 {
 			swept, _ := r.deleteAll(ctx, ids, telemetry)
 			cleanup.Swept += swept
 		}

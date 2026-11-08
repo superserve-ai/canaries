@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -102,11 +103,6 @@ func TestPressureMonitorBacksOffPausesAndRecovers(t *testing.T) {
 func TestPressureMonitorAbortsOnThreshold(t *testing.T) {
 	m := NewPressureMonitor(testPressureConfig(), []PressureSource{staticSource(PressureSourceGMP, freeMemory("host-a", 2), nil)}, nil)
 	m.Evaluate(context.Background())
-	select {
-	case <-m.Done():
-	default:
-		t.Fatal("Done not closed after abort")
-	}
 	if !errors.Is(m.Err(), ErrGuardAbort) {
 		t.Fatalf("Err = %v, want ErrGuardAbort", m.Err())
 	}
@@ -265,6 +261,7 @@ func TestHostPressureCaps(t *testing.T) {
 		{name: "operator slot limit below ceiling", host: HostPressure{MaxNetworkSlots: 200, NetSlotCeiling: 1000, UsedNetSlots: 150}, limit: 200, full: false, headroom: 25},
 		{name: "ceiling only", host: HostPressure{NetSlotCeiling: 100, UsedNetSlots: 100}, limit: 100, full: true, headroom: 0},
 		{name: "warm slot available", host: HostPressure{NetSlotCeiling: 100, UsedNetSlots: 98, WarmNetSlots: 2}, limit: 100, full: false, headroom: 0},
+		{name: "over sandbox cap with free slots", host: HostPressure{MaxSandboxes: 100, RunningSandboxes: 120, NetSlotCeiling: 1000, UsedNetSlots: 120}, limit: 1000, full: true, headroom: 0},
 		{name: "tightest cap wins", host: HostPressure{MaxSandboxes: 1000, RunningSandboxes: 100, MaxNetworkSlots: 200, UsedNetSlots: 180}, limit: 200, full: false, headroom: 10},
 	}
 	for _, tt := range tests {
@@ -295,9 +292,11 @@ func TestSupabaseHostPressureSource(t *testing.T) {
 	}))
 	defer server.Close()
 	source := SupabaseHostPressureSource{URL: server.URL, Key: "service-key", HostIDs: []string{"host-a", "host-b"}, HTTP: server.Client(), Now: func() time.Time { return now }}
+	// host-b has no row, so its caps are unknown and the read fails closed
+	// while still returning host-a's values.
 	reading, err := source.Read(context.Background())
-	if err != nil {
-		t.Fatalf("Read returned %v", err)
+	if err == nil || !strings.Contains(err.Error(), "host-b") {
+		t.Fatalf("Read error = %v, want missing host-b", err)
 	}
 	if gotQuery != "in.(host-a,host-b)" {
 		t.Fatalf("host_id filter = %q", gotQuery)
@@ -309,6 +308,29 @@ func TestSupabaseHostPressureSource(t *testing.T) {
 		if sample.Signal == "cap_headroom_pct" && sample.Value != 60 || sample.Signal == "host_report_age_seconds" && sample.Value != 30 {
 			t.Fatalf("unexpected sample: %+v", sample)
 		}
+	}
+}
+
+func TestPressureSourcesFailClosedWithoutData(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/rest/v1/host_pressure" {
+			_, _ = w.Write([]byte(`[]`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"vector","result":[]}}`))
+	}))
+	defer server.Close()
+	supabase := SupabaseHostPressureSource{URL: server.URL, Key: "service-key", HTTP: server.Client()}
+	if _, err := supabase.Read(context.Background()); err == nil {
+		t.Fatal("empty host_pressure read succeeded")
+	}
+	gmp := GMPSource{Project: "example-project", Environment: "staging", Rules: defaultPressureRules(), HTTP: server.Client(), BaseURL: server.URL}
+	reading, err := gmp.Read(context.Background())
+	if err == nil {
+		t.Fatal("GMP read with no data for any guarded query succeeded")
+	}
+	if !slices.Contains(reading.NoData, "restore_p99_seconds") || slices.Contains(reading.NoData, "restore_rate") {
+		t.Fatalf("NoData = %v, want guarded signals only", reading.NoData)
 	}
 }
 

@@ -114,6 +114,17 @@ func TestLoadLaunchProductionRequirements(t *testing.T) {
 		t.Fatalf("expected production launch without a host source to be rejected, got %v", err)
 	}
 	t.Setenv("LOAD_TEST_GUARD_GMP_PROJECT", "example-project")
+	for _, signal := range []string{"RESTORE_P99_SECONDS", "RESTORE_ERROR_RATIO", "DB_POOL_UTILIZATION"} {
+		t.Setenv("LOAD_TEST_GUARD_"+signal+"_BACKOFF", "0")
+		t.Setenv("LOAD_TEST_GUARD_"+signal+"_ABORT", "0")
+	}
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "host pressure source") {
+		t.Fatalf("expected a GMP source with every guarded query disabled to be rejected, got %v", err)
+	}
+	for _, signal := range []string{"RESTORE_P99_SECONDS", "RESTORE_ERROR_RATIO", "DB_POOL_UTILIZATION"} {
+		t.Setenv("LOAD_TEST_GUARD_"+signal+"_BACKOFF", "")
+		t.Setenv("LOAD_TEST_GUARD_"+signal+"_ABORT", "")
+	}
 	t.Setenv("LOAD_TEST_GUARD_MODE", PressureModeObserve)
 	if _, err := Load(); err == nil {
 		t.Fatal("expected production launch in observe mode to be rejected")
@@ -158,6 +169,7 @@ func TestLoadLaunchGuardOverridesAndValidation(t *testing.T) {
 		{name: "supabase without key", env: map[string]string{"LOAD_TEST_PRESSURE_SUPABASE_URL": "https://example.supabase.co"}, error: "set together"},
 		{name: "supabase http", env: map[string]string{"LOAD_TEST_PRESSURE_SUPABASE_URL": "http://example.supabase.co", "LOAD_TEST_PRESSURE_SUPABASE_KEY": "key"}, error: "HTTPS"},
 		{name: "host id", env: map[string]string{"LOAD_TEST_GUARD_HOST_IDS": "host a"}, error: "LOAD_TEST_GUARD_HOST_IDS"},
+		{name: "gmp environment", env: map[string]string{"LOAD_TEST_GUARD_GMP_PROJECT": "example-project", "LOAD_TEST_GUARD_GMP_ENVIRONMENT": `staging"} or vector(1) #`}, error: "LOAD_TEST_GUARD_GMP_ENVIRONMENT"},
 		{name: "interval", env: map[string]string{"LOAD_TEST_GUARD_INTERVAL": "10ms"}, error: "safety bounds"},
 		{name: "strategy", env: map[string]string{"LOAD_TEST_LAUNCH_STRATEGY": "spike"}, error: "burst or ramp"},
 		{name: "ramp without rate", env: map[string]string{"LOAD_TEST_LAUNCH_STRATEGY": "ramp"}, error: "ramp launches"},
@@ -249,6 +261,10 @@ type fakeLaunchClient struct {
 	// lostCreates makes this many creates succeed on the server but fail
 	// in transit, so only the metadata sweep can find them.
 	lostCreates atomic.Int64
+	// lateCreates makes this many creates fail in transit and land on the
+	// server lateBy afterwards.
+	lateCreates atomic.Int64
+	lateBy      time.Duration
 	creates     atomic.Int64
 	names       []string
 }
@@ -261,6 +277,14 @@ func (f *fakeLaunchClient) CreateSandbox(_ context.Context, req canaryapi.Create
 	f.creates.Add(1)
 	time.Sleep(time.Millisecond)
 	sb := canaryapi.Sandbox{ID: req.Name, Name: req.Name, Status: "active", AccessToken: "token", Metadata: req.Metadata}
+	if f.lateCreates.Add(-1) >= 0 {
+		time.AfterFunc(f.lateBy, func() {
+			f.liveMu.Lock()
+			f.live[sb.ID] = sb
+			f.liveMu.Unlock()
+		})
+		return canaryapi.Sandbox{}, errors.New("connection reset by peer")
+	}
 	f.liveMu.Lock()
 	f.live[sb.ID] = sb
 	f.names = append(f.names, req.Name)
@@ -377,6 +401,59 @@ func TestRunLaunchSweepsLostCreates(t *testing.T) {
 	report := summary.Report(cfg, err)
 	if !strings.Contains(report, "transport=2") || !strings.Contains(report, "all 10: 2") {
 		t.Fatalf("report missing failure classes or scale:\n%s", report)
+	}
+}
+
+func TestRunLaunchWaitsForUncertainCreatesToSettle(t *testing.T) {
+	client := newFakeLaunchClient()
+	client.lateCreates.Store(1)
+	client.lateBy = 300 * time.Millisecond
+	cfg := testLaunchConfig(4)
+	summary, _ := launchRunner(cfg, client).RunLaunch(context.Background(), nil)
+	if summary.UncertainCreates != 1 {
+		t.Fatalf("UncertainCreates = %d, want 1", summary.UncertainCreates)
+	}
+	if !summary.Cleanup.Verified || summary.Cleanup.Swept != 1 || client.liveCount() != 0 {
+		t.Fatalf("late create not swept before cleanup was verified: %+v live=%d", summary.Cleanup, client.liveCount())
+	}
+}
+
+func TestRunLaunchInitialGuardAbortLaunchesNothing(t *testing.T) {
+	client := newFakeLaunchClient()
+	source := staticSource(PressureSourceGMP, freeMemory("host-a", 1), nil)
+	monitor := NewPressureMonitor(testPressureConfig(), []PressureSource{source}, nil)
+	summary, err := launchRunner(testLaunchConfig(20), client).RunLaunch(context.Background(), monitor)
+	if !errors.Is(err, ErrGuardAbort) {
+		t.Fatalf("RunLaunch error = %v, want guard abort", err)
+	}
+	if client.creates.Load() != 0 || summary.Dispatched != 0 || summary.Unstarted != 20 {
+		t.Fatalf("launch created sandboxes despite an abort-level first reading: creates=%d %+v", client.creates.Load(), summary)
+	}
+}
+
+func TestPacerDropsAbandonedReservations(t *testing.T) {
+	p := newPacer(10)
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	for range 100 {
+		_ = p.wait(canceled)
+	}
+	p.dropReservations()
+	start := time.Now()
+	if err := p.wait(context.Background()); err != nil {
+		t.Fatalf("wait returned %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("wait queued behind abandoned reservations for %s", elapsed)
+	}
+}
+
+func TestFormatMilestonesUsesGlobalScale(t *testing.T) {
+	// Task 1 of 2 dispatched 100 operations spanning global indexes 0-199;
+	// a failure at index 198 belongs to the first-1000 bucket.
+	got := formatMilestones([]FailureMilestone{{Operations: 1000, Failed: 1}}, 100, 1, 200)
+	if got != "first 100: 0 | all 100: 1" {
+		t.Fatalf("formatMilestones = %q", got)
 	}
 }
 

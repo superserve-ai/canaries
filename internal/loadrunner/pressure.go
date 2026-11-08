@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -70,10 +72,22 @@ type PressureConfig struct {
 }
 
 // HasHostSource reports whether the guard reads real host state rather than
-// only the generator's own create outcomes.
+// only the generator's own create outcomes: a configured source must have at
+// least one signal with a threshold.
 func (c PressureConfig) HasHostSource() bool {
-	return (c.SupabaseURL != "" && c.SupabaseKey != "") || c.GMPProject != ""
+	guarded := func(source string) bool {
+		for _, rule := range c.Rules {
+			if rule.Source == source && rule.guarded() && (source != PressureSourceGMP || rule.Query != "") {
+				return true
+			}
+		}
+		return false
+	}
+	return c.SupabaseURL != "" && c.SupabaseKey != "" && guarded(PressureSourceSupabase) ||
+		c.GMPProject != "" && guarded(PressureSourceGMP)
 }
+
+func (r PressureRule) guarded() bool { return r.Backoff > 0 || r.Abort > 0 }
 
 // NewPressureSources builds the configured host sources. gmpHTTP must carry
 // monitoring.read credentials and is only used when a GMP project is set.
@@ -179,6 +193,10 @@ func validatePressureConfig(cfg PressureConfig) error {
 	if cfg.GMPProject != "" && !validRoutingToken(cfg.GMPProject) {
 		return errors.New("LOAD_TEST_GUARD_GMP_PROJECT is not a valid project ID")
 	}
+	// The environment is interpolated into PromQL label matchers.
+	if cfg.GMPProject != "" && !validRoutingToken(cfg.GMPEnvironment) {
+		return errors.New("LOAD_TEST_GUARD_GMP_ENVIRONMENT must be a plain environment label value")
+	}
 	if len(cfg.HostIDs) > maxHostPressureRows {
 		return fmt.Errorf("LOAD_TEST_GUARD_HOST_IDS accepts at most %d hosts", maxHostPressureRows)
 	}
@@ -216,7 +234,6 @@ type HostPressure struct {
 	NetSlotCeiling        int       `json:"net_slot_ceiling"`
 	MaxNetworkSlots       int       `json:"max_network_slots"`
 	MaxSandboxes          int       `json:"max_sandboxes"`
-	UnknownAllocationVMs  int       `json:"unknown_allocation_vms"`
 	ReportedAt            time.Time `json:"reported_at"`
 }
 
@@ -249,17 +266,14 @@ func (h HostPressure) HeadroomPct() float64 {
 	headroom := -1.0
 	if h.MaxSandboxes > 0 {
 		used := h.RunningSandboxes + h.ProvisioningSandboxes + h.PausedSandboxes
-		headroom = 100 * float64(h.MaxSandboxes-used) / float64(h.MaxSandboxes)
+		headroom = max(0, 100*float64(h.MaxSandboxes-used)/float64(h.MaxSandboxes))
 	}
 	if limit := h.SlotLimit(); limit > 0 {
 		used := h.UsedNetSlots + h.ProvisioningNetSlots + h.WarmNetSlots
-		slots := 100 * float64(limit-used) / float64(limit)
+		slots := max(0, 100*float64(limit-used)/float64(limit))
 		if headroom < 0 || slots < headroom {
 			headroom = slots
 		}
-	}
-	if headroom < 0 && (h.MaxSandboxes > 0 || h.SlotLimit() > 0) {
-		return 0
 	}
 	return headroom
 }
@@ -267,6 +281,8 @@ func (h HostPressure) HeadroomPct() float64 {
 type PressureReading struct {
 	Samples []PressureSample
 	Hosts   []HostPressure
+	// NoData lists guarded signals whose query returned no usable value.
+	NoData []string
 }
 
 type PressureSource interface {
@@ -307,6 +323,14 @@ func (s SupabaseHostPressureSource) Read(ctx context.Context) (PressureReading, 
 		now = s.Now
 	}
 	reading := PressureReading{Hosts: rows}
+	// A missing row hides that host's caps, so it fails closed like an
+	// unreachable source.
+	var readErr error
+	if len(rows) == 0 {
+		readErr = errors.New("host_pressure returned no rows")
+	} else if missing := missingHosts(s.HostIDs, rows); len(missing) > 0 {
+		readErr = fmt.Errorf("host_pressure has no row for %s", strings.Join(missing, ","))
+	}
 	for _, row := range rows {
 		if headroom := row.HeadroomPct(); headroom >= 0 {
 			reading.Samples = append(reading.Samples, PressureSample{Signal: "cap_headroom_pct", HostID: row.HostID, Value: headroom})
@@ -315,7 +339,21 @@ func (s SupabaseHostPressureSource) Read(ctx context.Context) (PressureReading, 
 			reading.Samples = append(reading.Samples, PressureSample{Signal: "host_report_age_seconds", HostID: row.HostID, Value: math.Max(0, now().Sub(row.ReportedAt).Seconds())})
 		}
 	}
-	return reading, nil
+	return reading, readErr
+}
+
+func missingHosts(want []string, rows []HostPressure) []string {
+	seen := make(map[string]bool, len(rows))
+	for _, row := range rows {
+		seen[row.HostID] = true
+	}
+	var missing []string
+	for _, id := range want {
+		if !seen[id] {
+			missing = append(missing, id)
+		}
+	}
+	return missing
 }
 
 // GMPSource evaluates PromQL instant queries against Google Managed
@@ -338,9 +376,13 @@ func (s GMPSource) Read(ctx context.Context) (PressureReading, error) {
 	endpoint := fmt.Sprintf("%s/v1/projects/%s/location/global/prometheus/api/v1/query", strings.TrimRight(base, "/"), url.PathEscape(s.Project))
 	var reading PressureReading
 	var errs []error
+	guarded, guardedWithData := 0, 0
 	for _, rule := range s.Rules {
 		if rule.Source != PressureSourceGMP || rule.Query == "" {
 			continue
+		}
+		if rule.guarded() {
+			guarded++
 		}
 		query := strings.ReplaceAll(rule.Query, gmpEnvironmentTemplate, s.Environment)
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"?"+url.Values{"query": {query}}.Encode(), nil)
@@ -359,6 +401,19 @@ func (s GMPSource) Read(ctx context.Context) (PressureReading, error) {
 			continue
 		}
 		reading.Samples = append(reading.Samples, samples...)
+		if rule.guarded() {
+			if len(samples) > 0 {
+				guardedWithData++
+			} else {
+				reading.NoData = append(reading.NoData, rule.Signal)
+			}
+		}
+	}
+	// Rate and latency queries are legitimately empty while hosts are idle,
+	// so one empty signal is only reported. Every guarded query empty means
+	// the guard is blind (wrong project, environment, or exporter outage).
+	if guarded > 0 && guardedWithData == 0 && len(errs) == 0 {
+		errs = append(errs, errors.New("no guarded query returned data"))
 	}
 	return reading, errors.Join(errs...)
 }
@@ -447,20 +502,16 @@ type SignalPeak struct {
 }
 
 type HostPeak struct {
-	HostID               string
-	MaxSandboxes         int
-	MaxNetworkSlots      int
-	NetSlotCeiling       int
-	SlotLimit            int
-	PeakRunning          int
-	PeakProvisioning     int
-	PeakUsedSlots        int
-	PeakAllocatedVCPUs   int64
-	PeakAllocatedMemMiB  int64
-	MinHeadroomPct       float64
-	FullObserved         bool
-	UnknownAllocationVMs int
-	LastReportedAt       time.Time
+	HostID              string
+	MaxSandboxes        int
+	SlotLimit           int
+	PeakRunning         int
+	PeakProvisioning    int
+	PeakUsedSlots       int
+	PeakAllocatedVCPUs  int64
+	PeakAllocatedMemMiB int64
+	MinHeadroomPct      float64
+	FullObserved        bool
 }
 
 type PressureReport struct {
@@ -468,6 +519,7 @@ type PressureReport struct {
 	Sources         []string
 	Evaluations     int
 	SourceErrors    map[string]int
+	NoData          map[string]int
 	Backoffs        int
 	MinMultiplier   float64
 	PausedFor       time.Duration
@@ -507,6 +559,7 @@ type PressureMonitor struct {
 	abortCh     chan struct{}
 	evaluations int
 	srcErrors   map[string]int
+	noData      map[string]int
 	triggers    []GuardTrigger
 	dropped     int
 	counts      map[string]int
@@ -527,7 +580,7 @@ func NewPressureMonitor(cfg PressureConfig, sources []PressureSource, now func()
 	}
 	m := &PressureMonitor{
 		cfg: cfg, sources: sources, now: now, rules: make(map[string]PressureRule),
-		multiplier: 1, minMult: 1, abortCh: make(chan struct{}), srcErrors: make(map[string]int),
+		multiplier: 1, minMult: 1, abortCh: make(chan struct{}), srcErrors: make(map[string]int), noData: make(map[string]int),
 		counts: make(map[string]int), peaks: make(map[string]*SignalPeak), hosts: make(map[string]*HostPeak),
 	}
 	for _, rule := range cfg.Rules {
@@ -543,6 +596,8 @@ func NewPressureMonitor(cfg PressureConfig, sources []PressureSource, now func()
 }
 
 // Run evaluates the guard every interval until ctx ends or the guard aborts.
+// The first evaluation happens one interval after the call, so callers
+// evaluate once synchronously before they start launching.
 func (m *PressureMonitor) Run(ctx context.Context) {
 	if m == nil {
 		return
@@ -550,7 +605,6 @@ func (m *PressureMonitor) Run(ctx context.Context) {
 	ticker := time.NewTicker(m.cfg.Interval)
 	defer ticker.Stop()
 	for {
-		m.Evaluate(ctx)
 		select {
 		case <-ctx.Done():
 			return
@@ -558,6 +612,7 @@ func (m *PressureMonitor) Run(ctx context.Context) {
 			return
 		case <-ticker.C:
 		}
+		m.Evaluate(ctx)
 	}
 }
 
@@ -568,7 +623,7 @@ func (m *PressureMonitor) Evaluate(ctx context.Context) {
 	}
 	var samples []PressureSample
 	var hosts []HostPressure
-	var unavailable []string
+	var unavailable, noData []string
 	for _, source := range m.sources {
 		sourceCtx, cancel := context.WithTimeout(ctx, m.cfg.SourceTimeout)
 		reading, err := source.Read(sourceCtx)
@@ -586,6 +641,7 @@ func (m *PressureMonitor) Evaluate(ctx context.Context) {
 				hosts = append(hosts, host)
 			}
 		}
+		noData = append(noData, reading.NoData...)
 		if err != nil {
 			log.Warn().Err(err).Str("source", source.Name()).Msg("host pressure source unavailable")
 			unavailable = append(unavailable, source.Name())
@@ -598,6 +654,9 @@ func (m *PressureMonitor) Evaluate(ctx context.Context) {
 		return
 	}
 	m.evaluations++
+	for _, signal := range noData {
+		m.noData[signal]++
+	}
 	samples = append(samples, m.generatorSamplesLocked(now)...)
 	if len(hosts) > 0 {
 		m.recordHostsLocked(hosts)
@@ -709,18 +768,16 @@ func (m *PressureMonitor) recordHostsLocked(rows []HostPressure) {
 			peak = &HostPeak{HostID: row.HostID, MinHeadroomPct: -1}
 			m.hosts[row.HostID] = peak
 		}
-		peak.MaxSandboxes, peak.MaxNetworkSlots, peak.NetSlotCeiling, peak.SlotLimit = row.MaxSandboxes, row.MaxNetworkSlots, row.NetSlotCeiling, row.SlotLimit()
+		peak.MaxSandboxes, peak.SlotLimit = row.MaxSandboxes, row.SlotLimit()
 		peak.PeakRunning = max(peak.PeakRunning, row.RunningSandboxes)
 		peak.PeakProvisioning = max(peak.PeakProvisioning, row.ProvisioningSandboxes)
 		peak.PeakUsedSlots = max(peak.PeakUsedSlots, row.UsedNetSlots+row.ProvisioningNetSlots)
 		peak.PeakAllocatedVCPUs = max(peak.PeakAllocatedVCPUs, row.AllocatedVCPUs)
 		peak.PeakAllocatedMemMiB = max(peak.PeakAllocatedMemMiB, row.AllocatedMemoryMiB)
-		peak.UnknownAllocationVMs = max(peak.UnknownAllocationVMs, row.UnknownAllocationVMs)
 		if headroom := row.HeadroomPct(); headroom >= 0 && (peak.MinHeadroomPct < 0 || headroom < peak.MinHeadroomPct) {
 			peak.MinHeadroomPct = headroom
 		}
 		peak.FullObserved = peak.FullObserved || row.Full()
-		peak.LastReportedAt = row.ReportedAt
 	}
 }
 
@@ -796,14 +853,6 @@ func (m *PressureMonitor) Gate(ctx context.Context) (multiplier float64, paused 
 	}
 }
 
-// Done is closed when the guard aborts the launch.
-func (m *PressureMonitor) Done() <-chan struct{} {
-	if m == nil {
-		return nil
-	}
-	return m.abortCh
-}
-
 func (m *PressureMonitor) Err() error {
 	if m == nil {
 		return nil
@@ -840,7 +889,7 @@ func (m *PressureMonitor) Report() PressureReport {
 	defer m.mu.Unlock()
 	report := PressureReport{
 		Mode: m.cfg.Mode, Evaluations: m.evaluations, Backoffs: m.backoffs, MinMultiplier: m.minMult, PausedFor: m.pausedFor,
-		SourceErrors: make(map[string]int, len(m.srcErrors)), TriggerCounts: make(map[string]int, len(m.counts)),
+		SourceErrors: maps.Clone(m.srcErrors), NoData: maps.Clone(m.noData), TriggerCounts: maps.Clone(m.counts),
 		Triggers: append([]GuardTrigger(nil), m.triggers...), DroppedTriggers: m.dropped,
 	}
 	if m.abortErr != nil {
@@ -850,12 +899,6 @@ func (m *PressureMonitor) Report() PressureReport {
 		report.Sources = append(report.Sources, source.Name())
 	}
 	report.Sources = append(report.Sources, PressureSourceGenerator)
-	for name, count := range m.srcErrors {
-		report.SourceErrors[name] = count
-	}
-	for key, count := range m.counts {
-		report.TriggerCounts[key] = count
-	}
 	for _, peak := range m.peaks {
 		report.Peaks = append(report.Peaks, *peak)
 	}
@@ -869,12 +912,8 @@ func (m *PressureMonitor) Report() PressureReport {
 		report.Hosts = append(report.Hosts, *host)
 	}
 	sort.Slice(report.Hosts, func(i, j int) bool { return report.Hosts[i].HostID < report.Hosts[j].HostID })
-	active := map[string]bool{PressureSourceGenerator: true}
-	for _, source := range m.sources {
-		active[source.Name()] = true
-	}
 	for _, rule := range m.cfg.Rules {
-		if !active[rule.Source] || rule.Source == PressureSourceGMP && rule.Query == "" {
+		if !slices.Contains(report.Sources, rule.Source) || rule.Source == PressureSourceGMP && rule.Query == "" {
 			report.Unconfigured = append(report.Unconfigured, rule.Signal)
 		}
 	}

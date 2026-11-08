@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -63,7 +64,11 @@ func (s LaunchSummary) Report(cfg Config, runErr error) string {
 	fmt.Fprintln(&out, "```")
 
 	fmt.Fprintf(&out, "Failures by class: %s\n", formatCounts(s.FailureClasses))
-	fmt.Fprintf(&out, "Failures by scale: %s\n", formatMilestones(s.FailureMilestones, s.Dispatched))
+	scaleLabel := "Failures by scale"
+	if cfg.Launch.TaskCount > 1 {
+		scaleLabel += " (this task's failures by global operation index)"
+	}
+	fmt.Fprintf(&out, "%s: %s\n", scaleLabel, formatMilestones(s.FailureMilestones, s.Dispatched, s.Failed, s.Dispatched*int64(max(cfg.Launch.TaskCount, 1))))
 	writeTimeline(&out, s.Timeline)
 	writeGeneratorSection(&out, s, cfg)
 	writePressureSection(&out, s.Pressure)
@@ -127,14 +132,10 @@ func writeGeneratorSection(out *strings.Builder, s LaunchSummary, cfg Config) {
 	_, _, slotP99 := percentiles(s.SlotWait)
 	fmt.Fprintf(out, "Generator: schedule lag p50 %s ms, p99 %s ms | slot wait p99 %s ms | peak in-flight %d of %d | API budget wait %.1f s over %d calls",
 		lagP50, lagP99, slotP99, s.PeakInFlight, s.ConfiguredConcurrency, s.APIWait.Seconds(), s.APIWaitCalls)
-	var ttiP50 time.Duration
-	if len(s.TimeToFirstCommand) > 0 {
-		ordered := sortedDurations(s.TimeToFirstCommand)
-		ttiP50 = nearestRank(ordered, 50)
-	}
-	taskRate := cfg.Launch.TaskRate(cfg.Launch.Rate)
-	if taskRate > 0 && ttiP50 > 0 {
-		fmt.Fprintf(out, " | concurrency needed for target rate ~%.0f", taskRate*ttiP50.Seconds())
+	if taskRate := cfg.Launch.TaskRate(cfg.Launch.Rate); taskRate > 0 && len(s.TimeToFirstCommand) > 0 {
+		if ttiP50, _, _ := percentileDurations(s.TimeToFirstCommand); ttiP50 > 0 {
+			fmt.Fprintf(out, " | concurrency needed for target rate ~%.0f", taskRate*ttiP50.Seconds())
+		}
 	}
 	fmt.Fprintln(out)
 	fmt.Fprintf(out, "Bottleneck: %s\n", strings.Join(launchBottlenecks(s, cfg), "; "))
@@ -194,7 +195,10 @@ func writePressureSection(out *strings.Builder, p PressureReport) {
 	}
 	fmt.Fprintln(out)
 	if len(p.SourceErrors) > 0 {
-		fmt.Fprintf(out, "Guard source errors: %s\n", formatCounts(intCounts(p.SourceErrors)))
+		fmt.Fprintf(out, "Guard source errors: %s\n", formatCounts(p.SourceErrors))
+	}
+	if len(p.NoData) > 0 {
+		fmt.Fprintf(out, "Guard signals without data (evaluations): %s\n", formatCounts(p.NoData))
 	}
 	if len(p.Unconfigured) > 0 {
 		fmt.Fprintf(out, "Guard signals not read: %s\n", strings.Join(p.Unconfigured, ", "))
@@ -202,7 +206,7 @@ func writePressureSection(out *strings.Builder, p PressureReport) {
 	if len(p.Triggers) == 0 {
 		fmt.Fprintln(out, "Guard triggers: none")
 	} else {
-		fmt.Fprintf(out, "Guard triggers (%d recorded, %d not recorded): %s\n", len(p.Triggers), p.DroppedTriggers, formatCounts(intCounts(p.TriggerCounts)))
+		fmt.Fprintf(out, "Guard triggers (%d recorded, %d not recorded): %s\n", len(p.Triggers), p.DroppedTriggers, formatCounts(p.TriggerCounts))
 		fmt.Fprintln(out, "```")
 		for i, trigger := range p.Triggers {
 			if i == maxReportTriggers {
@@ -302,14 +306,8 @@ func perSecond(count int64, window time.Duration) string {
 	return fmt.Sprintf("%.1f", float64(count)/window.Seconds())
 }
 
-func sortedDurations(samples []time.Duration) []time.Duration {
-	ordered := append([]time.Duration(nil), samples...)
-	sort.Slice(ordered, func(i, j int) bool { return ordered[i] < ordered[j] })
-	return ordered
-}
-
 func percentileDurations(samples []time.Duration) (p50, p95, p99 time.Duration) {
-	ordered := sortedDurations(samples)
+	ordered := slices.Sorted(slices.Values(samples))
 	return nearestRank(ordered, 50), nearestRank(ordered, 95), nearestRank(ordered, 99)
 }
 
@@ -321,7 +319,7 @@ func percentiles(samples []time.Duration) (p50, p95, p99 string) {
 	return milliseconds(a), milliseconds(b), milliseconds(c)
 }
 
-func formatCounts(counts map[string]int64) string {
+func formatCounts[V int | int64](counts map[string]V) string {
 	keys := make([]string, 0, len(counts))
 	for key, count := range counts {
 		if count > 0 {
@@ -339,15 +337,10 @@ func formatCounts(counts map[string]int64) string {
 	return strings.Join(parts, ", ")
 }
 
-func intCounts(in map[string]int) map[string]int64 {
-	out := make(map[string]int64, len(in))
-	for key, value := range in {
-		out[key] = int64(value)
-	}
-	return out
-}
-
-func formatMilestones(milestones []FailureMilestone, dispatched int64) string {
+// formatMilestones buckets failures by global operation index. scale is the
+// number of global operations this task's share spans, so a fan-out task
+// reports every bucket its failures fall into.
+func formatMilestones(milestones []FailureMilestone, dispatched, failed, scale int64) string {
 	if dispatched == 0 {
 		return "-"
 	}
@@ -359,8 +352,8 @@ func formatMilestones(milestones []FailureMilestone, dispatched int64) string {
 	var cumulative int64
 	for _, milestone := range failureMilestones {
 		cumulative += failedBefore[milestone]
-		if milestone >= dispatched {
-			parts = append(parts, fmt.Sprintf("all %d: %d", dispatched, cumulative))
+		if milestone >= scale {
+			parts = append(parts, fmt.Sprintf("all %d: %d", dispatched, failed))
 			break
 		}
 		parts = append(parts, fmt.Sprintf("first %d: %d", milestone, cumulative))
