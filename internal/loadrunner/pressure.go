@@ -106,9 +106,10 @@ func NewPressureSources(cfg PressureConfig, supabaseHTTP, gmpHTTP *http.Client, 
 	return sources
 }
 
-// vmd records vmd_launcher_ready on every host each sampler tick, so its
-// recent series list the hosts whose exporters are alive.
-const defaultGMPPresenceQuery = `count by (host_id) (last_over_time(vmd_launcher_ready{environment="$ENV"}[2m]))`
+// vmd samples conntrack on every host every 5s, whatever its feature flags,
+// so recent host_conntrack_max series list the hosts whose exporters are
+// alive.
+const defaultGMPPresenceQuery = `count by (host_id) (last_over_time(host_conntrack_max{environment="$ENV"}[2m]))`
 
 // defaultPressureRules lists every signal the guard understands. Host memory,
 // PSI, CPU steal and run queue have no default query because no exported

@@ -119,7 +119,7 @@ func validateLaunchConfig(cfg Config) error {
 	if cfg.Concurrency <= 0 || cfg.Concurrency > share {
 		return errors.New("LOAD_TEST_CONCURRENCY must be positive and no greater than this task's launch share")
 	}
-	// validRate is false for NaN, which strconv accepts.
+	// The comparisons also reject NaN.
 	minRate := minTaskRate * float64(l.TaskCount)
 	validRate := func(rate float64) bool { return rate >= minRate && rate <= maxLaunchRate }
 	switch l.Strategy {
