@@ -642,7 +642,7 @@ func (r Runner) teardownLaunch(state *launchState, api *launchAPIClient, telemet
 	resident := append([]string(nil), state.resident...)
 	state.mu.Unlock()
 	cleanup := CleanupSummary{Resident: int64(len(resident))}
-	deleted, failed := r.deleteAll(ctx, resident, telemetry)
+	deleted, failed := r.deleteAll(ctx, api, resident, telemetry)
 	cleanup.Deleted, cleanup.DeleteFailures = deleted, failed
 
 	query := map[string]string{
@@ -700,7 +700,7 @@ func (r Runner) teardownLaunch(state *launchState, api *launchAPIClient, telemet
 		// Deletes are asynchronous; give the first deletes a moment to
 		// settle before sweeping what remains.
 		if pass > 0 && len(ids) > 0 {
-			swept, _ := r.deleteAll(ctx, ids, telemetry)
+			swept, _ := r.deleteAll(ctx, api, ids, telemetry)
 			cleanup.Swept += swept
 		}
 		if sleepContext(ctx, pollInterval) != nil {
@@ -710,7 +710,12 @@ func (r Runner) teardownLaunch(state *launchState, api *launchAPIClient, telemet
 	}
 }
 
-func (r Runner) deleteAll(ctx context.Context, ids []string, telemetry lifecycle.TelemetryContext) (deleted, failed int64) {
+func (r Runner) deleteAll(ctx context.Context, api *launchAPIClient, ids []string, telemetry lifecycle.TelemetryContext) (deleted, failed int64) {
+	// Each delete takes its API slot under the teardown budget before
+	// DeleteTimeout starts. A slot taken under DeleteTimeout could expire
+	// unsent and leave a reservation that delays every later request.
+	ops := r.Ops
+	ops.Client = api.Client
 	jobs := make(chan string)
 	var wg sync.WaitGroup
 	var deletedCount, failedCount atomic.Int64
@@ -719,7 +724,11 @@ func (r Runner) deleteAll(ctx context.Context, ids []string, telemetry lifecycle
 		go func() {
 			defer wg.Done()
 			for id := range jobs {
-				if err := r.Ops.DeleteSandboxBestEffort(ctx, id, lifecycle.DeleteSandboxOptions{Timeout: r.Config.DeleteTimeout, Telemetry: telemetry}); err != nil {
+				if api.Wait(ctx) != nil {
+					failedCount.Add(1)
+					continue
+				}
+				if err := ops.DeleteSandboxBestEffort(ctx, id, lifecycle.DeleteSandboxOptions{Timeout: r.Config.DeleteTimeout, Telemetry: telemetry}); err != nil {
 					failedCount.Add(1)
 					log.Error().Err(err).Str("sandbox_id", id).Str("run_id", r.Config.RunID).Msg("launch teardown delete failed")
 					continue

@@ -470,6 +470,20 @@ func TestRunLaunchSettlesForServerCreateBound(t *testing.T) {
 	}
 }
 
+func TestRunLaunchTeardownDeletesOutlastAPIBudgetWait(t *testing.T) {
+	client := newFakeLaunchClient()
+	cfg := testLaunchConfig(4)
+	// Each delete waits about 50ms for its API slot, longer than the
+	// delete request timeout.
+	cfg.Launch.APIRate = 20
+	cfg.Launch.TeardownTimeout = time.Second
+	cfg.DeleteTimeout = 10 * time.Millisecond
+	summary, _ := launchRunner(cfg, client).RunLaunch(context.Background(), nil)
+	if !summary.Cleanup.Verified || summary.Cleanup.Deleted != 4 || client.liveCount() != 0 {
+		t.Fatalf("teardown deletes expired while waiting for the API budget: %+v live=%d", summary.Cleanup, client.liveCount())
+	}
+}
+
 func TestRunLaunchIgnoresEmptyListStartedBeforeSettle(t *testing.T) {
 	client := newFakeLaunchClient()
 	client.lateCreates.Store(1)
