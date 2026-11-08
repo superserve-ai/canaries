@@ -33,6 +33,10 @@ const (
 	// so a create whose response was lost appears in lists within that
 	// window or not at all.
 	defaultCreateSettle = 2 * time.Minute
+	maxLaunchStages     = 16
+	// The default stage hold covers a few guard intervals and the GMP
+	// signal windows, so a stage gate sees the pressure the stage caused.
+	defaultStageHold = 2 * time.Minute
 )
 
 // LaunchConfig configures the mass-launch scenario. Rates are aggregate
@@ -54,6 +58,12 @@ type LaunchConfig struct {
 	// CreateSettle is how long teardown keeps sweeping for creates whose
 	// outcome was lost before it trusts an empty list.
 	CreateSettle time.Duration
+	// Stages are cumulative aggregate launch counts. At each stage boundary
+	// a task stops dispatching, lets its in-flight creates finish, holds for
+	// StageHold, and continues only if the guard stays clear. The last
+	// stage equals LOAD_TEST_OPERATIONS.
+	Stages    []int
+	StageHold time.Duration
 }
 
 func loadLaunchConfig() (LaunchConfig, error) {
@@ -70,8 +80,12 @@ func loadLaunchConfig() (LaunchConfig, error) {
 		TeardownTimeout:     envDuration("LOAD_TEST_TEARDOWN_TIMEOUT", 15*time.Minute),
 		TeardownConcurrency: envInt("LOAD_TEST_TEARDOWN_CONCURRENCY", defaultTeardownConcurrency),
 		CreateSettle:        envDuration("LOAD_TEST_LAUNCH_CREATE_SETTLE", defaultCreateSettle),
+		StageHold:           envDuration("LOAD_TEST_LAUNCH_STAGE_HOLD", defaultStageHold),
 	}
 	var err error
+	if cfg.Stages, err = envIntList("LOAD_TEST_LAUNCH_STAGES"); err != nil {
+		return LaunchConfig{}, err
+	}
 	if cfg.TaskIndex, err = taskEnvInt("LOAD_TEST_TASK_INDEX", "CLOUD_RUN_TASK_INDEX", 0); err != nil {
 		return LaunchConfig{}, err
 	}
@@ -79,6 +93,22 @@ func loadLaunchConfig() (LaunchConfig, error) {
 		return LaunchConfig{}, err
 	}
 	return cfg, nil
+}
+
+func envIntList(key string) ([]int, error) {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return nil, nil
+	}
+	var out []int
+	for _, field := range strings.Split(value, ",") {
+		parsed, err := strconv.Atoi(strings.TrimSpace(field))
+		if err != nil {
+			return nil, fmt.Errorf("%s must be a comma-separated list of integers", key)
+		}
+		out = append(out, parsed)
+	}
+	return out, nil
 }
 
 func taskEnvInt(primary, cloudRun string, fallback int) (int, error) {
@@ -146,6 +176,9 @@ func validateLaunchConfig(cfg Config) error {
 	if l.CreateSettle < 0 || l.CreateSettle >= l.TeardownTimeout {
 		return errors.New("LOAD_TEST_LAUNCH_CREATE_SETTLE must be non-negative and shorter than LOAD_TEST_TEARDOWN_TIMEOUT")
 	}
+	if err := validateLaunchStages(cfg); err != nil {
+		return err
+	}
 	if l.TaskCount > 1 && cfg.LockBackend != "none" {
 		// Fan-out tasks cannot share one lease yet; each would
 		// contend for the same target lock.
@@ -169,6 +202,39 @@ func validateLaunchConfig(cfg Config) error {
 		}
 	}
 	return nil
+}
+
+func validateLaunchStages(cfg Config) error {
+	l := cfg.Launch
+	if len(l.Stages) == 0 {
+		return nil
+	}
+	if len(l.Stages) > maxLaunchStages {
+		return fmt.Errorf("LOAD_TEST_LAUNCH_STAGES allows at most %d stages", maxLaunchStages)
+	}
+	previous := 0
+	for _, stage := range l.Stages {
+		if stage <= previous {
+			return errors.New("LOAD_TEST_LAUNCH_STAGES must be strictly increasing positive counts")
+		}
+		previous = stage
+	}
+	if previous != cfg.Operations {
+		return errors.New("the last LOAD_TEST_LAUNCH_STAGES count must equal LOAD_TEST_OPERATIONS")
+	}
+	if l.StageHold < 0 || l.StageHold >= cfg.RunTimeout {
+		return errors.New("LOAD_TEST_LAUNCH_STAGE_HOLD must be non-negative and shorter than LOAD_TEST_RUN_TIMEOUT")
+	}
+	return nil
+}
+
+// TaskStageEnds returns this task's dispatch count at the end of each stage.
+func (l LaunchConfig) TaskStageEnds() []int {
+	ends := make([]int, len(l.Stages))
+	for i, stage := range l.Stages {
+		ends[i] = l.TaskOperations(stage)
+	}
+	return ends
 }
 
 // TaskOperations returns how many of total operations this task owns. Task i

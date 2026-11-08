@@ -22,6 +22,7 @@ func setLaunchEnv(t *testing.T) {
 		"LOAD_TEST_LAUNCH_STRATEGY", "LOAD_TEST_LAUNCH_RATE", "LOAD_TEST_LAUNCH_HOLD", "LOAD_TEST_LAUNCH_CEILING",
 		"LOAD_TEST_RAMP_START_RATE", "LOAD_TEST_RAMP_STEP_RATE", "LOAD_TEST_RAMP_STEP_DURATION",
 		"LOAD_TEST_API_RPS", "LOAD_TEST_TEARDOWN_TIMEOUT", "LOAD_TEST_TEARDOWN_CONCURRENCY", "LOAD_TEST_LAUNCH_CREATE_SETTLE",
+		"LOAD_TEST_LAUNCH_STAGES", "LOAD_TEST_LAUNCH_STAGE_HOLD",
 		"LOAD_TEST_TASK_INDEX", "LOAD_TEST_TASK_COUNT", "CLOUD_RUN_TASK_INDEX", "CLOUD_RUN_TASK_COUNT",
 		"LOAD_TEST_RUN_TIMEOUT", "LOAD_TEST_RESOURCE_TTL",
 		"LOAD_TEST_GUARD_MODE", "LOAD_TEST_GUARD_INTERVAL", "LOAD_TEST_GUARD_BACKOFF_PAUSE", "LOAD_TEST_GUARD_MAX_BACKOFFS",
@@ -646,6 +647,60 @@ func TestRunLaunchBackoffLimitsCreatesQueuedOnAPIBudget(t *testing.T) {
 	_, _ = launchRunner(cfg, client).RunLaunch(context.Background(), monitor)
 	if peak := client.peak.Load(); peak > 12 {
 		t.Fatalf("%d creates reached the server at once after a backoff to 10", peak)
+	}
+}
+
+func TestRunLaunchStageGateStopsOnGuardBackoff(t *testing.T) {
+	client := newFakeLaunchClient()
+	cfg := testLaunchConfig(12)
+	cfg.Launch.Stages = []int{4, 8, 12}
+	cfg.Launch.Hold = 2 * time.Second
+	// Host pressure rises once the second stage has launched.
+	source := &fakePressureSource{name: PressureSourceGMP, read: func(int) (PressureReading, error) {
+		if client.creates.Load() >= 8 {
+			return freeMemory("host-a", 8), nil
+		}
+		return freeMemory("host-a", 50), nil
+	}}
+	pressure := testPressureConfig()
+	pressure.Interval = time.Hour
+	monitor := NewPressureMonitor(pressure, []PressureSource{source}, nil)
+	summary, err := launchRunner(cfg, client).RunLaunch(context.Background(), monitor)
+	if err == nil {
+		t.Fatal("RunLaunch returned nil after a stage gate stopped the launch")
+	}
+	if summary.Created != 8 || summary.Unstarted != 4 || !summary.Cleanup.Verified || summary.HoldDuration != 0 {
+		t.Fatalf("stage 2 gate did not stop the launch cleanly: %+v", summary)
+	}
+	if len(summary.Stages) != 2 {
+		t.Fatalf("stages = %+v, want two gates", summary.Stages)
+	}
+	first, second := summary.Stages[0], summary.Stages[1]
+	if first.Stopped || first.GuardAction != "" || first.Dispatched != 4 || first.Ready != 4 {
+		t.Fatalf("stage 1 gate did not wait for its creates or stopped: %+v", first)
+	}
+	if !second.Stopped || second.GuardAction != GuardActionBackoff || !strings.Contains(summary.StopReason, "stage 2") {
+		t.Fatalf("stage 2 gate = %+v, stop reason %q", second, summary.StopReason)
+	}
+}
+
+func TestLoadLaunchStages(t *testing.T) {
+	setLaunchEnv(t)
+	t.Setenv("LOAD_TEST_LAUNCH_STAGE_HOLD", "")
+	t.Setenv("LOAD_TEST_OPERATIONS", "100")
+	for _, bad := range []string{"10,10,100", "50,20,100", "10,50", "0,100", "10,x,100"} {
+		t.Setenv("LOAD_TEST_LAUNCH_STAGES", bad)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "LOAD_TEST_LAUNCH_STAGES") {
+			t.Errorf("stages %q: expected rejection, got %v", bad, err)
+		}
+	}
+	t.Setenv("LOAD_TEST_LAUNCH_STAGES", "10, 50,100")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load rejected valid stages: %v", err)
+	}
+	if len(cfg.Launch.Stages) != 3 || cfg.Launch.StageHold != defaultStageHold {
+		t.Fatalf("stages = %v hold = %s", cfg.Launch.Stages, cfg.Launch.StageHold)
 	}
 }
 

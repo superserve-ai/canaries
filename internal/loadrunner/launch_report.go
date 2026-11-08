@@ -69,6 +69,7 @@ func (s LaunchSummary) Report(cfg Config, runErr error) string {
 		scaleLabel += " (this task's failures by global operation index)"
 	}
 	fmt.Fprintf(&out, "%s: %s\n", scaleLabel, formatMilestones(s.FailureMilestones, s.Dispatched, s.Failed, s.Dispatched*int64(max(cfg.Launch.TaskCount, 1))))
+	writeStages(&out, s.Stages)
 	writeTimeline(&out, s.Timeline)
 	writeGeneratorSection(&out, s, cfg)
 	writePressureSection(&out, s.Pressure)
@@ -249,6 +250,25 @@ func writePressureSection(out *strings.Builder, p PressureReport) {
 			fmt.Fprintf(out, "%-30s %-24s %12.3f %12.3f n=%d\n", peak.Signal, host, peak.Worst, peak.Last, peak.Samples)
 		}
 		fmt.Fprintln(out, "```")
+	}
+}
+
+func writeStages(out *strings.Builder, stages []LaunchStage) {
+	if len(stages) == 0 {
+		return
+	}
+	fmt.Fprintln(out, "Stage gates (this task):")
+	for i, stage := range stages {
+		verdict := "continue"
+		if stage.Stopped {
+			verdict = "stop"
+		}
+		action := stage.GuardAction
+		if action == "" {
+			action = "clear"
+		}
+		fmt.Fprintf(out, "  %d. %d total (%d this task) at %s: %d dispatched, %d ready, %d failed, guard %s -> %s\n",
+			i+1, stage.Target, stage.TaskTarget, stage.Elapsed.Round(time.Second), stage.Dispatched, stage.Ready, stage.Failed, action, verdict)
 	}
 }
 

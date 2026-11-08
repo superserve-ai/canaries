@@ -61,6 +61,19 @@ type FailureMilestone struct {
 	Failed     int64
 }
 
+// LaunchStage records one stage gate. Counts are this task's totals when the
+// gate ran.
+type LaunchStage struct {
+	Target      int64
+	TaskTarget  int64
+	Dispatched  int64
+	Ready       int64
+	Failed      int64
+	Elapsed     time.Duration
+	GuardAction string
+	Stopped     bool
+}
+
 type CleanupSummary struct {
 	Resident       int64
 	Deleted        int64
@@ -101,6 +114,7 @@ type LaunchSummary struct {
 	FailureClasses        map[string]int64
 	FailureMilestones     []FailureMilestone
 	Template              TemplateInfo
+	Stages                []LaunchStage
 	Cleanup               CleanupSummary
 	Pressure              PressureReport
 	StopReason            string
@@ -293,7 +307,8 @@ func (r Runner) RunLaunch(parent context.Context, monitor *PressureMonitor) (Lau
 	r.dispatchLaunch(ctx, state, monitor, api, telemetry, share, start)
 	state.summary.LaunchEnd = r.now().UTC()
 
-	if cfg.Launch.Hold > 0 && ctx.Err() == nil {
+	// A stage gate that stopped the launch also skips the hold.
+	if cfg.Launch.Hold > 0 && ctx.Err() == nil && state.summary.StopReason == "" {
 		holdStart := r.now()
 		log.Info().Str("run_id", cfg.RunID).Int64("ready", state.summary.Ready).Dur("hold", cfg.Launch.Hold).Msg("launch holding sandboxes resident")
 		_ = sleepContext(ctx, cfg.Launch.Hold)
@@ -361,7 +376,25 @@ func (r Runner) dispatchLaunch(ctx context.Context, state *launchState, monitor 
 		r.recordLaunchResult(state, result, start)
 	}
 	var next time.Time
+	stageEnds := cfg.Launch.TaskStageEnds()
+	stage := 0
+dispatch:
 	for seq := 0; seq < share; seq++ {
+		// The last stage needs no gate; the launch hold and teardown follow.
+		for ; stage < len(stageEnds)-1 && seq == stageEnds[stage]; stage++ {
+			for inFlight > 0 {
+				select {
+				case result := <-done:
+					collect(result)
+				case <-ctx.Done():
+					break dispatch
+				}
+			}
+			if !r.stageGate(ctx, state, monitor, stage, start) {
+				break dispatch
+			}
+			next = time.Time{}
+		}
 		multiplier, paused, err := monitor.Gate(ctx)
 		if err != nil || ctx.Err() != nil {
 			break
@@ -438,6 +471,32 @@ func (r Runner) dispatchLaunch(ctx context.Context, state *launchState, monitor 
 	for result := range done {
 		collect(result)
 	}
+}
+
+// stageGate holds after a stage's creates finish and reports whether the next
+// stage may start. An enforcing guard that backs off or aborts at the gate
+// stops the launch, so each stage must leave the hosts clear.
+func (r Runner) stageGate(ctx context.Context, state *launchState, monitor *PressureMonitor, stage int, start time.Time) bool {
+	cfg := r.Config
+	if sleepContext(ctx, cfg.Launch.StageHold) != nil {
+		return false
+	}
+	action := monitor.Evaluate(ctx)
+	stopped := action != "" || ctx.Err() != nil
+	state.mu.Lock()
+	result := LaunchStage{
+		Target: int64(cfg.Launch.Stages[stage]), TaskTarget: int64(cfg.Launch.TaskStageEnds()[stage]),
+		Dispatched: state.summary.Dispatched, Ready: state.summary.Ready, Failed: state.summary.Failed,
+		Elapsed: r.now().Sub(start), GuardAction: action, Stopped: stopped,
+	}
+	state.summary.Stages = append(state.summary.Stages, result)
+	if stopped && action != "" {
+		state.summary.StopReason = fmt.Sprintf("guard %s at stage %d gate (%d sandboxes)", action, stage+1, result.Target)
+	}
+	state.mu.Unlock()
+	log.Info().Str("run_id", cfg.RunID).Int("stage", stage+1).Int64("target", result.Target).Int64("ready", result.Ready).
+		Int64("failed", result.Failed).Str("guard_action", action).Bool("stopped", stopped).Msg("launch stage gate")
+	return !stopped
 }
 
 // launchRate returns the aggregate target rate at elapsed; zero means the

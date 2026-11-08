@@ -684,10 +684,11 @@ func (m *PressureMonitor) Run(ctx context.Context) {
 	}
 }
 
-// Evaluate reads every source once and applies the resulting action.
-func (m *PressureMonitor) Evaluate(ctx context.Context) {
+// Evaluate reads every source once and applies the resulting action. It
+// returns the action an enforcing guard took, or "" when it took none.
+func (m *PressureMonitor) Evaluate(ctx context.Context) string {
 	if m == nil {
-		return
+		return ""
 	}
 	var samples []PressureSample
 	var hosts []HostPressure
@@ -697,7 +698,7 @@ func (m *PressureMonitor) Evaluate(ctx context.Context) {
 		reading, err := source.Read(sourceCtx)
 		cancel()
 		if ctx.Err() != nil {
-			return
+			return ""
 		}
 		for _, sample := range reading.Samples {
 			if m.watchesHost(sample.HostID) {
@@ -719,7 +720,7 @@ func (m *PressureMonitor) Evaluate(ctx context.Context) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.abortErr != nil {
-		return
+		return GuardActionAbort
 	}
 	m.evaluations++
 	for _, signal := range noData {
@@ -756,7 +757,7 @@ func (m *PressureMonitor) Evaluate(ctx context.Context) {
 		}
 	}
 	if m.cfg.Mode != PressureModeEnforce {
-		return
+		return ""
 	}
 	switch action {
 	case GuardActionAbort:
@@ -766,7 +767,7 @@ func (m *PressureMonitor) Evaluate(ctx context.Context) {
 		if m.consecutive > m.cfg.MaxBackoffs {
 			m.triggerLocked(now, "backoff_escalation", "", float64(m.consecutive), float64(m.cfg.MaxBackoffs), GuardActionAbort)
 			m.abortLocked(fmt.Sprintf("%d consecutive backoffs", m.consecutive))
-			return
+			return GuardActionAbort
 		}
 		m.backoffs++
 		m.multiplier = math.Max(m.multiplier/2, minRateMultiplier)
@@ -779,6 +780,7 @@ func (m *PressureMonitor) Evaluate(ctx context.Context) {
 		m.consecutive = 0
 		m.multiplier = math.Min(1, m.multiplier*2)
 	}
+	return action
 }
 
 // watchesHost keeps fleet-wide samples and, when LOAD_TEST_GUARD_HOST_IDS is

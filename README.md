@@ -340,8 +340,14 @@ The load runner creates real sandboxes, waits for them to become active, verifie
 | `LOAD_TEST_TEMPLATE` | `superserve/node-22` | Template; its vCPU, memory, disk, and image size are recorded in the report. |
 | `LOAD_TEST_TEARDOWN_TIMEOUT` / `LOAD_TEST_TEARDOWN_CONCURRENCY` | 15m / 32 | Teardown budget. It is added to the cleanup budget, and the launch lease TTL defaults to one hour. |
 | `LOAD_TEST_TASK_INDEX` / `LOAD_TEST_TASK_COUNT` | `CLOUD_RUN_TASK_INDEX` / `CLOUD_RUN_TASK_COUNT` | Fan-out. Task *i* runs global operations *i*, *i+count*, ... and reports worker `task-i`. One task runs at most 10,000 sandboxes. |
+| `LOAD_TEST_LAUNCH_STAGES` | unset | Staged ramp: comma-separated cumulative counts, for example `1000,10000,50000,100000`. The last count must equal `LOAD_TEST_OPERATIONS`. |
+| `LOAD_TEST_LAUNCH_STAGE_HOLD` | 2m | Hold at each stage boundary before the stage gate reads the guard. |
 
 The report (`*Mass Launch Results*`) gives creates/s (average, peak 1 s, peak 10 s), ready/s, p50/p95/p99 for the create request, create to active, and create to first successful command, failures by class (`rate_limited`, `team_quota`, `host_cap`, `server_error`, `rejected`, `transport`, `canceled`, `active_failed`, `active_timeout`, `first_command`), failures at the 100, 1K, 10K, 100K, and 1M milestones, a 10 s timeline, and generator health (schedule lag, slot wait, API budget wait). The `Bottleneck` line separates generator limits (API budget, local concurrency) from API rate limits, team quota, host caps, guard backoffs, and platform errors. The `Correlate` line gives the exact UTC window and GMP queries for per-host restore rate, control-plane transitions, and DB pool load.
+
+#### Staged ramp
+
+With `LOAD_TEST_LAUNCH_STAGES` set, a launch runs as stages inside one run. At each stage boundary the task stops dispatching, waits until its in-flight creates finish, holds for `LOAD_TEST_LAUNCH_STAGE_HOLD`, and evaluates the guard once. If an enforcing guard backs off or aborts at that gate, the launch stops there, skips `LOAD_TEST_LAUNCH_HOLD`, and tears down. The sandboxes from earlier stages stay resident until teardown, so each stage adds load on top of the previous one. The report lists every gate with its counts, elapsed time, and guard result. In a fan-out run each task gates on its own share; tasks do not wait for each other.
 
 #### Host pressure guard
 
@@ -355,7 +361,7 @@ A backoff halves the dispatch rate and concurrency (down to 1/16) and pauses for
 
 #### Production requirements
 
-A production launch needs all of the following, and the runner rejects the configuration otherwise: `LOAD_TEST_PRODUCTION_OPT_IN=true`, GCS coordination with the global lock and benchmark guard, an explicit `LOAD_TEST_LAUNCH_CEILING`, `LOAD_TEST_GUARD_MODE=enforce` with a Supabase or GMP source, and a single task (fan-out has no shared lease yet). Before a 10K run, also confirm the team quota and API rate limits for the run, the per-host caps, the run window, and cleanup ownership.
+A production launch needs all of the following, and the runner rejects the configuration otherwise: `LOAD_TEST_PRODUCTION_OPT_IN=true`, GCS coordination with the global lock and benchmark guard, an explicit `LOAD_TEST_LAUNCH_CEILING`, `LOAD_TEST_GUARD_MODE=enforce` with a Supabase or GMP source, and a single task (fan-out has no shared lease yet). The first milestone is 100K sandboxes, run as a staged ramp (for example `1000,10000,50000,100000`). Before it, run a small staging launch and a calibration launch of about 100 sandboxes to measure per-sandbox host memory and the create rate. Also confirm the team quota and API rate limits for the run, the per-host caps, the host count, the run window, and cleanup ownership. A 100K run is not possible with the current limits: it needs at least 10 tasks (10,000 per task), and production allows one task until shared leases exist.
 
 ## Debug Retention
 
