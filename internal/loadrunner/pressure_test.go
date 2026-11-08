@@ -334,6 +334,22 @@ func TestPressureSourcesFailClosedWithoutData(t *testing.T) {
 	}
 }
 
+func TestGMPSourceIgnoresDataForExcludedHosts(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"vector","result":[{"metric":{"host_id":"host-b"},"value":[1700000000,"1"]}]}}`))
+	}))
+	defer server.Close()
+	rules := []PressureRule{
+		{Signal: "restore_p99_seconds", Source: PressureSourceGMP, Backoff: 15, Query: "guarded"},
+		{Signal: "restore_rate", Source: PressureSourceGMP, Query: "report-only"},
+	}
+	gmp := GMPSource{Project: "example-project", Environment: "staging", Rules: rules, HostIDs: []string{"host-a"}, HTTP: server.Client(), BaseURL: server.URL}
+	reading, err := gmp.Read(context.Background())
+	if err == nil || len(reading.Samples) != 0 || !slices.Equal(reading.NoData, []string{"restore_p99_seconds"}) {
+		t.Fatalf("Read = %+v, %v; want no data for host-a", reading, err)
+	}
+}
+
 func TestPressureSourceErrorsHideBodiesAndKeys(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusForbidden)

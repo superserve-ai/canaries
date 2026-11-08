@@ -656,6 +656,7 @@ func (r Runner) teardownLaunch(state *launchState, api *launchAPIClient, telemet
 		settleUntil = time.Now().Add(cfg.HTTPTimeout)
 	}
 	for pass := 0; ; pass++ {
+		listStart := time.Now()
 		remaining, err := api.ListSandboxes(ctx, query)
 		if err != nil {
 			cleanup.Leftover = max(cleanup.Leftover, failed)
@@ -669,7 +670,9 @@ func (r Runner) teardownLaunch(state *launchState, api *launchAPIClient, telemet
 			}
 		}
 		cleanup.Leftover = int64(len(ids))
-		if len(ids) == 0 && !time.Now().Before(settleUntil) {
+		// Only a list issued after the settle window proves a late create
+		// is not about to appear.
+		if len(ids) == 0 && !listStart.Before(settleUntil) {
 			cleanup.Verified = true
 			return cleanup
 		}

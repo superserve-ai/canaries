@@ -262,11 +262,16 @@ type fakeLaunchClient struct {
 	// in transit, so only the metadata sweep can find them.
 	lostCreates atomic.Int64
 	// lateCreates makes this many creates fail in transit and land on the
-	// server lateBy afterwards.
+	// server lateBy afterwards, or when landPending is called if lateBy is
+	// negative.
 	lateCreates atomic.Int64
 	lateBy      time.Duration
-	creates     atomic.Int64
-	names       []string
+	pending     []canaryapi.Sandbox
+	// afterList runs after a list has taken its snapshot.
+	afterList func(call int)
+	lists     int
+	creates   atomic.Int64
+	names     []string
 }
 
 func newFakeLaunchClient() *fakeLaunchClient {
@@ -278,6 +283,12 @@ func (f *fakeLaunchClient) CreateSandbox(_ context.Context, req canaryapi.Create
 	time.Sleep(time.Millisecond)
 	sb := canaryapi.Sandbox{ID: req.Name, Name: req.Name, Status: "active", AccessToken: "token", Metadata: req.Metadata}
 	if f.lateCreates.Add(-1) >= 0 {
+		if f.lateBy < 0 {
+			f.liveMu.Lock()
+			f.pending = append(f.pending, sb)
+			f.liveMu.Unlock()
+			return canaryapi.Sandbox{}, errors.New("connection reset by peer")
+		}
 		time.AfterFunc(f.lateBy, func() {
 			f.liveMu.Lock()
 			f.live[sb.ID] = sb
@@ -309,7 +320,28 @@ func (f *fakeLaunchClient) DeleteSandbox(_ context.Context, id string) error {
 	return nil
 }
 
+func (f *fakeLaunchClient) landPending() {
+	f.liveMu.Lock()
+	defer f.liveMu.Unlock()
+	for _, sb := range f.pending {
+		f.live[sb.ID] = sb
+	}
+	f.pending = nil
+}
+
 func (f *fakeLaunchClient) ListSandboxes(_ context.Context, query map[string]string) ([]canaryapi.Sandbox, error) {
+	out := f.listSnapshot(query)
+	f.liveMu.Lock()
+	f.lists++
+	call := f.lists
+	f.liveMu.Unlock()
+	if f.afterList != nil {
+		f.afterList(call)
+	}
+	return out, nil
+}
+
+func (f *fakeLaunchClient) listSnapshot(query map[string]string) []canaryapi.Sandbox {
 	f.liveMu.Lock()
 	defer f.liveMu.Unlock()
 	var out []canaryapi.Sandbox
@@ -324,7 +356,7 @@ func (f *fakeLaunchClient) ListSandboxes(_ context.Context, query map[string]str
 			out = append(out, sb)
 		}
 	}
-	return out, nil
+	return out
 }
 
 func (f *fakeLaunchClient) ListTemplates(context.Context, map[string]string) ([]canaryapi.Template, error) {
@@ -415,6 +447,26 @@ func TestRunLaunchWaitsForUncertainCreatesToSettle(t *testing.T) {
 	}
 	if !summary.Cleanup.Verified || summary.Cleanup.Swept != 1 || client.liveCount() != 0 {
 		t.Fatalf("late create not swept before cleanup was verified: %+v live=%d", summary.Cleanup, client.liveCount())
+	}
+}
+
+func TestRunLaunchIgnoresEmptyListStartedBeforeSettle(t *testing.T) {
+	client := newFakeLaunchClient()
+	client.lateCreates.Store(1)
+	client.lateBy = -1
+	cfg := testLaunchConfig(4)
+	cfg.HTTPTimeout = 200 * time.Millisecond
+	// The first sweep snapshots an empty list before the settle window
+	// ends, returns after it, and the late create lands in between.
+	client.afterList = func(call int) {
+		if call == 1 {
+			time.Sleep(300 * time.Millisecond)
+			client.landPending()
+		}
+	}
+	summary, _ := launchRunner(cfg, client).RunLaunch(context.Background(), nil)
+	if !summary.Cleanup.Verified || summary.Cleanup.Swept != 1 || client.liveCount() != 0 {
+		t.Fatalf("cleanup verified from a list taken before the settle window ended: %+v live=%d", summary.Cleanup, client.liveCount())
 	}
 }
 

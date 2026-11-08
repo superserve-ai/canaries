@@ -97,7 +97,7 @@ func NewPressureSources(cfg PressureConfig, supabaseHTTP, gmpHTTP *http.Client, 
 		sources = append(sources, SupabaseHostPressureSource{URL: cfg.SupabaseURL, Key: cfg.SupabaseKey, HostIDs: cfg.HostIDs, HTTP: supabaseHTTP, Now: now})
 	}
 	if cfg.GMPProject != "" {
-		sources = append(sources, GMPSource{Project: cfg.GMPProject, Environment: cfg.GMPEnvironment, Rules: cfg.Rules, HTTP: gmpHTTP})
+		sources = append(sources, GMPSource{Project: cfg.GMPProject, Environment: cfg.GMPEnvironment, Rules: cfg.Rules, HostIDs: cfg.HostIDs, HTTP: gmpHTTP})
 	}
 	return sources
 }
@@ -362,8 +362,11 @@ type GMPSource struct {
 	Project     string
 	Environment string
 	Rules       []PressureRule
-	HTTP        *http.Client
-	BaseURL     string
+	// HostIDs drops per-host samples for other hosts, so data that only
+	// covers excluded hosts counts as no data. Fleet-wide samples are kept.
+	HostIDs []string
+	HTTP    *http.Client
+	BaseURL string
 }
 
 func (s GMPSource) Name() string { return PressureSourceGMP }
@@ -400,6 +403,9 @@ func (s GMPSource) Read(ctx context.Context) (PressureReading, error) {
 			errs = append(errs, fmt.Errorf("%s: %w", rule.Signal, err))
 			continue
 		}
+		samples = slices.DeleteFunc(samples, func(sample PressureSample) bool {
+			return sample.HostID != "" && len(s.HostIDs) > 0 && !slices.Contains(s.HostIDs, sample.HostID)
+		})
 		reading.Samples = append(reading.Samples, samples...)
 		if rule.guarded() {
 			if len(samples) > 0 {
