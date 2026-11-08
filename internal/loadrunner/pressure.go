@@ -13,6 +13,7 @@ import (
 	"os"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -65,6 +66,9 @@ type PressureConfig struct {
 	GMPEnvironment        string
 	CreateErrorWindow     time.Duration
 	CreateErrorMinSamples int
+	// GMPPresenceQuery returns one series per host whose exporter is
+	// reporting. It proves the per-host signals cover the watched hosts.
+	GMPPresenceQuery string
 	// HostIDs limits host signals to the hosts under test. Empty means every
 	// host, which also counts stale rows for retired hosts.
 	HostIDs []string
@@ -73,7 +77,7 @@ type PressureConfig struct {
 
 // HasHostSource reports whether the guard reads real host state rather than
 // only the generator's own create outcomes: a configured source must have at
-// least one signal with a threshold.
+// least one signal with a threshold, and GMP must also check host presence.
 func (c PressureConfig) HasHostSource() bool {
 	guarded := func(source string) bool {
 		for _, rule := range c.Rules {
@@ -84,7 +88,7 @@ func (c PressureConfig) HasHostSource() bool {
 		return false
 	}
 	return c.SupabaseURL != "" && c.SupabaseKey != "" && guarded(PressureSourceSupabase) ||
-		c.GMPProject != "" && guarded(PressureSourceGMP)
+		c.GMPProject != "" && c.GMPPresenceQuery != "" && guarded(PressureSourceGMP)
 }
 
 func (r PressureRule) guarded() bool { return r.Backoff > 0 || r.Abort > 0 }
@@ -97,10 +101,14 @@ func NewPressureSources(cfg PressureConfig, supabaseHTTP, gmpHTTP *http.Client, 
 		sources = append(sources, SupabaseHostPressureSource{URL: cfg.SupabaseURL, Key: cfg.SupabaseKey, HostIDs: cfg.HostIDs, HTTP: supabaseHTTP, Now: now})
 	}
 	if cfg.GMPProject != "" {
-		sources = append(sources, GMPSource{Project: cfg.GMPProject, Environment: cfg.GMPEnvironment, Rules: cfg.Rules, HostIDs: cfg.HostIDs, HTTP: gmpHTTP})
+		sources = append(sources, GMPSource{Project: cfg.GMPProject, Environment: cfg.GMPEnvironment, PresenceQuery: cfg.GMPPresenceQuery, Rules: cfg.Rules, HostIDs: cfg.HostIDs, HTTP: gmpHTTP})
 	}
 	return sources
 }
+
+// vmd records vmd_launcher_ready on every host each sampler tick, so its
+// recent series list the hosts whose exporters are alive.
+const defaultGMPPresenceQuery = `count by (host_id) (last_over_time(vmd_launcher_ready{environment="$ENV"}[2m]))`
 
 // defaultPressureRules lists every signal the guard understands. Host memory,
 // PSI, CPU steal and run queue have no default query because no exported
@@ -142,6 +150,7 @@ func loadPressureConfig(environment string) (PressureConfig, error) {
 		SupabaseKey:           strings.TrimSpace(os.Getenv("LOAD_TEST_PRESSURE_SUPABASE_KEY")),
 		GMPProject:            strings.TrimSpace(os.Getenv("LOAD_TEST_GUARD_GMP_PROJECT")),
 		GMPEnvironment:        envDefault("LOAD_TEST_GUARD_GMP_ENVIRONMENT", environment),
+		GMPPresenceQuery:      envDefault("LOAD_TEST_GUARD_GMP_PRESENCE_QUERY", defaultGMPPresenceQuery),
 		CreateErrorWindow:     envDuration("LOAD_TEST_GUARD_CREATE_WINDOW", 30*time.Second),
 		CreateErrorMinSamples: envInt("LOAD_TEST_GUARD_CREATE_MIN_SAMPLES", 20),
 	}
@@ -303,7 +312,8 @@ type SupabaseHostPressureSource struct {
 func (s SupabaseHostPressureSource) Name() string { return PressureSourceSupabase }
 
 func (s SupabaseHostPressureSource) Read(ctx context.Context) (PressureReading, error) {
-	endpoint := fmt.Sprintf("%s/rest/v1/host_pressure?select=*&order=host_id.asc&limit=%d", s.URL, maxHostPressureRows)
+	// One extra row reveals a fleet larger than the guard can watch.
+	endpoint := fmt.Sprintf("%s/rest/v1/host_pressure?select=*&order=host_id.asc&limit=%d", s.URL, maxHostPressureRows+1)
 	if len(s.HostIDs) > 0 {
 		endpoint += "&host_id=" + url.QueryEscape("in.("+strings.Join(s.HostIDs, ",")+")")
 	}
@@ -328,6 +338,10 @@ func (s SupabaseHostPressureSource) Read(ctx context.Context) (PressureReading, 
 	var readErr error
 	if len(rows) == 0 {
 		readErr = errors.New("host_pressure returned no rows")
+	} else if len(rows) > maxHostPressureRows {
+		rows = rows[:maxHostPressureRows]
+		reading.Hosts = rows
+		readErr = fmt.Errorf("host_pressure has more than %d rows; set LOAD_TEST_GUARD_HOST_IDS to the hosts under test", maxHostPressureRows)
 	} else if missing := missingHosts(s.HostIDs, rows); len(missing) > 0 {
 		readErr = fmt.Errorf("host_pressure has no row for %s", strings.Join(missing, ","))
 	}
@@ -361,7 +375,10 @@ func missingHosts(want []string, rows []HostPressure) []string {
 type GMPSource struct {
 	Project     string
 	Environment string
-	Rules       []PressureRule
+	// PresenceQuery lists the hosts whose exporters report. Each watched
+	// host must appear, or every host when HostIDs is empty.
+	PresenceQuery string
+	Rules         []PressureRule
 	// HostIDs drops per-host samples for other hosts, so data that only
 	// covers excluded hosts counts as no data. Fleet-wide samples are kept.
 	HostIDs []string
@@ -377,6 +394,22 @@ func (s GMPSource) Read(ctx context.Context) (PressureReading, error) {
 		base = "https://monitoring.googleapis.com"
 	}
 	endpoint := fmt.Sprintf("%s/v1/projects/%s/location/global/prometheus/api/v1/query", strings.TrimRight(base, "/"), url.PathEscape(s.Project))
+	query := func(signal, promQL string) ([]PressureSample, error) {
+		promQL = strings.ReplaceAll(promQL, gmpEnvironmentTemplate, s.Environment)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"?"+url.Values{"query": {promQL}}.Encode(), nil)
+		if err != nil {
+			return nil, fmt.Errorf("%s: building query failed", signal)
+		}
+		var resp promQueryResponse
+		if err := doPressureJSON(s.HTTP, req, &resp); err != nil {
+			return nil, fmt.Errorf("%s: %w", signal, err)
+		}
+		samples, err := resp.samples(signal)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", signal, err)
+		}
+		return samples, nil
+	}
 	var reading PressureReading
 	var errs []error
 	guarded, guardedWithData := 0, 0
@@ -387,20 +420,9 @@ func (s GMPSource) Read(ctx context.Context) (PressureReading, error) {
 		if rule.guarded() {
 			guarded++
 		}
-		query := strings.ReplaceAll(rule.Query, gmpEnvironmentTemplate, s.Environment)
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"?"+url.Values{"query": {query}}.Encode(), nil)
+		samples, err := query(rule.Signal, rule.Query)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("%s: building query failed", rule.Signal))
-			continue
-		}
-		var resp promQueryResponse
-		if err := doPressureJSON(s.HTTP, req, &resp); err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", rule.Signal, err))
-			continue
-		}
-		samples, err := resp.samples(rule.Signal)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", rule.Signal, err))
+			errs = append(errs, err)
 			continue
 		}
 		samples = slices.DeleteFunc(samples, func(sample PressureSample) bool {
@@ -421,7 +443,43 @@ func (s GMPSource) Read(ctx context.Context) (PressureReading, error) {
 	if guarded > 0 && guardedWithData == 0 && len(errs) == 0 {
 		errs = append(errs, errors.New("no guarded query returned data"))
 	}
+	// Data from some hosts says nothing about a host whose exporter is
+	// down, so every watched host must be reporting.
+	if guarded > 0 {
+		if err := s.checkPresence(query); err != nil {
+			errs = append(errs, err)
+		}
+	}
 	return reading, errors.Join(errs...)
+}
+
+func (s GMPSource) checkPresence(query func(signal, promQL string) ([]PressureSample, error)) error {
+	if s.PresenceQuery == "" {
+		return errors.New("no host presence query configured")
+	}
+	samples, err := query("host_presence", s.PresenceQuery)
+	if err != nil {
+		return err
+	}
+	seen := make(map[string]bool, len(samples))
+	for _, sample := range samples {
+		if sample.HostID != "" {
+			seen[sample.HostID] = true
+		}
+	}
+	if len(seen) == 0 {
+		return errors.New("host_presence: no host is reporting")
+	}
+	var missing []string
+	for _, id := range s.HostIDs {
+		if !seen[id] {
+			missing = append(missing, id)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("host_presence: no metrics from %s", strings.Join(missing, ","))
+	}
+	return nil
 }
 
 type promQueryResponse struct {
@@ -452,8 +510,11 @@ func (r promQueryResponse) samples(signal string) ([]PressureSample, error) {
 		if !ok {
 			continue
 		}
-		var value float64
-		if _, err := fmt.Sscan(raw, &value); err != nil || math.IsNaN(value) || math.IsInf(value, 0) {
+		// NaN is an idle 0/0 (for example a quantile with no requests). An
+		// infinity is real: histogram_quantile returns +Inf past the top
+		// bucket, so it must reach the thresholds.
+		value, err := strconv.ParseFloat(raw, 64)
+		if err != nil || math.IsNaN(value) {
 			continue
 		}
 		out = append(out, PressureSample{Signal: signal, HostID: item.Metric["host_id"], Value: value})

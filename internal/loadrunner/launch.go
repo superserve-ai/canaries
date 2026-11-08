@@ -157,7 +157,17 @@ type pacer struct {
 }
 
 func newPacer(rate float64) *pacer {
-	return &pacer{interval: time.Duration(float64(time.Second) / rate)}
+	return &pacer{interval: rateInterval(rate)}
+}
+
+// rateInterval is the spacing between events at rate per second. It
+// saturates at an hour so a tiny rate cannot overflow into a negative
+// duration, which would disable pacing.
+func rateInterval(rate float64) time.Duration {
+	if interval := float64(time.Second) / rate; interval < float64(time.Hour) {
+		return time.Duration(interval)
+	}
+	return time.Hour
 }
 
 func (p *pacer) wait(ctx context.Context) error {
@@ -370,7 +380,7 @@ func (r Runner) dispatchLaunch(ctx context.Context, state *launchState, monitor 
 			if err := sleepContext(ctx, next.Sub(now)); err != nil {
 				break
 			}
-			next = next.Add(time.Duration(float64(time.Second) / rate))
+			next = next.Add(rateInterval(rate))
 		}
 		limit := max(1, int(math.Ceil(float64(cfg.Concurrency)*multiplier)))
 		slotStart := r.now()
@@ -386,6 +396,21 @@ func (r Runner) dispatchLaunch(ctx context.Context, state *launchState, monitor 
 		if ctx.Err() != nil {
 			break
 		}
+		slotWait := r.now().Sub(slotStart)
+		// Take the API slot here rather than in the worker: a worker queued
+		// on the budget would send at the pre-backoff pace, while the next
+		// dispatch already sees the guard's current rate and concurrency.
+		if err := api.Wait(ctx); err != nil {
+			break
+		}
+		if _, paused, err := monitor.Gate(ctx); err != nil {
+			break
+		} else if paused {
+			// Redo this launch's admission at the post-pause rate.
+			next = time.Time{}
+			seq--
+			continue
+		}
 		for drained := false; !drained; {
 			select {
 			case result := <-done:
@@ -398,7 +423,7 @@ func (r Runner) dispatchLaunch(ctx context.Context, state *launchState, monitor 
 		state.mu.Lock()
 		state.summary.Dispatched++
 		state.summary.ScheduleLag = append(state.summary.ScheduleLag, max(0, issued.Sub(scheduled)))
-		state.summary.SlotWait = append(state.summary.SlotWait, issued.Sub(slotStart))
+		state.summary.SlotWait = append(state.summary.SlotWait, slotWait)
 		inFlight++
 		state.summary.PeakInFlight = max(state.summary.PeakInFlight, int64(inFlight))
 		state.mu.Unlock()
@@ -406,7 +431,7 @@ func (r Runner) dispatchLaunch(ctx context.Context, state *launchState, monitor 
 		wg.Add(1)
 		go func(seq int64, operation int) {
 			defer wg.Done()
-			done <- r.launchOne(ctx, monitor, api, telemetry, seq, operation)
+			done <- r.launchOne(ctx, monitor, telemetry, seq, operation)
 		}(int64(seq), operation)
 	}
 	go func() { wg.Wait(); close(done) }()
@@ -426,27 +451,11 @@ func (r Runner) launchRate(elapsed time.Duration) float64 {
 	return math.Min(l.Rate, l.RampStartRate+l.RampStepRate*steps)
 }
 
-func (r Runner) launchOne(ctx context.Context, monitor *PressureMonitor, api *launchAPIClient, telemetry lifecycle.TelemetryContext, seq int64, operation int) (result launchResult) {
+func (r Runner) launchOne(ctx context.Context, monitor *PressureMonitor, telemetry lifecycle.TelemetryContext, seq int64, operation int) (result launchResult) {
 	cfg := r.Config
 	result.seq = seq
 	result.operation = operation
 	defer func() { result.completedAt = r.now() }()
-	// Re-check the guard after the API-budget wait so queued creates honor a
-	// pause or abort; a resumed worker takes a fresh slot instead of bursting.
-	for {
-		if err := api.Wait(ctx); err != nil {
-			result.failure, result.err = FailureCanceled, err
-			return
-		}
-		_, paused, err := monitor.Gate(ctx)
-		if err != nil {
-			result.failure, result.err = FailureCanceled, err
-			return
-		}
-		if !paused {
-			break
-		}
-	}
 	createdAt := r.now().UTC()
 	result.createdAt = createdAt
 	metadata := sandboxmetadata.TestOwnershipMetadata(map[string]string{
@@ -551,6 +560,10 @@ func classifyCreateFailure(ctx context.Context, err error, allHostsFull bool) st
 		if errors.Is(err, errRequestNotSent) || ctx.Err() != nil {
 			return FailureCanceled
 		}
+		// The client turns a 404 into ErrNotFound, not a status error.
+		if errors.Is(err, canaryapi.ErrNotFound) {
+			return FailureRejected
+		}
 		return FailureTransport
 	}
 	code, message := apiErrorFields(statusErr.Body)
@@ -646,14 +659,15 @@ func (r Runner) teardownLaunch(state *launchState, api *launchAPIClient, telemet
 	}
 	pollInterval := max(cfg.PollInterval, 500*time.Millisecond)
 	// A create whose response was lost can still land after the client gave
-	// up, so an empty sweep only verifies cleanup once such creates have had
-	// HTTP_TIMEOUT to settle.
+	// up, so an empty sweep only verifies cleanup once the server has had
+	// CreateSettle to finish such creates. Verification trusts that bound;
+	// the sandbox TTL is the backstop if the server exceeds it.
 	state.mu.Lock()
 	uncertain := state.summary.UncertainCreates
 	state.mu.Unlock()
 	var settleUntil time.Time
 	if uncertain > 0 {
-		settleUntil = time.Now().Add(cfg.HTTPTimeout)
+		settleUntil = time.Now().Add(max(cfg.HTTPTimeout, cfg.Launch.CreateSettle))
 	}
 	for pass := 0; ; pass++ {
 		listStart := time.Now()

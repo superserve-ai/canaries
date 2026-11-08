@@ -21,11 +21,11 @@ func setLaunchEnv(t *testing.T) {
 		"LOAD_TEST_OPERATIONS", "LOAD_TEST_CONCURRENCY", "LOAD_TEST_WORKER_ID", "LOAD_TEST_SANDBOX_TEMPLATE",
 		"LOAD_TEST_LAUNCH_STRATEGY", "LOAD_TEST_LAUNCH_RATE", "LOAD_TEST_LAUNCH_HOLD", "LOAD_TEST_LAUNCH_CEILING",
 		"LOAD_TEST_RAMP_START_RATE", "LOAD_TEST_RAMP_STEP_RATE", "LOAD_TEST_RAMP_STEP_DURATION",
-		"LOAD_TEST_API_RPS", "LOAD_TEST_TEARDOWN_TIMEOUT", "LOAD_TEST_TEARDOWN_CONCURRENCY",
+		"LOAD_TEST_API_RPS", "LOAD_TEST_TEARDOWN_TIMEOUT", "LOAD_TEST_TEARDOWN_CONCURRENCY", "LOAD_TEST_LAUNCH_CREATE_SETTLE",
 		"LOAD_TEST_TASK_INDEX", "LOAD_TEST_TASK_COUNT", "CLOUD_RUN_TASK_INDEX", "CLOUD_RUN_TASK_COUNT",
 		"LOAD_TEST_RUN_TIMEOUT", "LOAD_TEST_RESOURCE_TTL",
 		"LOAD_TEST_GUARD_MODE", "LOAD_TEST_GUARD_INTERVAL", "LOAD_TEST_GUARD_BACKOFF_PAUSE", "LOAD_TEST_GUARD_MAX_BACKOFFS",
-		"LOAD_TEST_GUARD_SOURCE_TIMEOUT", "LOAD_TEST_GUARD_GMP_PROJECT", "LOAD_TEST_GUARD_GMP_ENVIRONMENT",
+		"LOAD_TEST_GUARD_SOURCE_TIMEOUT", "LOAD_TEST_GUARD_GMP_PROJECT", "LOAD_TEST_GUARD_GMP_ENVIRONMENT", "LOAD_TEST_GUARD_GMP_PRESENCE_QUERY",
 		"LOAD_TEST_GUARD_CREATE_WINDOW", "LOAD_TEST_GUARD_CREATE_MIN_SAMPLES", "LOAD_TEST_GUARD_HOST_IDS",
 		"LOAD_TEST_GUARD_FREE_MEMORY_PCT_BACKOFF", "LOAD_TEST_GUARD_FREE_MEMORY_PCT_ABORT",
 		"LOAD_TEST_PRESSURE_SUPABASE_URL", "LOAD_TEST_PRESSURE_SUPABASE_KEY",
@@ -175,6 +175,10 @@ func TestLoadLaunchGuardOverridesAndValidation(t *testing.T) {
 		{name: "ramp without rate", env: map[string]string{"LOAD_TEST_LAUNCH_STRATEGY": "ramp"}, error: "ramp launches"},
 		{name: "task index", env: map[string]string{"LOAD_TEST_TASK_COUNT": "2", "LOAD_TEST_TASK_INDEX": "2"}, error: "LOAD_TEST_TASK_INDEX"},
 		{name: "concurrency above share", env: map[string]string{"LOAD_TEST_CONCURRENCY": "101"}, error: "LOAD_TEST_CONCURRENCY"},
+		{name: "tiny api rate", env: map[string]string{"LOAD_TEST_API_RPS": "1e-10"}, error: "LOAD_TEST_API_RPS"},
+		{name: "nan api rate", env: map[string]string{"LOAD_TEST_API_RPS": "NaN"}, error: "LOAD_TEST_API_RPS"},
+		{name: "tiny launch rate", env: map[string]string{"LOAD_TEST_LAUNCH_RATE": "1e-10"}, error: "LOAD_TEST_LAUNCH_RATE"},
+		{name: "create settle", env: map[string]string{"LOAD_TEST_LAUNCH_CREATE_SETTLE": "15m"}, error: "LOAD_TEST_LAUNCH_CREATE_SETTLE"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -241,6 +245,7 @@ func TestClassifyCreateFailure(t *testing.T) {
 		{"server", context.Background(), status(502, `bad gateway`), false, FailureServerError},
 		{"timeout", context.Background(), status(408, ``), false, FailureTransport},
 		{"rejected", context.Background(), status(400, `{"error":{"code":"bad_request"}}`), false, FailureRejected},
+		{"not found", context.Background(), canaryapi.ErrNotFound, false, FailureRejected},
 		{"not sent", context.Background(), errRequestNotSent, false, FailureCanceled},
 		{"canceled", canceled, errors.New("context canceled"), false, FailureCanceled},
 		{"transport", context.Background(), errors.New("connection reset"), false, FailureTransport},
@@ -450,6 +455,21 @@ func TestRunLaunchWaitsForUncertainCreatesToSettle(t *testing.T) {
 	}
 }
 
+func TestRunLaunchSettlesForServerCreateBound(t *testing.T) {
+	client := newFakeLaunchClient()
+	client.lateCreates.Store(1)
+	// The server finishes the create long after the client timeout, but
+	// inside the create settle window.
+	client.lateBy = 800 * time.Millisecond
+	cfg := testLaunchConfig(4)
+	cfg.HTTPTimeout = 100 * time.Millisecond
+	cfg.Launch.CreateSettle = 1500 * time.Millisecond
+	summary, _ := launchRunner(cfg, client).RunLaunch(context.Background(), nil)
+	if !summary.Cleanup.Verified || summary.Cleanup.Swept != 1 || client.liveCount() != 0 {
+		t.Fatalf("cleanup verified before the server create bound: %+v live=%d", summary.Cleanup, client.liveCount())
+	}
+}
+
 func TestRunLaunchIgnoresEmptyListStartedBeforeSettle(t *testing.T) {
 	client := newFakeLaunchClient()
 	client.lateCreates.Store(1)
@@ -480,6 +500,17 @@ func TestRunLaunchInitialGuardAbortLaunchesNothing(t *testing.T) {
 	}
 	if client.creates.Load() != 0 || summary.Dispatched != 0 || summary.Unstarted != 20 {
 		t.Fatalf("launch created sandboxes despite an abort-level first reading: creates=%d %+v", client.creates.Load(), summary)
+	}
+}
+
+func TestRateIntervalSaturates(t *testing.T) {
+	for _, rate := range []float64{1e-10, 1e-300} {
+		if got := rateInterval(rate); got != time.Hour {
+			t.Fatalf("rateInterval(%g) = %s, want 1h", rate, got)
+		}
+	}
+	if got := rateInterval(4); got != 250*time.Millisecond {
+		t.Fatalf("rateInterval(4) = %s", got)
 	}
 }
 
@@ -541,6 +572,66 @@ func TestRunLaunchGuardAbortStopsAndCleansUp(t *testing.T) {
 		if !strings.Contains(report, want) {
 			t.Fatalf("report missing %q:\n%s", want, report)
 		}
+	}
+}
+
+// blockingLaunchClient holds every create until release closes and records
+// the peak number of creates the server sees at once.
+type blockingLaunchClient struct {
+	*fakeLaunchClient
+	release  chan struct{}
+	arrived  chan struct{}
+	inFlight atomic.Int64
+	peak     atomic.Int64
+}
+
+func (b *blockingLaunchClient) CreateSandbox(ctx context.Context, req canaryapi.CreateSandboxRequest) (canaryapi.Sandbox, error) {
+	n := b.inFlight.Add(1)
+	defer b.inFlight.Add(-1)
+	for old := b.peak.Load(); n > old && !b.peak.CompareAndSwap(old, n); old = b.peak.Load() {
+	}
+	select {
+	case b.arrived <- struct{}{}:
+	default:
+	}
+	select {
+	case <-b.release:
+	case <-ctx.Done():
+		return canaryapi.Sandbox{}, ctx.Err()
+	}
+	return b.fakeLaunchClient.CreateSandbox(ctx, req)
+}
+
+func TestRunLaunchBackoffLimitsCreatesQueuedOnAPIBudget(t *testing.T) {
+	client := &blockingLaunchClient{fakeLaunchClient: newFakeLaunchClient(), release: make(chan struct{}), arrived: make(chan struct{}, 1)}
+	cfg := testLaunchConfig(20)
+	cfg.Concurrency = 20
+	// 20 creates fit the concurrency limit at once but the API budget
+	// spaces them 50ms apart, so most wait for a slot when the guard backs
+	// off to half concurrency.
+	cfg.Launch.APIRate = 20
+	var backoff atomic.Bool
+	source := &fakePressureSource{name: PressureSourceGMP, read: func(int) (PressureReading, error) {
+		if backoff.Load() {
+			return freeMemory("host-a", 8), nil
+		}
+		return freeMemory("host-a", 50), nil
+	}}
+	pressure := testPressureConfig()
+	// The test evaluates the guard itself so the backoff holds.
+	pressure.Interval = time.Hour
+	pressure.BackoffPause = 0
+	monitor := NewPressureMonitor(pressure, []PressureSource{source}, nil)
+	go func() {
+		<-client.arrived
+		backoff.Store(true)
+		monitor.Evaluate(context.Background())
+		time.Sleep(1500 * time.Millisecond)
+		close(client.release)
+	}()
+	_, _ = launchRunner(cfg, client).RunLaunch(context.Background(), monitor)
+	if peak := client.peak.Load(); peak > 12 {
+		t.Fatalf("%d creates reached the server at once after a backoff to 10", peak)
 	}
 }
 

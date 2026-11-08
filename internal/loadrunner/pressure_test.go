@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -347,6 +349,56 @@ func TestGMPSourceIgnoresDataForExcludedHosts(t *testing.T) {
 	reading, err := gmp.Read(context.Background())
 	if err == nil || len(reading.Samples) != 0 || !slices.Equal(reading.NoData, []string{"restore_p99_seconds"}) {
 		t.Fatalf("Read = %+v, %v; want no data for host-a", reading, err)
+	}
+}
+
+func TestSupabaseHostPressureSourceRejectsTruncatedFleet(t *testing.T) {
+	var limit string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		limit = r.URL.Query().Get("limit")
+		rows := make([]HostPressure, maxHostPressureRows+1)
+		for i := range rows {
+			rows[i] = HostPressure{HostID: fmt.Sprintf("host-%02d", i), MaxSandboxes: 100}
+		}
+		_ = json.NewEncoder(w).Encode(rows)
+	}))
+	defer server.Close()
+	source := SupabaseHostPressureSource{URL: server.URL, Key: "service-key", HTTP: server.Client()}
+	reading, err := source.Read(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "LOAD_TEST_GUARD_HOST_IDS") || limit != "65" {
+		t.Fatalf("Read error = %v with limit %q, want a truncated-fleet error", err, limit)
+	}
+	if len(reading.Hosts) != maxHostPressureRows {
+		t.Fatalf("reading kept %d hosts", len(reading.Hosts))
+	}
+}
+
+func TestGMPSourceRequiresEveryWatchedHostToReport(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		result := `{"metric":{"host_id":"host-a"},"value":[1700000000,"+Inf"]}`
+		if r.URL.Query().Get("query") == "presence" {
+			result = `{"metric":{"host_id":"host-a"},"value":[1700000000,"1"]}`
+		}
+		_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"vector","result":[` + result + `]}}`))
+	}))
+	defer server.Close()
+	rules := []PressureRule{{Signal: "restore_p99_seconds", Source: PressureSourceGMP, Backoff: 15, Abort: 45, Query: "guarded"}}
+	gmp := GMPSource{Project: "example-project", Environment: "staging", PresenceQuery: "presence", Rules: rules, HostIDs: []string{"host-a", "host-b"}, HTTP: server.Client(), BaseURL: server.URL}
+	// host-a's data must not stand in for host-b, whose exporter is silent.
+	reading, err := gmp.Read(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "host-b") {
+		t.Fatalf("Read error = %v, want host-b missing", err)
+	}
+	if len(reading.Samples) != 1 || !math.IsInf(reading.Samples[0].Value, 1) {
+		t.Fatalf("samples = %+v, want host-a's +Inf p99 kept", reading.Samples)
+	}
+	gmp.HostIDs = []string{"host-a"}
+	if _, err := gmp.Read(context.Background()); err != nil {
+		t.Fatalf("Read with every host reporting returned %v", err)
+	}
+	gmp.PresenceQuery = ""
+	if _, err := gmp.Read(context.Background()); err == nil {
+		t.Fatal("Read without a presence query succeeded")
 	}
 }
 

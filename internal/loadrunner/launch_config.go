@@ -26,6 +26,13 @@ const (
 	maxTeardownTimeout         = time.Hour
 	maxTeardownConcurrency     = 1024
 	defaultTeardownConcurrency = 32
+	// minTaskRate keeps each task's paced interval well inside
+	// time.Duration even after the guard's 1/16 backoff.
+	minTaskRate = 0.01
+	// The sandbox API bounds the detached insert behind a create at 90s,
+	// so a create whose response was lost appears in lists within that
+	// window or not at all.
+	defaultCreateSettle = 2 * time.Minute
 )
 
 // LaunchConfig configures the mass-launch scenario. Rates are aggregate
@@ -44,6 +51,9 @@ type LaunchConfig struct {
 	TeardownConcurrency int
 	TaskIndex           int
 	TaskCount           int
+	// CreateSettle is how long teardown keeps sweeping for creates whose
+	// outcome was lost before it trusts an empty list.
+	CreateSettle time.Duration
 }
 
 func loadLaunchConfig() (LaunchConfig, error) {
@@ -59,6 +69,7 @@ func loadLaunchConfig() (LaunchConfig, error) {
 		APIRate:             envFloat("LOAD_TEST_API_RPS", defaultLaunchAPIRate),
 		TeardownTimeout:     envDuration("LOAD_TEST_TEARDOWN_TIMEOUT", 15*time.Minute),
 		TeardownConcurrency: envInt("LOAD_TEST_TEARDOWN_CONCURRENCY", defaultTeardownConcurrency),
+		CreateSettle:        envDuration("LOAD_TEST_LAUNCH_CREATE_SETTLE", defaultCreateSettle),
 	}
 	var err error
 	if cfg.TaskIndex, err = taskEnvInt("LOAD_TEST_TASK_INDEX", "CLOUD_RUN_TASK_INDEX", 0); err != nil {
@@ -108,20 +119,23 @@ func validateLaunchConfig(cfg Config) error {
 	if cfg.Concurrency <= 0 || cfg.Concurrency > share {
 		return errors.New("LOAD_TEST_CONCURRENCY must be positive and no greater than this task's launch share")
 	}
+	// validRate is false for NaN, which strconv accepts.
+	minRate := minTaskRate * float64(l.TaskCount)
+	validRate := func(rate float64) bool { return rate >= minRate && rate <= maxLaunchRate }
 	switch l.Strategy {
 	case "burst":
-		if l.Rate < 0 || l.Rate > maxLaunchRate {
-			return fmt.Errorf("LOAD_TEST_LAUNCH_RATE must be between 0 and %d", maxLaunchRate)
+		if l.Rate != 0 && !validRate(l.Rate) {
+			return fmt.Errorf("LOAD_TEST_LAUNCH_RATE must be 0 or between %g and %d", minRate, maxLaunchRate)
 		}
 	case "ramp":
-		if l.Rate <= 0 || l.Rate > maxLaunchRate || l.RampStartRate <= 0 || l.RampStartRate > l.Rate || l.RampStepRate <= 0 || l.RampStepDuration < time.Second {
-			return errors.New("ramp launches require 0 < LOAD_TEST_RAMP_START_RATE <= LOAD_TEST_LAUNCH_RATE, a positive LOAD_TEST_RAMP_STEP_RATE, and LOAD_TEST_RAMP_STEP_DURATION >= 1s")
+		if !validRate(l.Rate) || !validRate(l.RampStartRate) || l.RampStartRate > l.Rate || !(l.RampStepRate > 0) || l.RampStepDuration < time.Second {
+			return fmt.Errorf("ramp launches require %g <= LOAD_TEST_RAMP_START_RATE <= LOAD_TEST_LAUNCH_RATE <= %d, a positive LOAD_TEST_RAMP_STEP_RATE, and LOAD_TEST_RAMP_STEP_DURATION >= 1s", minRate, maxLaunchRate)
 		}
 	default:
 		return errors.New("LOAD_TEST_LAUNCH_STRATEGY must be burst or ramp")
 	}
-	if l.APIRate <= 0 || l.APIRate > maxLaunchRate {
-		return fmt.Errorf("LOAD_TEST_API_RPS must be between 0 and %d", maxLaunchRate)
+	if !validRate(l.APIRate) {
+		return fmt.Errorf("LOAD_TEST_API_RPS must be between %g and %d", minRate, maxLaunchRate)
 	}
 	if l.Hold < 0 || l.Hold >= cfg.RunTimeout {
 		return errors.New("LOAD_TEST_LAUNCH_HOLD must be non-negative and shorter than LOAD_TEST_RUN_TIMEOUT")
@@ -129,8 +143,11 @@ func validateLaunchConfig(cfg Config) error {
 	if l.TeardownTimeout <= 0 || l.TeardownTimeout > maxTeardownTimeout || l.TeardownConcurrency <= 0 || l.TeardownConcurrency > maxTeardownConcurrency {
 		return fmt.Errorf("LOAD_TEST_TEARDOWN_TIMEOUT must be in (0, %s] and LOAD_TEST_TEARDOWN_CONCURRENCY in [1, %d]", maxTeardownTimeout, maxTeardownConcurrency)
 	}
+	if l.CreateSettle < 0 || l.CreateSettle >= l.TeardownTimeout {
+		return errors.New("LOAD_TEST_LAUNCH_CREATE_SETTLE must be non-negative and shorter than LOAD_TEST_TEARDOWN_TIMEOUT")
+	}
 	if l.TaskCount > 1 && cfg.LockBackend != "none" {
-		// Fan-out tasks cannot share one lease yet (SS-346); each would
+		// Fan-out tasks cannot share one lease yet; each would
 		// contend for the same target lock.
 		return errors.New("launch fan-out (LOAD_TEST_TASK_COUNT > 1) requires CANARY_LOCK_BACKEND=none until shared leases exist")
 	}
