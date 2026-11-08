@@ -460,3 +460,30 @@ func TestNewPressureSourcesBuildsConfiguredSources(t *testing.T) {
 		t.Fatalf("unexpected sources: %+v", sources)
 	}
 }
+
+func TestPressureMonitorSerializesEvaluations(t *testing.T) {
+	started, release := make(chan struct{}), make(chan struct{})
+	// The first reading is clear but slow; the second shows pressure.
+	source := &fakePressureSource{name: PressureSourceGMP, read: func(call int) (PressureReading, error) {
+		if call == 1 {
+			close(started)
+			<-release
+			return freeMemory("host-a", 50), nil
+		}
+		return freeMemory("host-a", 8), nil
+	}}
+	cfg := testPressureConfig()
+	cfg.BackoffPause = 0
+	m := NewPressureMonitor(cfg, []PressureSource{source}, nil)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); m.Evaluate(context.Background()) }()
+	<-started
+	go func() { defer wg.Done(); m.Evaluate(context.Background()) }()
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	wg.Wait()
+	if multiplier, _, _ := m.Gate(context.Background()); multiplier != 0.5 {
+		t.Fatalf("multiplier = %v after a clear reading and a newer backoff, want 0.5", multiplier)
+	}
+}

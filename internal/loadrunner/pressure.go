@@ -616,6 +616,9 @@ type PressureMonitor struct {
 	sources []PressureSource
 	now     func() time.Time
 
+	// evalMu serializes whole evaluations, so a slow reading cannot apply
+	// after a newer one from the background loop or a stage gate.
+	evalMu      sync.Mutex
 	mu          sync.Mutex
 	multiplier  float64
 	minMult     float64
@@ -690,6 +693,8 @@ func (m *PressureMonitor) Evaluate(ctx context.Context) string {
 	if m == nil {
 		return ""
 	}
+	m.evalMu.Lock()
+	defer m.evalMu.Unlock()
 	var samples []PressureSample
 	var hosts []HostPressure
 	var unavailable, noData []string

@@ -350,6 +350,9 @@ func (r Runner) RunLaunch(parent context.Context, monitor *PressureMonitor) (Lau
 	if summary.Failed > 0 || summary.Unstarted > 0 {
 		runErr = fmt.Errorf("%d of %d dispatched launches failed; %d unstarted", summary.Failed, summary.Dispatched, summary.Unstarted)
 	}
+	if n := len(summary.Stages); n > 0 && summary.Stages[n-1].Stopped {
+		runErr = errors.Join(runErr, fmt.Errorf("launch stopped at stage %d gate", n))
+	}
 	if err := monitor.Err(); err != nil {
 		runErr = errors.Join(runErr, err)
 	}
@@ -379,8 +382,10 @@ func (r Runner) dispatchLaunch(ctx context.Context, state *launchState, monitor 
 	stageEnds := cfg.Launch.TaskStageEnds()
 	stage := 0
 dispatch:
-	for seq := 0; seq < share; seq++ {
+	for seq := 0; seq <= share; seq++ {
 		// The last stage needs no gate; the launch hold and teardown follow.
+		// A small fan-out share can end on an earlier boundary, so gates
+		// also run once seq reaches share.
 		for ; stage < len(stageEnds)-1 && seq == stageEnds[stage]; stage++ {
 			for inFlight > 0 {
 				select {
@@ -394,6 +399,9 @@ dispatch:
 				break dispatch
 			}
 			next = time.Time{}
+		}
+		if seq == share {
+			break
 		}
 		multiplier, paused, err := monitor.Gate(ctx)
 		if err != nil || ctx.Err() != nil {

@@ -222,8 +222,8 @@ func validateLaunchStages(cfg Config) error {
 	if previous != cfg.Operations {
 		return errors.New("the last LOAD_TEST_LAUNCH_STAGES count must equal LOAD_TEST_OPERATIONS")
 	}
-	if l.StageHold < 0 || l.StageHold >= cfg.RunTimeout {
-		return errors.New("LOAD_TEST_LAUNCH_STAGE_HOLD must be non-negative and shorter than LOAD_TEST_RUN_TIMEOUT")
+	if l.StageHold < 0 || time.Duration(len(l.Stages)-1)*l.StageHold+l.Hold >= cfg.RunTimeout {
+		return errors.New("LOAD_TEST_LAUNCH_STAGE_HOLD must be non-negative, and every stage hold plus LOAD_TEST_LAUNCH_HOLD must be shorter than LOAD_TEST_RUN_TIMEOUT")
 	}
 	return nil
 }

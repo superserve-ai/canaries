@@ -684,6 +684,33 @@ func TestRunLaunchStageGateStopsOnGuardBackoff(t *testing.T) {
 	}
 }
 
+func TestRunLaunchStageGateRunsAtTaskShareEnd(t *testing.T) {
+	client := newFakeLaunchClient()
+	cfg := testLaunchConfig(4)
+	cfg.Concurrency = 2
+	cfg.WorkerID = "task-0"
+	// Task 0 of 2 owns two operations, so both stages end at its share.
+	cfg.Launch.TaskIndex, cfg.Launch.TaskCount = 0, 2
+	cfg.Launch.Stages = []int{3, 4}
+	cfg.Launch.Hold = 2 * time.Second
+	source := &fakePressureSource{name: PressureSourceGMP, read: func(int) (PressureReading, error) {
+		if client.creates.Load() >= 2 {
+			return freeMemory("host-a", 8), nil
+		}
+		return freeMemory("host-a", 50), nil
+	}}
+	pressure := testPressureConfig()
+	pressure.Interval = time.Hour
+	monitor := NewPressureMonitor(pressure, []PressureSource{source}, nil)
+	summary, err := launchRunner(cfg, client).RunLaunch(context.Background(), monitor)
+	if err == nil || !strings.Contains(err.Error(), "stage 1 gate") {
+		t.Fatalf("RunLaunch returned %v, want a stage 1 gate stop", err)
+	}
+	if len(summary.Stages) != 1 || !summary.Stages[0].Stopped || summary.HoldDuration != 0 || summary.Created != 2 {
+		t.Fatalf("stage gate at the share end did not stop the launch: %+v", summary)
+	}
+}
+
 func TestLoadLaunchStages(t *testing.T) {
 	setLaunchEnv(t)
 	t.Setenv("LOAD_TEST_LAUNCH_STAGE_HOLD", "")
@@ -694,6 +721,12 @@ func TestLoadLaunchStages(t *testing.T) {
 			t.Errorf("stages %q: expected rejection, got %v", bad, err)
 		}
 	}
+	t.Setenv("LOAD_TEST_LAUNCH_STAGES", "10,50,100")
+	t.Setenv("LOAD_TEST_RUN_TIMEOUT", "3m")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "LOAD_TEST_LAUNCH_STAGE_HOLD") {
+		t.Errorf("two 2m stage holds in a 3m run: expected rejection, got %v", err)
+	}
+	t.Setenv("LOAD_TEST_RUN_TIMEOUT", "")
 	t.Setenv("LOAD_TEST_LAUNCH_STAGES", "10, 50,100")
 	cfg, err := Load()
 	if err != nil {
