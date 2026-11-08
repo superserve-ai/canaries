@@ -13,6 +13,8 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+	"google.golang.org/api/option"
+	htransport "google.golang.org/api/transport/http"
 
 	"github.com/superserve-ai/canaries/internal/canaryapi"
 	"github.com/superserve-ai/canaries/internal/config"
@@ -55,6 +57,25 @@ type runDependencies struct {
 	HTTP       *http.Client
 	NewMetrics func(context.Context, config.Config) (metrics.Provider, func(context.Context) error, error)
 	NewLocker  func(context.Context, lock.Config) (lock.Lock, func(), error)
+	// NewPressureSources builds the host pressure guard sources for the
+	// launch scenario. Tests replace it to avoid Supabase and GMP calls.
+	NewPressureSources func(context.Context, loadrunner.PressureConfig, func() time.Time) ([]loadrunner.PressureSource, error)
+}
+
+const monitoringReadScope = "https://www.googleapis.com/auth/monitoring.read"
+
+func defaultPressureSources(ctx context.Context, cfg loadrunner.PressureConfig, now func() time.Time) ([]loadrunner.PressureSource, error) {
+	sourceHTTP := &http.Client{Timeout: cfg.SourceTimeout}
+	var gmpHTTP *http.Client
+	if cfg.GMPProject != "" {
+		client, _, err := htransport.NewClient(ctx, option.WithScopes(monitoringReadScope))
+		if err != nil {
+			return nil, errors.New("initialize GMP credentials for the host pressure guard failed")
+		}
+		client.Timeout = cfg.SourceTimeout
+		gmpHTTP = client
+	}
+	return loadrunner.NewPressureSources(cfg, sourceHTTP, gmpHTTP, now), nil
 }
 
 func runConfigured(ctx context.Context, cfg loadrunner.Config, deps runDependencies) (runErr error) {
@@ -70,10 +91,19 @@ func runConfigured(ctx context.Context, cfg loadrunner.Config, deps runDependenc
 	if deps.NewLocker == nil {
 		deps.NewLocker = lock.New
 	}
-	scenario := "loadtest-create"
-	if cfg.Scenario == "lifecycle" {
-		scenario = "loadtest-lifecycle"
+	if deps.NewPressureSources == nil {
+		deps.NewPressureSources = defaultPressureSources
 	}
+	scenario := "loadtest-create"
+	switch cfg.Scenario {
+	case "lifecycle":
+		scenario = "loadtest-lifecycle"
+	case loadrunner.ScenarioLaunch:
+		scenario = "loadtest-launch"
+	}
+	launch := cfg.Scenario == loadrunner.ScenarioLaunch
+	taskOperations := int64(cfg.Launch.TaskOperations(cfg.Operations))
+	launchSummary := loadrunner.LaunchSummary{Configured: int64(cfg.Operations), TaskOperations: taskOperations, Unstarted: taskOperations}
 	summary := loadrunner.Summary{
 		ConfiguredOperations: int64(cfg.Operations), ConfiguredConcurrency: int64(cfg.Concurrency), Unstarted: int64(cfg.Operations),
 	}
@@ -86,6 +116,10 @@ func runConfigured(ctx context.Context, cfg loadrunner.Config, deps runDependenc
 			runErr = errors.Join(runErr, errors.New("load test metrics export failed"))
 		}
 		report := summary.Report(cfg, runErr)
+		if launch {
+			report = launchSummary.Report(cfg, runErr)
+			summary = launchSummary.Totals()
+		}
 		log.Info().Str("run_id", cfg.RunID).Str("summary", report).Msg("load testing summary")
 		if cfg.SlackWebhookURL != "" {
 			if err := slack.Post(context.Background(), deps.HTTP, cfg.SlackWebhookURL, report); err != nil {
@@ -124,6 +158,15 @@ func runConfigured(ctx context.Context, cfg loadrunner.Config, deps runDependenc
 	}
 	defer closeLocker()
 
+	var monitor *loadrunner.PressureMonitor
+	if launch {
+		sources, err := deps.NewPressureSources(ctx, cfg.Pressure, deps.Now)
+		if err != nil {
+			return err
+		}
+		monitor = loadrunner.NewPressureMonitor(cfg.Pressure, sources, deps.Now)
+	}
+
 	guard, err := loadrunner.AcquireGuard(ctx, cfg, locker, deps.Now, deps.HTTP)
 	if err != nil {
 		if errors.Is(err, loadrunner.ErrGuardBlocked) {
@@ -145,6 +188,10 @@ func runConfigured(ctx context.Context, cfg loadrunner.Config, deps runDependenc
 		}
 		client := canaryapi.NewClient(deps.HTTP, cfg.APIBaseURL, cfg.APIKey, cfg.PreviewDomain)
 		runner := loadrunner.Runner{Config: cfg, Ops: lifecycle.Operations{Client: client, Metrics: provider, Clock: deps.Now, HTTP: deps.HTTP}, Clock: deps.Now}
+		if launch {
+			launchSummary, err = runner.RunLaunch(workCtx, monitor)
+			return err
+		}
 		summary, err = runner.Run(workCtx)
 		return err
 	}()

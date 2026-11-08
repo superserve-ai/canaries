@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"os"
 	"strconv"
@@ -68,6 +69,8 @@ type Config struct {
 	BenchmarkGuard         bool
 	GlobalLock             bool
 	ExternalBenchmarkGuard bool
+	Launch                 LaunchConfig
+	Pressure               PressureConfig
 }
 
 type routingConfig struct {
@@ -89,15 +92,23 @@ var supportedRoutes = map[string]map[string]routingConfig{
 }
 
 func Load() (Config, error) {
+	scenario := envDefault("LOAD_TEST_SCENARIO", "create")
+	defaultTemplate := "superserve/python-3.11"
+	defaultLockTTL := 45 * time.Minute
+	if scenario == ScenarioLaunch {
+		defaultTemplate = defaultLaunchTemplate
+		// The lease must also cover the launch teardown budget.
+		defaultLockTTL = time.Hour
+	}
 	cfg := Config{
-		Scenario:         envDefault("LOAD_TEST_SCENARIO", "create"),
+		Scenario:         scenario,
 		Environment:      envDefault("CANARY_ENVIRONMENT", "staging"),
 		ProductionOptIn:  productionOptIn(),
 		Region:           strings.TrimSpace(os.Getenv("CANARY_REGION")),
 		Target:           strings.TrimSpace(os.Getenv("CANARY_TARGET")),
 		APIBaseURL:       strings.TrimSpace(os.Getenv("API_BASE_URL")),
 		PreviewDomain:    strings.TrimSpace(os.Getenv("PREVIEW_DOMAIN")),
-		Template:         envDefault("LOAD_TEST_SANDBOX_TEMPLATE", "superserve/python-3.11"),
+		Template:         envDefault("LOAD_TEST_SANDBOX_TEMPLATE", defaultTemplate),
 		RunID:            strings.TrimSpace(os.Getenv("LOAD_TEST_RUN_ID")),
 		WorkerID:         envDefault("LOAD_TEST_WORKER_ID", "worker-0"),
 		Operations:       envInt("LOAD_TEST_OPERATIONS", 100),
@@ -116,7 +127,7 @@ func Load() (Config, error) {
 		LockBackend:      envDefault("CANARY_LOCK_BACKEND", "none"),
 		LockBucket:       strings.TrimSpace(os.Getenv("LOCK_BUCKET")),
 		LockFile:         strings.TrimSpace(os.Getenv("CANARY_LOCK_FILE")),
-		LockTTL:          envDuration("LOAD_TEST_LOCK_TTL", 45*time.Minute),
+		LockTTL:          envDuration("LOAD_TEST_LOCK_TTL", defaultLockTTL),
 	}
 	var err error
 	if cfg.Scheduled, err = loadBool("LOAD_TEST_SCHEDULED", false); err != nil {
@@ -155,14 +166,32 @@ func Load() (Config, error) {
 	if cfg.Environment == "production" && !cfg.ProductionOptIn {
 		return Config{}, errors.New("production load tests require LOAD_TEST_PRODUCTION_OPT_IN=true")
 	}
-	if cfg.Scenario != "create" && cfg.Scenario != "lifecycle" {
-		return Config{}, errors.New("LOAD_TEST_SCENARIO must be create or lifecycle")
+	if cfg.Scenario != "create" && cfg.Scenario != "lifecycle" && cfg.Scenario != ScenarioLaunch {
+		return Config{}, errors.New("LOAD_TEST_SCENARIO must be create, lifecycle, or launch")
 	}
-	if cfg.Operations <= 0 || cfg.Operations > MaxOperations {
-		return Config{}, fmt.Errorf("LOAD_TEST_OPERATIONS must be between 1 and %d", MaxOperations)
-	}
-	if cfg.Concurrency <= 0 || cfg.Concurrency > cfg.Operations {
-		return Config{}, errors.New("LOAD_TEST_CONCURRENCY must be positive and no greater than LOAD_TEST_OPERATIONS")
+	if cfg.Scenario == ScenarioLaunch {
+		if cfg.Launch, err = loadLaunchConfig(); err != nil {
+			return Config{}, err
+		}
+		if cfg.Pressure, err = loadPressureConfig(cfg.Environment); err != nil {
+			return Config{}, err
+		}
+		if cfg.Launch.TaskCount > 1 && strings.TrimSpace(os.Getenv("LOAD_TEST_WORKER_ID")) == "" {
+			cfg.WorkerID = fmt.Sprintf("task-%d", cfg.Launch.TaskIndex)
+		}
+		if strings.TrimSpace(os.Getenv("LOAD_TEST_CONCURRENCY")) == "" {
+			cfg.Concurrency = min(defaultLaunchConcurrency, max(cfg.Launch.TaskOperations(cfg.Operations), 1))
+		}
+		if err := validateLaunchConfig(cfg); err != nil {
+			return Config{}, err
+		}
+	} else {
+		if cfg.Operations <= 0 || cfg.Operations > MaxOperations {
+			return Config{}, fmt.Errorf("LOAD_TEST_OPERATIONS must be between 1 and %d", MaxOperations)
+		}
+		if cfg.Concurrency <= 0 || cfg.Concurrency > cfg.Operations {
+			return Config{}, errors.New("LOAD_TEST_CONCURRENCY must be positive and no greater than LOAD_TEST_OPERATIONS")
+		}
 	}
 	if err := validateRouting(cfg.Environment, cfg.Region, cfg.Target, cfg.APIBaseURL, cfg.PreviewDomain); err != nil {
 		return Config{}, err
@@ -197,10 +226,10 @@ func validateExecutionConfig(cfg Config) error {
 	if (cfg.BenchmarkGuard || cfg.GlobalLock) && cfg.LockBackend != "gcs" {
 		return errors.New("benchmark and global coordination require GCS locking")
 	}
-	if cfg.LockBackend != "none" && (cfg.LockTTL < cfg.RunTimeout+cfg.DeleteTimeout+time.Minute || cfg.LockTTL > 2*time.Hour) {
+	if cfg.LockBackend != "none" && (cfg.LockTTL < cfg.RunTimeout+cfg.CleanupBudget()+time.Minute || cfg.LockTTL > 2*time.Hour) {
 		return errors.New("LOAD_TEST_LOCK_TTL must cover runtime, cleanup and 1m reporting, and be at most 2h")
 	}
-	if cfg.ResourceTTL < cfg.RunTimeout+cfg.DeleteTimeout+time.Minute {
+	if cfg.ResourceTTL < cfg.RunTimeout+cfg.CleanupBudget()+time.Minute {
 		return errors.New("LOAD_TEST_RESOURCE_TTL must cover runtime, cleanup and 1m reporting")
 	}
 	if cfg.SlackWebhookURL != "" {
@@ -218,7 +247,7 @@ func validateExecutionConfig(cfg Config) error {
 		}
 		start, startErr := time.Parse("15:04", cfg.DailyWindowStart)
 		end, endErr := time.Parse("15:04", cfg.DailyWindowEnd)
-		if startErr != nil || endErr != nil || len(cfg.DailyWindowStart) != 5 || len(cfg.DailyWindowEnd) != 5 || !end.After(start) || end.Sub(start) < cfg.RunTimeout+cfg.DeleteTimeout+time.Minute {
+		if startErr != nil || endErr != nil || len(cfg.DailyWindowStart) != 5 || len(cfg.DailyWindowEnd) != 5 || !end.After(start) || end.Sub(start) < cfg.RunTimeout+cfg.CleanupBudget()+time.Minute {
 			return errors.New("daily load window must be same-day HH:MM values covering runtime, cleanup and 1m reporting")
 		}
 	}
@@ -379,6 +408,19 @@ func envInt(key string, fallback int) int {
 	}
 	parsed, err := strconv.Atoi(value)
 	if err != nil {
+		return -1
+	}
+	return parsed
+}
+
+// envFloat returns -1 for unparseable values so range validation rejects them.
+func envFloat(key string, fallback float64) float64 {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil || math.IsNaN(parsed) || math.IsInf(parsed, 0) {
 		return -1
 	}
 	return parsed
