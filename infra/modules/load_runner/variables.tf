@@ -24,6 +24,26 @@ variable "scheduler_enabled" {
   default = false
 }
 
+variable "load_operations" {
+  description = "Lifecycles per daily run. Size this to what the target's hosts can finish; the default is the production size."
+  type        = number
+  default     = 1000
+  validation {
+    condition     = var.load_operations >= 1 && var.load_operations <= 10000 && floor(var.load_operations) == var.load_operations
+    error_message = "load_operations must be a whole number between 1 and 10000."
+  }
+}
+
+variable "load_concurrency" {
+  description = "Maximum lifecycles in flight. One uncertain create or failed cleanup cancels every in-flight lifecycle, so this also bounds the blast radius of a halt."
+  type        = number
+  default     = 100
+  validation {
+    condition     = var.load_concurrency >= 1 && floor(var.load_concurrency) == var.load_concurrency
+    error_message = "load_concurrency must be a positive whole number."
+  }
+}
+
 variable "create_runtime_service_account" {
   type    = bool
   default = true

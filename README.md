@@ -264,7 +264,7 @@ Manual staging execution creates and deletes real resources. Use a dedicated can
 
 ### Load runner
 
-The load runner uses the same API credentials, lifecycle operations, metrics, and janitor ownership as the canaries. Daily jobs run 1,000 complete lifecycles with up to 100 workers per target. Each lifecycle creates a sandbox, waits for active, verifies a short command, pauses and waits for paused, resumes and verifies execution with fresh credentials, then deletes and waits for deletion. Production runs require `LOAD_TEST_PRODUCTION_OPT_IN=true`.
+The load runner uses the same API credentials, lifecycle operations, metrics, and janitor ownership as the canaries. Production daily jobs run 1,000 complete lifecycles with up to 100 workers per target. The staging daily job runs 100 lifecycles with up to 10 workers, because the small staging hosts cannot finish the production size; set `load_operations` and `load_concurrency` on the `load_runner` module to size a target. Each lifecycle creates a sandbox, waits for active, verifies a short command, pauses and waits for paused, resumes and verifies execution with fresh credentials, then deletes and waits for deletion. Production runs require `LOAD_TEST_PRODUCTION_OPT_IN=true`.
 
 | Target | Daily start, America/Los_Angeles | Allowed window | Job |
 | --- | --- | --- | --- |

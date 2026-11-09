@@ -27,8 +27,8 @@ locals {
     PREVIEW_DOMAIN                     = var.preview_domain
     LOCK_BUCKET                        = var.lock_bucket_name
     LOAD_TEST_SCENARIO                 = "lifecycle"
-    LOAD_TEST_OPERATIONS               = "1000"
-    LOAD_TEST_CONCURRENCY              = "100"
+    LOAD_TEST_OPERATIONS               = tostring(var.load_operations)
+    LOAD_TEST_CONCURRENCY              = tostring(var.load_concurrency)
     LOAD_TEST_RUN_TIMEOUT              = "20m"
     LOAD_TEST_RESOURCE_TTL             = "2h"
     LOAD_TEST_LOCK_TTL                 = "45m"
@@ -113,6 +113,10 @@ resource "google_cloud_run_v2_job" "daily" {
       condition     = var.create_runtime_service_account || var.runtime_service_account_email != null
       error_message = "An existing runtime service account is required when account creation is disabled."
     }
+    precondition {
+      condition     = var.load_concurrency <= var.load_operations
+      error_message = "load_concurrency must not exceed load_operations."
+    }
   }
 
   template {
@@ -188,7 +192,7 @@ resource "google_cloud_scheduler_job" "daily" {
   project          = var.project_id
   region           = var.job_region
   name             = local.scheduler_name
-  description      = "Runs the daily 1000-operation / 100-concurrent lifecycle load for ${var.target_name}"
+  description      = "Runs the daily ${var.load_operations}-operation / ${var.load_concurrency}-concurrent lifecycle load for ${var.target_name}"
   schedule         = var.scheduler_cron
   time_zone        = var.scheduler_time_zone
   paused           = !var.scheduler_enabled
