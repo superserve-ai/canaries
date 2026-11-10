@@ -49,6 +49,13 @@ jobs:
           python3 -m unittest discover -s infra/modules/load_runner/tests -v
           python3 -m unittest discover -s .github/scripts/tests -v
 
+      - name: Daily load Terraform tests
+        run: |
+          set -euo pipefail
+          cd infra/modules/load_runner
+          terraform init -backend=false -input=false
+          terraform test
+
       - name: Go fmt check
         run: |
           set -euo pipefail

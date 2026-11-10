@@ -335,6 +335,10 @@ module "daily_load" {
   labels                         = local.labels
   vpc_connector                  = "projects/rayai-dev/locations/us-central1/connectors/ss-vpc-conn-f1b3552"
   vpc_egress                     = "ALL_TRAFFIC"
+  # The production 1000 x 100 load halts early on the two small staging hosts;
+  # match the manual staging job's 100 lifecycles at 10 concurrent.
+  load_operations  = 100
+  load_concurrency = 10
   depends_on = [
     google_secret_manager_secret_iam_member.load_runner_staging_accessor,
     google_project_iam_member.deployment_alerting,
