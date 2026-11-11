@@ -14,6 +14,9 @@ import (
 func (s Summary) Report(cfg Config, runErr error) string {
 	if s.Resident != nil {
 		data, _ := json.Marshal(s.Resident)
+		if s.Resident.SharedHost {
+			return "Shared-host staging resident result (does not qualify 105000-owner scale; external host/database evidence required): " + string(data)
+		}
 		return "Resident paused-fleet scenario result (external host/database evidence required): " + string(data)
 	}
 	var out strings.Builder

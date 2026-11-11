@@ -44,6 +44,8 @@ type ResidentSummary struct {
 	RunID                    string          `json:"run_id"`
 	Host                     string          `json:"expected_host"`
 	Mode                     string          `json:"mode"`
+	SharedHost               bool            `json:"shared_host"`
+	QualificationScope       string          `json:"qualification_scope"`
 	Seeded                   int             `json:"seeded"`
 	Paused                   int             `json:"paused"`
 	Stages                   []ResidentStage `json:"stages"`
@@ -89,7 +91,11 @@ func (r Runner) runResident(parent context.Context) (summary Summary, runErr err
 		return summary, err
 	}
 	defer j.close()
-	rs := &ResidentSummary{RunID: cfg.RunID, Host: cfg.Resident.Preflight.ExpectedHost, Mode: cfg.Resident.Mode, ExternalEvidenceRequired: true}
+	scope := "isolated-host"
+	if cfg.Resident.Preflight.SharedHostSmall {
+		scope = "shared-host-small"
+	}
+	rs := &ResidentSummary{RunID: cfg.RunID, Host: cfg.Resident.Preflight.ExpectedHost, Mode: cfg.Resident.Mode, SharedHost: cfg.Resident.Preflight.SharedHostSmall, QualificationScope: scope, ExternalEvidenceRequired: true}
 	summary = Summary{ConfiguredOperations: int64(cfg.Operations), ConfiguredConcurrency: int64(cfg.Concurrency), FailurePhases: map[string]int64{}, Resident: rs}
 	start := r.now()
 	ctx, cancel := context.WithTimeout(parent, cfg.RunTimeout)

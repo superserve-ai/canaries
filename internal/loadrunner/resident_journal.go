@@ -29,6 +29,7 @@ type residentJournalRecord struct {
 	WorkerID   string        `json:"worker_id,omitempty"`
 	Target     string        `json:"target,omitempty"`
 	Host       string        `json:"host,omitempty"`
+	SharedHost bool          `json:"shared_host,omitempty"`
 	Template   string        `json:"template,omitempty"`
 	Population int           `json:"population,omitempty"`
 	CreatedAt  time.Time     `json:"created_at,omitempty"`
@@ -99,7 +100,7 @@ func openResidentJournal(cfg Config, now time.Time) (*residentJournal, error) {
 		return fail(err)
 	}
 	if !seenHeader {
-		j.header = residentJournalRecord{Kind: "header", RunID: cfg.RunID, TeamID: cfg.Resident.Preflight.TeamID, WorkerID: cfg.WorkerID, Target: cfg.Target, Host: cfg.Resident.Preflight.ExpectedHost, Template: cfg.Template, Population: cfg.Resident.Population, CreatedAt: now.UTC(), ExpiresAt: now.UTC().Add(cfg.ResourceTTL)}
+		j.header = residentJournalRecord{Kind: "header", RunID: cfg.RunID, TeamID: cfg.Resident.Preflight.TeamID, WorkerID: cfg.WorkerID, Target: cfg.Target, Host: cfg.Resident.Preflight.ExpectedHost, SharedHost: cfg.Resident.Preflight.SharedHostSmall, Template: cfg.Template, Population: cfg.Resident.Population, CreatedAt: now.UTC(), ExpiresAt: now.UTC().Add(cfg.ResourceTTL)}
 		if err := j.appendLocked(j.header); err != nil {
 			return fail(err)
 		}
@@ -115,8 +116,8 @@ func openResidentJournal(cfg Config, now time.Time) (*residentJournal, error) {
 		}
 	}
 	h := j.header
-	if h.RunID != cfg.RunID || h.TeamID != cfg.Resident.Preflight.TeamID || h.WorkerID != cfg.WorkerID || h.Target != cfg.Target || h.Host != cfg.Resident.Preflight.ExpectedHost || h.Template != cfg.Template || h.Population != cfg.Resident.Population {
-		return fail(errors.New("resident journal belongs to another run, worker, host, template or population"))
+	if h.RunID != cfg.RunID || h.TeamID != cfg.Resident.Preflight.TeamID || h.WorkerID != cfg.WorkerID || h.Target != cfg.Target || h.Host != cfg.Resident.Preflight.ExpectedHost || h.SharedHost != cfg.Resident.Preflight.SharedHostSmall || h.Template != cfg.Template || h.Population != cfg.Resident.Population {
+		return fail(errors.New("resident journal belongs to another run, worker, host, host scope, template or population"))
 	}
 	if cfg.Resident.Mode != "cleanup" && (j.completed || !h.ExpiresAt.After(now.Add(cfg.RunTimeout+cfg.DeleteTimeout))) {
 		return fail(errors.New("resident journal completed or retention cannot cover the remaining run; use cleanup mode"))

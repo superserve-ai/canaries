@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -49,6 +50,7 @@ type residentFake struct {
 	lookupFailure  bool
 	resumeDuration time.Duration
 	resumeHost     string
+	badOrphanLimit bool
 }
 
 func (f *residentFake) hint(id string) string {
@@ -59,6 +61,9 @@ func (f *residentFake) CreateSandbox(_ context.Context, req canaryapi.CreateSand
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.creates++
+	if req.TimeoutSeconds != 60 || req.IdleTimeoutSeconds == nil || *req.IdleTimeoutSeconds != 60 {
+		f.badOrphanLimit = true
+	}
 	paused := 0
 	for _, sb := range f.items {
 		if sb.Status == "paused" {
@@ -194,6 +199,83 @@ func TestResidentRetainsPopulationAcrossProbesThenCleansOwnedResources(t *testin
 	}
 	if summary.Resident.Resume.Attempts != 6 || summary.Resident.Create.Attempts != 6 {
 		t.Fatalf("missing probe statistics: %+v", summary.Resident)
+	}
+}
+
+func sharedResidentTestConfig(t *testing.T) (Config, *residentClock, *residentFake) {
+	t.Helper()
+	cfg, clock, f := residentTestConfig(t)
+	cfg.LockBackend = "gcs"
+	cfg.LockBucket = sharedResidentLockBucket
+	cfg.LockFile = ""
+	cfg.LockTTL = 45 * time.Minute
+	cfg.BenchmarkGuard, cfg.GlobalLock = true, true
+	cfg.Resident.Preflight.IsolatedHost = false
+	cfg.Resident.Preflight.SharedHostSmall = true
+	return cfg, clock, f
+}
+
+func TestResidentSharedSmallCoordinatesAndReportsLimitedScope(t *testing.T) {
+	cfg, clock, f := sharedResidentTestConfig(t)
+	clock.now = guardTestQuietNow()
+	cfg.Resident.Preflight.ReviewedAt = clock.now
+	cfg.Resident.Preflight.ValidUntil = clock.now.Add(2 * time.Hour)
+	locker := &guardTestLocker{}
+	guard, err := AcquireGuard(context.Background(), cfg, locker, clock.read, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer guard.Release(context.Background())
+	want := []string{"loadtest-global", stagingTarget + "-burst", stagingTarget + "-dax", stagingTarget + "-loadtest", stagingTarget + "-soak"}
+	if !reflect.DeepEqual(locker.keys, want) {
+		t.Fatalf("shared run bypasses existing load/benchmark coordination: %v", locker.keys)
+	}
+	summary, err := residentTestRunner(cfg, clock, f).Run(context.Background())
+	if err != nil || !summary.Resident.SharedHost || summary.Resident.QualificationScope != "shared-host-small" || summary.Resident.Paused != 4 || len(summary.Resident.Stages) != 2 || len(f.items) != 0 || f.badOrphanLimit {
+		t.Fatalf("shared hold/scope/orphan limits/cleanup: summary=%+v err=%v badOrphanLimit=%t", summary.Resident, err, f.badOrphanLimit)
+	}
+	report := summary.Report(cfg, nil)
+	for _, want := range []string{"does not qualify 105000-owner scale", `"shared_host":true`, `"qualification_scope":"shared-host-small"`} {
+		if !strings.Contains(report, want) {
+			t.Fatalf("shared result missing limitation %q: %s", want, report)
+		}
+	}
+}
+
+func TestResidentSharedSmallAdmissionEnforcesBoundsAndCoordination(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		change func(*Config)
+	}{
+		{"population", func(c *Config) { c.Resident.Population = 101; c.Resident.Stages = []int{101} }},
+		{"concurrency", func(c *Config) { c.Concurrency = 3 }},
+		{"false isolation claim", func(c *Config) { c.Resident.Preflight.IsolatedHost = true }},
+		{"retained seed", func(c *Config) { c.Resident.Mode = "seed" }},
+		{"no explicit shared proof", func(c *Config) { c.Resident.Preflight.SharedHostSmall = false }},
+		{"local lock", func(c *Config) { c.LockBackend = "file"; c.LockFile = filepath.Join(t.TempDir(), "outer.lock") }},
+		{"uncoordinated bucket", func(c *Config) { c.LockBucket = "different-staging-bucket" }},
+		{"no benchmark guard", func(c *Config) { c.BenchmarkGuard = false }},
+		{"no global guard", func(c *Config) { c.GlobalLock = false }},
+		{"insufficient capacity", func(c *Config) { c.Resident.Preflight.CapacityPopulation = c.Resident.Population + c.Concurrency - 1 }},
+		{"stale capacity", func(c *Config) {
+			c.Resident.Preflight.ReviewedAt = c.Resident.Preflight.ReviewedAt.Add(-31 * time.Minute)
+		}},
+		{"missing inventory", func(c *Config) { c.Resident.InventoryPath = "" }},
+		{"production", func(c *Config) { c.Environment = "production"; c.ProductionOptIn = true }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, clock, _ := sharedResidentTestConfig(t)
+			tt.change(&cfg)
+			if err := ValidateResidentAdmission(cfg, clock.read()); err == nil {
+				t.Fatal("unsafe shared-host run admitted")
+			}
+		})
+	}
+	cfg, clock, _ := sharedResidentTestConfig(t)
+	cfg.Resident.Population, cfg.Resident.Stages = 100, []int{100}
+	cfg.Resident.Preflight.CapacityPopulation = 102
+	if err := ValidateResidentAdmission(cfg, clock.read()); err != nil {
+		t.Fatalf("bounded shared capacity rejected: %v", err)
 	}
 }
 
@@ -450,7 +532,7 @@ func TestResidentConfigAllowsLargePopulationOnlyWithBoundCapacityEvidence(t *tes
 }
 
 func TestResidentJournalBindingAndCorruptionFailBeforeCreating(t *testing.T) {
-	for _, kind := range []string{"other-run", "corrupt"} {
+	for _, kind := range []string{"other-run", "host-scope", "corrupt"} {
 		t.Run(kind, func(t *testing.T) {
 			cfg, clock, f := residentTestConfig(t)
 			j, err := openResidentJournal(cfg, clock.read())
@@ -461,6 +543,11 @@ func TestResidentJournalBindingAndCorruptionFailBeforeCreating(t *testing.T) {
 			if kind == "other-run" {
 				cfg.RunID = "other-run"
 				cfg.Resident.Preflight.RunID = cfg.RunID
+			} else if kind == "host-scope" {
+				cfg.Resident.Preflight.IsolatedHost = false
+				cfg.Resident.Preflight.SharedHostSmall = true
+				cfg.LockBackend, cfg.LockBucket, cfg.LockFile = "gcs", sharedResidentLockBucket, ""
+				cfg.BenchmarkGuard, cfg.GlobalLock = true, true
 			} else {
 				file, err := os.OpenFile(cfg.Resident.JournalPath, os.O_APPEND|os.O_WRONLY, 0600)
 				if err != nil {

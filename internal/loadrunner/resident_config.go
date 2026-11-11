@@ -14,7 +14,11 @@ import (
 	"github.com/google/uuid"
 )
 
-const MaxResidentPopulation = 210_000
+const (
+	MaxResidentPopulation       = 210_000
+	MaxSharedResidentPopulation = 100
+	sharedResidentLockBucket    = "rayai-dev-api-canary-locks"
+)
 
 type ResidentConfig struct {
 	Population    int
@@ -29,7 +33,7 @@ type ResidentConfig struct {
 }
 
 // ResidentPreflight records operator checks unavailable through the public API.
-// It is evidence for a single isolated staging run, never production admission.
+// It is evidence for one staging run, never production admission.
 type ResidentPreflight struct {
 	RunID                 string    `json:"run_id"`
 	TeamID                string    `json:"team_id"`
@@ -41,6 +45,7 @@ type ResidentPreflight struct {
 	CapacityPopulation    int       `json:"capacity_population"`
 	CapacityConcurrency   int       `json:"capacity_concurrency"`
 	IsolatedHost          bool      `json:"isolated_host"`
+	SharedHostSmall       bool      `json:"shared_host_small"`
 	QuotaChecked          bool      `json:"quota_checked"`
 	CreditsChecked        bool      `json:"credits_checked"`
 	DiskCapacityChecked   bool      `json:"disk_capacity_checked"`
@@ -104,10 +109,26 @@ func loadResidentConfig(cfg Config) (ResidentConfig, error) {
 
 func validateResident(cfg Config, r ResidentConfig, now time.Time) error {
 	if cfg.Environment != "staging" || cfg.Region != "us-central1" || cfg.Target != stagingTarget || cfg.APIBaseURL != stagingAPIBaseURL || cfg.PreviewDomain != stagingPreviewDomain || cfg.Scheduled {
-		return errors.New("resident qualification is manual and restricted to the isolated staging target")
+		return errors.New("resident qualification is manual and restricted to the staging target")
 	}
-	if cfg.LockBackend != "file" || cfg.LockFile == "" || cfg.SlackWebhookURL != "" {
-		return errors.New("resident qualification requires local file locking and no summary webhook")
+	p := r.Preflight
+	if cfg.SlackWebhookURL != "" {
+		return errors.New("resident qualification requires no summary webhook")
+	}
+	outerLock := cfg.LockFile
+	if p.SharedHostSmall {
+		if p.IsolatedHost || r.Population > MaxSharedResidentPopulation || cfg.Concurrency > 2 {
+			return errors.New("shared-host-small requires a shared host, population at most 100 and concurrency at most 2")
+		}
+		if r.Mode == "seed" {
+			return errors.New("shared-host-small cannot retain seeded residents after releasing shared guards; use qualify or cleanup")
+		}
+		if cfg.LockBackend != "gcs" || cfg.LockBucket != sharedResidentLockBucket || !cfg.BenchmarkGuard || !cfg.GlobalLock {
+			return errors.New("shared-host-small requires the deployed staging GCS bucket and benchmark/global guards")
+		}
+		outerLock = ""
+	} else if !p.IsolatedHost || cfg.LockBackend != "file" || cfg.LockFile == "" {
+		return errors.New("isolated resident qualification requires an isolated host and local file locking")
 	}
 	if r.Mode != "seed" && r.Mode != "qualify" && r.Mode != "cleanup" {
 		return errors.New("resident mode must be seed, qualify, or cleanup")
@@ -115,7 +136,7 @@ func validateResident(cfg Config, r ResidentConfig, now time.Time) error {
 	if r.Population < 1 || r.Population > MaxResidentPopulation || cfg.Concurrency < 1 || cfg.Concurrency > 64 || r.JournalPath == "" || cfg.RunID == "" || cfg.WorkerID == "" {
 		return errors.New("resident population must be 1..210000, concurrency 1..64, with explicit journal and ownership")
 	}
-	if err := validateResidentPaths(r.JournalPath, cfg.LockFile, r.PreflightPath, r.InventoryPath); err != nil {
+	if err := validateResidentPaths(r.JournalPath, outerLock, r.PreflightPath, r.InventoryPath); err != nil {
 		return err
 	}
 	last := 0
@@ -128,7 +149,6 @@ func validateResident(cfg Config, r ResidentConfig, now time.Time) error {
 	if last != r.Population {
 		return errors.New("last resident stage must equal population")
 	}
-	p := r.Preflight
 	if _, err := uuid.Parse(p.TeamID); err != nil {
 		return errors.New("resident preflight requires an explicit staging team UUID")
 	}
@@ -141,8 +161,8 @@ func validateResident(cfg Config, r ResidentConfig, now time.Time) error {
 	if r.InventoryPath == "" {
 		return errors.New("resident qualification requires a continuously refreshed authoritative inventory evidence file")
 	}
-	if !p.IsolatedHost || !p.QuotaChecked || !p.CreditsChecked || !p.DiskCapacityChecked || !p.RetentionChecked || !p.BillingWritesChecked || !p.TelemetryChecked || p.CapacityPopulation < r.Population+cfg.Concurrency || p.CapacityConcurrency < cfg.Concurrency {
-		return errors.New("resident preflight must confirm isolated host, quota, credits, disk, retention, billing writes, telemetry and resident plus probe capacity")
+	if !p.QuotaChecked || !p.CreditsChecked || !p.DiskCapacityChecked || !p.RetentionChecked || !p.BillingWritesChecked || !p.TelemetryChecked || p.CapacityPopulation < r.Population+cfg.Concurrency || p.CapacityConcurrency < cfg.Concurrency {
+		return errors.New("resident preflight must confirm quota, credits, disk, retention, billing writes, telemetry and resident plus probe capacity")
 	}
 	if p.ReviewedAt.IsZero() || p.ReviewedAt.After(now) || now.Sub(p.ReviewedAt) > 30*time.Minute || p.ValidUntil.Before(now.Add(cfg.RunTimeout+cfg.DeleteTimeout)) {
 		return errors.New("resident capacity evidence is stale or does not cover runtime and cleanup")
@@ -174,7 +194,10 @@ func ValidateResidentAdmission(cfg Config, now time.Time) error {
 }
 
 func validateResidentPaths(journal, outerLock string, evidence ...string) error {
-	paths := []string{journal, journal + ".owner-lock", outerLock}
+	paths := []string{journal, journal + ".owner-lock"}
+	if outerLock != "" {
+		paths = append(paths, outerLock)
+	}
 	for _, path := range evidence {
 		if path != "" {
 			paths = append(paths, path)
