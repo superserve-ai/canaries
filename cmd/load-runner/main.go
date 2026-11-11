@@ -82,7 +82,7 @@ func runConfigured(ctx context.Context, cfg loadrunner.Config, deps runDependenc
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if err := shutdown(shutdownCtx); err != nil {
+		if err := shutdown(shutdownCtx); err != nil && !metricsShutdownSkipped(cfg.RunID, err) {
 			runErr = errors.Join(runErr, errors.New("load test metrics export failed"))
 		}
 		report := summary.Report(cfg, runErr)
@@ -148,6 +148,25 @@ func runConfigured(ctx context.Context, cfg loadrunner.Config, deps runDependenc
 		summary, err = runner.Run(workCtx)
 		return err
 	}()
+}
+
+// metricsShutdownSkipped logs one warning for a failed final metrics flush and
+// reports whether the run may still succeed. Google's Telemetry API refuses a
+// point written within the sampling period of the previous periodic export,
+// which a final flush can hit by timing alone. Exporter errors can contain
+// endpoint URLs, so only the parsed HTTP status and fixed messages are logged,
+// and the warning carries no error field.
+func metricsShutdownSkipped(runID string, err error) bool {
+	event := log.Warn().Str("run_id", runID)
+	if status, ok := metrics.ExporterStatus(err); ok {
+		event = event.Int("exporter_status", status)
+	}
+	if metrics.SamplingPeriodRejection(err) {
+		event.Msg("load test metrics export skipped by sampling period")
+		return true
+	}
+	event.Msg("load test metrics export failed")
+	return false
 }
 
 func fail(err error) int {
