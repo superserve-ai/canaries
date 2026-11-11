@@ -123,6 +123,10 @@ type Template struct {
 	Name      string    `json:"name"`
 	Status    string    `json:"status"`
 	BuildID   string    `json:"build_id,omitempty"`
+	VCPU      int       `json:"vcpu,omitempty"`
+	MemoryMiB int       `json:"memory_mib,omitempty"`
+	DiskMiB   int       `json:"disk_mib,omitempty"`
+	SizeBytes int64     `json:"size_bytes,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 }
 

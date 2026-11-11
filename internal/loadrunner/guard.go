@@ -89,7 +89,7 @@ func AcquireGuard(ctx context.Context, cfg Config, locker lock.Lock, now func() 
 				if cfg.RunTimeout <= 0 || cfg.DeleteTimeout <= 0 {
 					return errors.New("invalid guarded load test budget")
 				}
-				if overlapsKnownHeavyWindow(start, start.Add(cfg.RunTimeout+cfg.DeleteTimeout+guardReportGrace)) {
+				if overlapsKnownHeavyWindow(start, start.Add(cfg.RunTimeout+cfg.CleanupBudget()+guardReportGrace)) {
 					return errors.New("load test budget overlaps a known heavy benchmark window")
 				}
 			}
@@ -103,7 +103,7 @@ func AcquireGuard(ctx context.Context, cfg Config, locker lock.Lock, now func() 
 			return errors.New("scheduled day changed during preflight")
 		}
 		windowEnd = end
-		guard.Deadline = end.Add(-cfg.DeleteTimeout - guardReportGrace)
+		guard.Deadline = end.Add(-cfg.CleanupBudget() - guardReportGrace)
 		return nil
 	}
 	if err := checkTime(); err != nil {
@@ -122,7 +122,7 @@ func AcquireGuard(ctx context.Context, cfg Config, locker lock.Lock, now func() 
 		return blocked("scheduled admission requires the shared lock backend")
 	}
 	if backend != "" && backend != "none" {
-		if locker == nil || cfg.Target == "" || cfg.LockTTL < cfg.RunTimeout+cfg.DeleteTimeout+guardReportGrace {
+		if locker == nil || cfg.Target == "" || cfg.LockTTL < cfg.RunTimeout+cfg.CleanupBudget()+guardReportGrace {
 			return blocked("invalid load test lease configuration")
 		}
 		if (cfg.GlobalLock || cfg.BenchmarkGuard) && backend != "gcs" {
@@ -193,13 +193,13 @@ func scheduledWindow(cfg Config, now time.Time) (time.Time, error) {
 	if !end.After(start) || start.Hour() != startHour || start.Minute() != startMinute || end.Hour() != endHour || end.Minute() != endMinute {
 		return time.Time{}, errors.New("scheduled window must fit within one local day")
 	}
-	if cfg.RunTimeout <= 0 || cfg.DeleteTimeout <= 0 || cfg.RunTimeout+cfg.DeleteTimeout+guardReportGrace > end.Sub(start) {
+	if cfg.RunTimeout <= 0 || cfg.DeleteTimeout <= 0 || cfg.RunTimeout+cfg.CleanupBudget()+guardReportGrace > end.Sub(start) {
 		return time.Time{}, errors.New("scheduled window cannot fit the complete load test budget")
 	}
 	if overlapsKnownHeavyWindow(start, end) {
 		return time.Time{}, errors.New("scheduled window overlaps a known heavy benchmark window")
 	}
-	if now.Before(start) || !now.Before(end) || now.Add(cfg.RunTimeout+cfg.DeleteTimeout+guardReportGrace).After(end) {
+	if now.Before(start) || !now.Before(end) || now.Add(cfg.RunTimeout+cfg.CleanupBudget()+guardReportGrace).After(end) {
 		return time.Time{}, errors.New("outside the scheduled load test start window")
 	}
 	return end, nil

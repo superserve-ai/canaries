@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"reflect"
@@ -174,6 +175,7 @@ type cliHarness struct {
 	summaryContexts []error
 	shutdownCalls   int
 	unexpected      []string
+	pressureReads   int
 }
 
 func newCLIHarness(t *testing.T) *cliHarness {
@@ -222,8 +224,22 @@ func (h *cliHarness) roundTrip(req *http.Request) (*http.Response, error) {
 		}
 		return cliResponse(h.summaryStatus, "test webhook response"), nil
 	}
+	if req.URL.Hostname() == "supabase.example" && req.Method == http.MethodGet && req.URL.Path == "/rest/v1/host_pressure" {
+		h.pressureReads++
+		row := fmt.Sprintf(`[{"host_id":"host-a","running_sandboxes":1,"max_sandboxes":100,"reported_at":%q}]`, time.Now().UTC().Format(time.RFC3339))
+		return cliResponse(http.StatusOK, row), nil
+	}
 	h.sandboxRequests++
 	switch {
+	case req.URL.Hostname() == "api-staging.superserve.ai" && req.Method == http.MethodGet && req.URL.Path == "/templates":
+		h.events.add("list_templates")
+		return cliResponse(http.StatusOK, `[{"id":"tpl-1","name":"superserve/node-22","status":"ready","vcpu":1,"memory_mib":512,"disk_mib":4096,"size_bytes":314572800}]`), nil
+	case req.URL.Hostname() == "api-staging.superserve.ai" && req.Method == http.MethodGet && req.URL.Path == "/sandboxes":
+		h.events.add("list_sandboxes")
+		if h.deletes > 0 {
+			return cliResponse(http.StatusOK, `[]`), nil
+		}
+		return cliResponse(http.StatusOK, `[{"id":"sandbox-1","status":"active"}]`), nil
 	case req.URL.Hostname() == "api-staging.superserve.ai" && req.Method == http.MethodPost && req.URL.Path == "/sandboxes":
 		h.events.add("create")
 		h.creates++
@@ -276,6 +292,11 @@ func (h *cliHarness) deps() runDependencies {
 				}
 				return h.shutdownErr
 			}, nil
+		},
+		NewPressureSources: func(_ context.Context, cfg loadrunner.PressureConfig, now func() time.Time) ([]loadrunner.PressureSource, error) {
+			h.events.add("pressure_sources")
+			client := &http.Client{Transport: cliRoundTripper(h.roundTrip)}
+			return loadrunner.NewPressureSources(cfg, client, client, now), nil
 		},
 		NewLocker: func(_ context.Context, cfg lock.Config) (lock.Lock, func(), error) {
 			h.events.add("locker_init")
@@ -515,5 +536,38 @@ func TestRunConfiguredInitializationFailureStillPostsUnstartedSummary(t *testing
 				t.Fatal("metrics initialization failure shut down an uninitialized provider")
 			}
 		})
+	}
+}
+
+func TestRunConfiguredLaunchPostsMassLaunchReport(t *testing.T) {
+	h := newCLIHarness(t)
+	h.cfg.Scenario = loadrunner.ScenarioLaunch
+	h.cfg.Template = "superserve/node-22"
+	h.cfg.RunTimeout = 5 * time.Second
+	h.cfg.Launch = loadrunner.LaunchConfig{Strategy: "burst", APIRate: 1000, TeardownTimeout: time.Second, TeardownConcurrency: 1, TaskCount: 1}
+	h.cfg.Pressure = loadrunner.PressureConfig{
+		Mode: "observe", Interval: time.Second, BackoffPause: time.Second, MaxBackoffs: 2, SourceTimeout: time.Second,
+		CreateErrorWindow: time.Minute, CreateErrorMinSamples: 20,
+		SupabaseURL: "https://supabase.example", SupabaseKey: "private-supabase-key", HostIDs: []string{"host-a"},
+		Rules: []loadrunner.PressureRule{{Signal: "cap_headroom_pct", Source: "supabase", LowerIsWorse: true, Backoff: 10, Abort: 2}},
+	}
+	if err := runConfigured(context.Background(), h.cfg, h.deps()); err != nil {
+		t.Fatalf("runConfigured returned %v", err)
+	}
+	h.assertTerminal(t, "success")
+	if h.creates != 1 || h.deletes != 1 || h.pressureReads == 0 {
+		t.Fatalf("creates=%d deletes=%d pressure reads=%d", h.creates, h.deletes, h.pressureReads)
+	}
+	if !reflect.DeepEqual(h.metrics.executionScenarios, []string{"loadtest-launch", "loadtest-launch"}) {
+		t.Fatalf("unexpected scenarios: %v", h.metrics.executionScenarios)
+	}
+	assertEventOrder(t, h.events.snapshot(), "pressure_sources", "list_templates", "create", "exec", "delete", "list_sandboxes", "execution_end", "lease_release", "summary_post")
+	for _, want := range []string{"*Mass Launch Results*", "Outcome: succeeded", "1 vCPU | 512 MiB memory", "Host pressure guard: mode=observe", "host-a", "verified=true"} {
+		if !strings.Contains(h.summaries[0], want) {
+			t.Fatalf("launch summary missing %q:\n%s", want, h.summaries[0])
+		}
+	}
+	if strings.Contains(h.summaries[0], "private-supabase-key") || strings.Contains(h.logs.String(), "private-supabase-key") {
+		t.Fatal("launch summary or logs exposed the Supabase key")
 	}
 }
