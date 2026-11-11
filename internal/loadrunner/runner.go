@@ -16,9 +16,11 @@ import (
 )
 
 type Runner struct {
-	Config Config
-	Ops    lifecycle.Operations
-	Clock  func() time.Time
+	Config                Config
+	Ops                   lifecycle.Operations
+	Clock                 func() time.Time
+	Wait                  func(context.Context, time.Duration) error
+	ReadResidentInventory func(context.Context) (ResidentInventoryEvidence, error)
 }
 
 // PhaseSummary retains every successful completion latency, including phases
@@ -46,6 +48,7 @@ type Summary struct {
 	LifecycleDurations    []time.Duration
 	FailurePhases         map[string]int64
 	CleanupFailures       int64
+	Resident              *ResidentSummary
 }
 
 type phaseResult struct {
@@ -91,6 +94,9 @@ func (e *lifecycleFailure) Error() string { return e.err.Error() }
 func (e *lifecycleFailure) Unwrap() error { return e.err }
 
 func (r Runner) Run(parent context.Context) (Summary, error) {
+	if r.Config.Scenario == "resident" {
+		return r.runResident(parent)
+	}
 	if r.Config.Operations <= 0 || r.Config.Operations > MaxOperations || r.Config.Concurrency <= 0 || r.Config.Concurrency > r.Config.Operations {
 		return Summary{ConfiguredOperations: int64(r.Config.Operations), ConfiguredConcurrency: int64(r.Config.Concurrency), Unstarted: int64(r.Config.Operations)}, fmt.Errorf("load runner requires 1..%d operations and concurrency between 1 and the operation count", MaxOperations)
 	}

@@ -49,6 +49,9 @@ jobs:
           python3 -m unittest discover -s infra/modules/load_runner/tests -v
           python3 -m unittest discover -s .github/scripts/tests -v
 
+      - name: Resident inventory evidence regression
+        run: python3 -m unittest discover -s scripts -p 'test_resident_inventory.py' -v
+
       - name: Daily load Terraform tests
         run: |
           set -euo pipefail

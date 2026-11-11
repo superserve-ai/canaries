@@ -68,6 +68,7 @@ type Config struct {
 	BenchmarkGuard         bool
 	GlobalLock             bool
 	ExternalBenchmarkGuard bool
+	Resident               ResidentConfig
 }
 
 type routingConfig struct {
@@ -155,8 +156,8 @@ func Load() (Config, error) {
 	if cfg.Environment == "production" && !cfg.ProductionOptIn {
 		return Config{}, errors.New("production load tests require LOAD_TEST_PRODUCTION_OPT_IN=true")
 	}
-	if cfg.Scenario != "create" && cfg.Scenario != "lifecycle" {
-		return Config{}, errors.New("LOAD_TEST_SCENARIO must be create or lifecycle")
+	if cfg.Scenario != "create" && cfg.Scenario != "lifecycle" && cfg.Scenario != "resident" {
+		return Config{}, errors.New("LOAD_TEST_SCENARIO must be create, lifecycle, or resident")
 	}
 	if cfg.Operations <= 0 || cfg.Operations > MaxOperations {
 		return Config{}, fmt.Errorf("LOAD_TEST_OPERATIONS must be between 1 and %d", MaxOperations)
@@ -178,6 +179,12 @@ func Load() (Config, error) {
 	}
 	if err := validateExecutionConfig(cfg); err != nil {
 		return Config{}, err
+	}
+	if cfg.Scenario == "resident" {
+		cfg.Resident, err = loadResidentConfig(cfg)
+		if err != nil {
+			return Config{}, err
+		}
 	}
 	return cfg, nil
 }

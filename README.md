@@ -324,7 +324,74 @@ go build -o ./bin/load-runner ./cmd/load-runner
 ./bin/load-runner
 ```
 
-The load runner creates real sandboxes, waits for them to become active, verifies command execution, and deletes them after each operation.
+The create and lifecycle scenarios delete each sandbox after its operation.
+
+### Resident paused-fleet qualification
+
+The manual `resident` scenario retains a paused background population while a small foreground workload creates, pauses, resumes, executes, and deletes sandboxes. It is staging-only, even with production opt-in enabled. It supports up to 210,000 resident owners without increasing the ordinary 10,000-operation limit: `LOAD_TEST_OPERATIONS` remains the foreground probe budget.
+
+Use a dedicated staging host and test team with approved quota, credit, disk and retention capacity. The existing small shared staging hosts are not qualified for a 105,000-owner run. Before running, create a local JSON preflight file with the following fields:
+
+```json
+{
+  "run_id": "resident-qualification-unique-id",
+  "team_id": "<isolated staging team UUID>",
+  "target": "staging-us-central1",
+  "expected_host": "isolated-staging-host",
+  "template": "superserve/python-3.11",
+  "reviewed_at": "2026-01-01T00:00:00Z",
+  "valid_until": "2026-01-01T03:00:00Z",
+  "capacity_population": 105010,
+  "capacity_concurrency": 10,
+  "isolated_host": true,
+  "quota_checked": true,
+  "credits_checked": true,
+  "disk_capacity_checked": true,
+  "retention_checked": true,
+  "billing_writes_checked": true,
+  "telemetry_checked": true,
+  "control_plane_revision": "<exact 40-character revision>",
+  "host_revision": "<exact 40-character revision>",
+  "comparison_revision": "<exact 40-character baseline revision>",
+  "max_phase_latency_ms": 1000,
+  "max_probe_failures": 0
+}
+```
+
+These fields attest operator checks unavailable through the public API; setting them is not a substitute for checking actual capacity. Replace the example dates, revisions and abort thresholds with reviewed values. Evidence must be at most 30 minutes old and cover the runtime plus cleanup. The runner verifies each owner's host from a fresh routing hint returned by the authenticated API and aborts if placement is missing or differs from `expected_host`. The test does not force placement; arrange the isolated host pool before seeding. Use a key permitted to receive routing hints.
+
+Alongside the staging routing and API-key settings above, configure:
+
+```bash
+export LOAD_TEST_SCENARIO=resident LOAD_TEST_RESIDENT_OPT_IN=true
+export LOAD_TEST_RUN_ID=resident-qualification-unique-id
+export LOAD_TEST_RESIDENT_PREFLIGHT=/absolute/path/preflight.json
+export LOAD_TEST_RESIDENT_JOURNAL=/absolute/path/resident-run.jsonl
+export LOAD_TEST_RESIDENT_INVENTORY_EVIDENCE=/absolute/path/resident-inventory.json
+export CANARY_LOCK_BACKEND=file CANARY_LOCK_FILE=/absolute/path/resident-guard.lock
+export LOAD_TEST_RESIDENT_POPULATION=105000
+export LOAD_TEST_RESIDENT_STAGES=1000,10000,105000
+export LOAD_TEST_RESIDENT_HOLD=15m LOAD_TEST_RESIDENT_PROBE_INTERVAL=30s
+export LOAD_TEST_OPERATIONS=100 LOAD_TEST_CONCURRENCY=10
+export LOAD_TEST_RUN_TIMEOUT=1h LOAD_TEST_RESOURCE_TTL=24h
+go run ./cmd/load-runner
+```
+
+Each hold covers at least three five-minute storage sampling cycles. The runtime must cover all holds plus actual setup time; the existing one-hour runtime cap still applies. Use `LOAD_TEST_RESIDENT_MODE=seed` to retain a successfully seeded population, and `qualify` (the default) to reuse its journal and run the hold/probes. Recovery never blindly replaces an uncertain create: it discovers the unique run/worker/slot owner first, and stops if the outcome remains ambiguous. A larger recovered population is not reported as a smaller ramp stage. Refresh the capacity evidence before a resumed run; ownership and retention deadlines remain bound to the original journal.
+
+Start the read-only inventory observer before the runner and leave it running through cleanup. Configure `PGSERVICE` (or `PGHOST`, `PGDATABASE`, `PGUSER` and a protected `PGPASSFILE`) explicitly for the isolated staging database, using a role permitted to read only the required sandbox inventory. Credentials are not stored in evidence or passed as process arguments:
+
+```bash
+python3 scripts/resident_inventory.py \
+  --preflight /absolute/path/preflight.json --population 105000 \
+  --output /absolute/path/resident-inventory.json
+```
+
+The producer executes one bounded `READ ONLY` query with a ten-second statement timeout, scoped by the indexed team ID and ownership metadata. It atomically replaces a small JSON file every ten seconds. It reports the actual live owner IDs, paused count and wrong-host count; it does not echo a desired population. IDs are normalized to bare UUIDs before hashing, matching regional public API IDs. The runner checks fresh evidence before seeding, verifies the first seeded owner before bulk admission, and requires exact population/paused counts and ID hashes at each stage, throughout hold probes, and after the final hold boundary. Missing, stale (over one minute), moved, resumed, deleted or unexpected owners prevent qualification. An observer query failure leaves old evidence to age out and abort the run. The preflight file, inventory file, journal and both lock files must resolve to distinct paths; existing symlink/hardlink aliases are rejected before file-lock acquisition.
+
+Qualification completion, cancellation and failures attempt bounded concurrent cleanup of metadata-verified run owners. `LOAD_TEST_RESIDENT_MODE=cleanup` retries cleanup using the same journal and ownership configuration, including after evidence expires. Never reuse a completed journal for a new run. The journal and metadata expiry preserve recovery/normal janitor ownership after a process crash; unresolved cleanup is reported as failure.
+
+Structured stage timestamps, probe error counts and p50/p95/p99 create/pause/resume latencies support comparison across recorded revisions. Collect host CPU/I/O, sampler duration, report bytes, processing lag, spool occupancy and database/lock measurements externally over these same windows. Functional tests use small fake populations; this tooling alone does not establish a real 105,000-owner operating envelope or authorize production load.
 
 ## Debug Retention
 
