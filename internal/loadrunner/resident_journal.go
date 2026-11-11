@@ -119,7 +119,7 @@ func openResidentJournal(cfg Config, now time.Time) (*residentJournal, error) {
 	if h.RunID != cfg.RunID || h.TeamID != cfg.Resident.Preflight.TeamID || h.WorkerID != cfg.WorkerID || h.Target != cfg.Target || h.Host != cfg.Resident.Preflight.ExpectedHost || h.SharedHost != cfg.Resident.Preflight.SharedHostSmall || h.Template != cfg.Template || h.Population != cfg.Resident.Population {
 		return fail(errors.New("resident journal belongs to another run, worker, host, host scope, template or population"))
 	}
-	if cfg.Resident.Mode != "cleanup" && (j.completed || !h.ExpiresAt.After(now.Add(cfg.RunTimeout+cfg.DeleteTimeout))) {
+	if cfg.Resident.Mode != "cleanup" && (j.completed || !h.ExpiresAt.After(now.Add(cfg.RunTimeout+cleanupTimeout(cfg)))) {
 		return fail(errors.New("resident journal completed or retention cannot cover the remaining run; use cleanup mode"))
 	}
 	return j, nil

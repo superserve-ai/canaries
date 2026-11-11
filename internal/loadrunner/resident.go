@@ -84,7 +84,7 @@ func (r Runner) runResident(parent context.Context) (summary Summary, runErr err
 	if cfg.Resident.JournalPath+".owner-lock" == cfg.LockFile {
 		return summary, errors.New("resident journal and outer guard require distinct lock paths")
 	}
-	outcome, lease, err := lock.NewFileLock(cfg.Resident.JournalPath+".owner-lock").Acquire(ctx, cfg.RunID, cfg.RunTimeout+cfg.DeleteTimeout)
+	outcome, lease, err := lock.NewFileLock(cfg.Resident.JournalPath+".owner-lock").Acquire(ctx, cfg.RunID, cfg.RunTimeout+cleanupTimeout(cfg))
 	if err != nil {
 		return summary, err
 	}
@@ -105,7 +105,7 @@ func (r Runner) runResident(parent context.Context) (summary Summary, runErr err
 	summary = Summary{ConfiguredOperations: int64(cfg.Operations), ConfiguredConcurrency: int64(cfg.Concurrency), FailurePhases: map[string]int64{}, Resident: rs}
 	defer func() {
 		if runErr != nil || cfg.Resident.Mode != "seed" {
-			cleanupCtx, cleanupCancel := residentCleanupContext(ctx, cfg.DeleteTimeout)
+			cleanupCtx, cleanupCancel := residentCleanupContext(ctx, cleanupTimeout(cfg))
 			rs.CleanupFailures = r.cleanupResident(cleanupCtx, client, j)
 			cleanupCancel()
 			if rs.CleanupFailures > 0 {
@@ -422,7 +422,7 @@ func (r Runner) probeResident(ctx context.Context, c residentClient, j *resident
 	var e residentEntry
 	defer func() {
 		if e.SandboxID != "" {
-			cleanupCtx, cancel := residentCleanupContext(ctx, r.Config.DeleteTimeout)
+			cleanupCtx, cancel := residentCleanupContext(ctx, cleanupTimeout(r.Config))
 			defer cancel()
 			if err := r.deleteResident(cleanupCtx, c, j, e); err != nil {
 				probeErr = errors.Join(probeErr, errResidentUnsafe, err)
@@ -554,13 +554,15 @@ func (r Runner) cleanupResident(ctx context.Context, c residentClient, j *reside
 				if e.Deleted {
 					continue
 				}
-				err := ctx.Err()
+				ownerCtx, ownerCancel := context.WithTimeout(ctx, r.Config.DeleteTimeout)
+				err := ownerCtx.Err()
 				if err == nil && e.SandboxID == "" {
-					e, err = r.resolveResidentIntent(ctx, c, j, e)
+					e, err = r.resolveResidentIntent(ownerCtx, c, j, e)
 				}
 				if err == nil {
-					err = r.deleteResident(ctx, c, j, e)
+					err = r.deleteResident(ownerCtx, c, j, e)
 				}
+				ownerCancel()
 				if err != nil {
 					mu.Lock()
 					failures++
@@ -609,6 +611,8 @@ func residentLatency(p PhaseSummary) ResidentLatency {
 }
 
 func (r Runner) deleteResident(ctx context.Context, c residentClient, j *residentJournal, e residentEntry) error {
+	ctx, cancel := context.WithTimeout(ctx, r.Config.DeleteTimeout)
+	defer cancel()
 	sb, err := c.GetSandbox(ctx, e.SandboxID)
 	if errors.Is(err, canaryapi.ErrNotFound) || err == nil && sb.Status == "deleted" {
 		e.Deleted = true

@@ -341,8 +341,8 @@ For large qualification, use a dedicated staging host and test team with approve
   "template": "superserve/python-3.11",
   "reviewed_at": "2026-01-01T00:00:00Z",
   "valid_until": "2026-01-01T03:00:00Z",
-  "capacity_population": 105010,
-  "capacity_concurrency": 10,
+  "capacity_population": 105064,
+  "capacity_concurrency": 64,
   "isolated_host": true,
   "shared_host_small": false,
   "quota_checked": true,
@@ -373,10 +373,12 @@ export CANARY_LOCK_BACKEND=file CANARY_LOCK_FILE=/absolute/path/resident-guard.l
 export LOAD_TEST_RESIDENT_POPULATION=105000
 export LOAD_TEST_RESIDENT_STAGES=1000,10000,105000
 export LOAD_TEST_RESIDENT_HOLD=15m LOAD_TEST_RESIDENT_PROBE_INTERVAL=30s
-export LOAD_TEST_OPERATIONS=100 LOAD_TEST_CONCURRENCY=10
-export LOAD_TEST_RUN_TIMEOUT=1h LOAD_TEST_LOCK_TTL=90m LOAD_TEST_RESOURCE_TTL=24h
+export LOAD_TEST_OPERATIONS=100 LOAD_TEST_CONCURRENCY=64 DELETE_TIMEOUT=1s
+export LOAD_TEST_RUN_TIMEOUT=1h LOAD_TEST_LOCK_TTL=2h LOAD_TEST_RESOURCE_TTL=24h
 go run ./cmd/load-runner
 ```
+
+`DELETE_TIMEOUT` limits each owner's API discovery, deletion and confirmation; completion is persisted durably in the journal. Resident cleanup reserves `(ceil((population + 1) / concurrency) + 1) × DELETE_TIMEOUT` for the full fleet, a possible unresolved probe, and its preceding deletion attempt. The example reserves 27 minutes 22 seconds for cleanup; its one-second per-owner limit and 64-worker capacity are illustrative operator choices, not measured or approved defaults. Establish that those limits are suitable before attempting the large run. The usual 45-second delete timeout with ten workers cannot fit a 105,000-owner cleanup within the two-hour lease limit and is rejected before seeding. Runtime, the full cleanup reserve, and one minute of reporting must all fit the configured lease and resource retention; reviewed evidence and an existing journal's original retention must also cover runtime plus cleanup.
 
 For a small shared-host run, set `isolated_host: false` and `shared_host_small: true` in the reviewed preflight, bind `expected_host` to the actual shared staging host, and use capacity values established from its current headroom. Keep the same journal and observer settings, and replace the large-run settings above with:
 
@@ -385,7 +387,7 @@ export CANARY_LOCK_BACKEND=gcs LOCK_BUCKET=rayai-dev-api-canary-locks
 unset CANARY_LOCK_FILE
 export LOAD_TEST_BENCHMARK_GUARD=true LOAD_TEST_GLOBAL_LOCK=true
 export LOAD_TEST_RESIDENT_POPULATION=25 LOAD_TEST_RESIDENT_STAGES=1,5,25
-export LOAD_TEST_OPERATIONS=100 LOAD_TEST_CONCURRENCY=1
+export LOAD_TEST_OPERATIONS=100 LOAD_TEST_CONCURRENCY=1 DELETE_TIMEOUT=5s
 export LOAD_TEST_RUN_TIMEOUT=1h LOAD_TEST_LOCK_TTL=90m LOAD_TEST_RESOURCE_TTL=2h
 go run ./cmd/load-runner
 ```
@@ -404,7 +406,7 @@ python3 scripts/resident_inventory.py \
 
 The producer executes one bounded `READ ONLY` query with a ten-second statement timeout, scoped by the indexed team ID and ownership metadata. By default it waits ten seconds between queries; `--interval` accepts 1–15 seconds to leave room for query time within the evidence freshness limit. It atomically replaces a small JSON file with the actual live owner IDs, paused count and wrong-host count; it does not echo a desired population. IDs are normalized to bare UUIDs before hashing, matching regional public API IDs. The runner checks fresh evidence before seeding, verifies the first seeded owner before bulk admission, and requires exact population/paused counts and ID hashes at each stage, throughout hold probes, and after the final hold boundary. Missing, stale (over one minute), moved, resumed, deleted or unexpected owners prevent qualification. An observer query failure leaves old evidence to age out and abort the run. The preflight file, inventory file, journal and local lock files must resolve to distinct paths; existing symlink/hardlink aliases are rejected before file-lock acquisition. The journal binds shared versus isolated scope so recovery cannot relabel earlier measurements.
 
-Qualification completion, cancellation and failures attempt bounded concurrent cleanup of metadata-verified run owners. `LOAD_TEST_RESIDENT_MODE=cleanup` retries cleanup using the same journal and ownership configuration, including after evidence expires. Never reuse a completed journal for a new run. The journal and metadata expiry preserve recovery/normal janitor ownership after a process crash; unresolved cleanup is reported as failure.
+Qualification completion, cancellation and failures attempt bounded concurrent cleanup of metadata-verified run owners. Probe and fleet cleanup share a hard deadline at the run deadline plus the population-derived reserve; each owner also keeps its individual `DELETE_TIMEOUT`. `LOAD_TEST_RESIDENT_MODE=cleanup` retries cleanup using the same journal and ownership configuration, including after evidence or original retention expires, but still requires leases and configured retention sized for the population cleanup budget. Never reuse a completed journal for a new run. The journal and metadata expiry preserve recovery/normal janitor ownership after a process crash; unresolved cleanup is reported as failure.
 
 Structured stage timestamps, probe error counts and p50/p95/p99 create/pause/resume latencies support comparison across recorded revisions. Collect host CPU/I/O, sampler duration, report bytes, processing lag, spool occupancy and database/lock measurements externally over these same windows. Functional tests use small fake populations; this tooling alone does not establish a real 105,000-owner operating envelope or authorize production load.
 

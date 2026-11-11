@@ -165,6 +165,7 @@ func residentTestConfig(t *testing.T) (Config, *residentClock, *residentFake) {
 	cfg.PreviewDomain = stagingPreviewDomain
 	cfg.Scenario = "resident"
 	cfg.LockBackend = "file"
+	cfg.LockTTL = 45 * time.Minute
 	cfg.LockFile = filepath.Join(dir, "guard.lock")
 	cfg.RunTimeout = time.Minute
 	cfg.ResourceTTL = 3 * time.Hour
@@ -453,10 +454,11 @@ func TestResidentStageLatenciesRemainSeparatedInFinalReport(t *testing.T) {
 
 type deadlineResidentClient struct {
 	*residentFake
-	mu             sync.Mutex
-	runDeadline    time.Time
-	deleteDeadline time.Time
-	deletes        int
+	mu              sync.Mutex
+	runDeadline     time.Time
+	deleteDeadlines []time.Time
+	deleteStarts    []time.Time
+	deletes         int
 }
 
 func (f *deadlineResidentClient) ResumeSandbox(ctx context.Context, _ string) (canaryapi.ResumeResponse, error) {
@@ -468,7 +470,9 @@ func (f *deadlineResidentClient) ResumeSandbox(ctx context.Context, _ string) (c
 func (f *deadlineResidentClient) DeleteSandbox(ctx context.Context, _ string) error {
 	f.mu.Lock()
 	f.deletes++
-	f.deleteDeadline, _ = ctx.Deadline()
+	deadline, _ := ctx.Deadline()
+	f.deleteDeadlines = append(f.deleteDeadlines, deadline)
+	f.deleteStarts = append(f.deleteStarts, time.Now())
 	f.mu.Unlock()
 	<-ctx.Done()
 	return ctx.Err()
@@ -485,10 +489,113 @@ func TestResidentProbeAndFleetCleanupShareLatestDeadline(t *testing.T) {
 	if err == nil || !errors.Is(err, context.DeadlineExceeded) || summary.Resident.CleanupFailures == 0 {
 		t.Fatalf("expected unresolved timed-out cleanup: err=%v summary=%+v", err, summary.Resident)
 	}
-	// The probe consumes the shared grace. Final cleanup must see its expired
-	// deadline instead of receiving another full DeleteTimeout and issuing work.
-	if client.deletes != 1 || client.runDeadline.IsZero() || !client.deleteDeadline.Equal(client.runDeadline.Add(cfg.DeleteTimeout)) {
-		t.Fatalf("cleanup escaped protected runtime: deletes=%d run=%v cleanup=%v", client.deletes, client.runDeadline, client.deleteDeadline)
+	if client.deletes < 2 || client.runDeadline.IsZero() {
+		t.Fatalf("population cleanup was not attempted after the failed probe: deletes=%d run=%v", client.deletes, client.runDeadline)
+	}
+	latest := client.runDeadline.Add(cleanupTimeout(cfg))
+	for i, deadline := range client.deleteDeadlines {
+		if deadline.After(latest) || deadline.Sub(client.deleteStarts[i]) > cfg.DeleteTimeout {
+			t.Fatalf("owner cleanup escaped per-owner or fleet budget: start=%v deadline=%v latest=%v", client.deleteStarts[i], deadline, latest)
+		}
+	}
+	// A final cleanup started after the population budget cannot obtain a
+	// fresh grace period, even if cancellation had hidden the original deadline.
+	runCtx, runCancel := context.WithDeadline(context.Background(), time.Now().Add(-cleanupTimeout(cfg)-time.Second))
+	defer runCancel()
+	ctx, cancel := residentCleanupContext(runCtx, cleanupTimeout(cfg))
+	defer cancel()
+	if ctx.Err() == nil {
+		t.Fatal("expired aggregate cleanup received a fresh budget")
+	}
+}
+
+func TestResidentCleanupBudgetAdmissionCoversTheWholePopulation(t *testing.T) {
+	cfg, clock, _ := residentTestConfig(t)
+	if got, want := cleanupTimeout(cfg), 4*cfg.DeleteTimeout; got != want {
+		t.Fatalf("divisible population lacks unresolved-probe retry wave: got %s, want %s", got, want)
+	}
+	cfg.Resident.Population, cfg.Resident.Stages = 105000, []int{105000}
+	cfg.Resident.Preflight.CapacityPopulation = 105064
+	cfg.Resident.Preflight.CapacityConcurrency = 64
+	cfg.Operations = 100
+	cfg.Concurrency = 10
+	cfg.RunTimeout = time.Hour
+	cfg.DeleteTimeout = 45 * time.Second
+	cfg.LockTTL = 2 * time.Hour
+	if err := ValidateResidentAdmission(cfg, clock.read()); err == nil {
+		t.Fatal("large fleet admitted with an impossible cleanup budget")
+	}
+	cfg.Concurrency = 64
+	cfg.DeleteTimeout = time.Second
+	if got, want := cleanupTimeout(cfg), 1642*time.Second; got != want {
+		t.Fatalf("large population cleanup budget = %s, want %s", got, want)
+	}
+	if err := ValidateResidentAdmission(cfg, clock.read()); err != nil {
+		t.Fatalf("bounded large configuration rejected: %v", err)
+	}
+	for _, mode := range []string{"seed", "qualify", "cleanup"} {
+		t.Run(mode, func(t *testing.T) {
+			short := cfg
+			short.Resident.Mode = mode
+			short.LockTTL = cfg.RunTimeout + cfg.DeleteTimeout + time.Minute
+			if err := ValidateResidentAdmission(short, clock.read()); err == nil {
+				t.Fatal("resident mode bypassed whole-population lease coverage")
+			}
+		})
+	}
+	short := cfg
+	short.ResourceTTL = cfg.RunTimeout + cfg.DeleteTimeout + time.Minute
+	if err := ValidateResidentAdmission(short, clock.read()); err == nil {
+		t.Fatal("retention admitted without whole-population cleanup coverage")
+	}
+	short = cfg
+	short.Resident.Preflight.ValidUntil = clock.read().Add(cfg.RunTimeout + cfg.DeleteTimeout)
+	if err := ValidateResidentAdmission(short, clock.read()); err == nil {
+		t.Fatal("preflight evidence expired before whole-population cleanup")
+	}
+	// An older journal must independently cover the remaining population
+	// cleanup, even when its newly supplied configuration has a longer TTL.
+	short = cfg
+	short.ResourceTTL = cfg.RunTimeout + cfg.DeleteTimeout + time.Second
+	if j, err := openResidentJournal(short, clock.read()); err == nil {
+		_ = j.close()
+		t.Fatal("short-lived journal admitted for resident qualification")
+	}
+	if j, err := openResidentJournal(cfg, clock.read()); err == nil {
+		_ = j.close()
+		t.Fatal("new configuration extended an older journal's retention")
+	}
+	// Expired retention does not prevent safe owned recovery cleanup. It
+	// still needs the population-aware guard budget checked above.
+	cfg.Resident.Mode = "cleanup"
+	if j, err := openResidentJournal(cfg, clock.read().Add(4*time.Hour)); err != nil {
+		t.Fatalf("expired owners cannot be reclaimed: %v", err)
+	} else {
+		_ = j.close()
+	}
+}
+
+func TestResidentSharedGuardUsesPopulationCleanupBudget(t *testing.T) {
+	cfg, clock, _ := sharedResidentTestConfig(t)
+	cfg.Resident.Population, cfg.Resident.Stages = 25, []int{25}
+	cfg.Concurrency = 1
+	cfg.DeleteTimeout = 5 * time.Second
+	cfg.RunTimeout = time.Hour
+	cfg.LockTTL = cfg.RunTimeout + cfg.DeleteTimeout + guardReportGrace
+	clock.now = guardTestQuietNow()
+	if _, err := AcquireGuard(context.Background(), cfg, &guardTestLocker{}, clock.read, nil); !errors.Is(err, ErrGuardBlocked) {
+		t.Fatalf("shared guard ignored the population cleanup budget: %v", err)
+	}
+	cfg.LockTTL = cfg.RunTimeout + cleanupTimeout(cfg) + guardReportGrace
+	guard, err := AcquireGuard(context.Background(), cfg, &guardTestLocker{}, clock.read, nil)
+	if err != nil {
+		t.Fatalf("population-sized guard rejected: %v", err)
+	}
+	defer guard.Release(context.Background())
+	ordinary := cfg
+	ordinary.Scenario = "lifecycle"
+	if cleanupTimeout(ordinary) != cfg.DeleteTimeout {
+		t.Fatal("ordinary lifecycle cleanup budget changed")
 	}
 }
 
@@ -615,7 +722,7 @@ func TestResidentConfigAllowsLargePopulationOnlyWithBoundCapacityEvidence(t *tes
 	cfg.Resident.Preflight.RunID = "explicit-run"
 	cfg.Resident.Preflight.Template = "superserve/python-3.11"
 	cfg.Resident.Preflight.CapacityPopulation = 210010
-	cfg.Resident.Preflight.CapacityConcurrency = 10
+	cfg.Resident.Preflight.CapacityConcurrency = 64
 	file := filepath.Join(t.TempDir(), "preflight.json")
 	data, _ := json.Marshal(cfg.Resident.Preflight)
 	if err := os.WriteFile(file, data, 0600); err != nil {
@@ -624,6 +731,10 @@ func TestResidentConfigAllowsLargePopulationOnlyWithBoundCapacityEvidence(t *tes
 	for key, value := range map[string]string{"LOAD_TEST_SCENARIO": "resident", "LOAD_TEST_RESIDENT_OPT_IN": "true", "LOAD_TEST_RESIDENT_POPULATION": "105000", "LOAD_TEST_RESIDENT_HOLD": "15m", "LOAD_TEST_RESIDENT_MODE": "qualify", "LOAD_TEST_RESIDENT_PREFLIGHT": file, "LOAD_TEST_RESIDENT_INVENTORY_EVIDENCE": filepath.Join(t.TempDir(), "inventory.json"), "LOAD_TEST_RESIDENT_JOURNAL": filepath.Join(t.TempDir(), "run.jsonl"), "LOAD_TEST_RUN_ID": "explicit-run", "CANARY_LOCK_BACKEND": "file", "CANARY_LOCK_FILE": filepath.Join(t.TempDir(), "guard.lock")} {
 		t.Setenv(key, value)
 	}
+	t.Setenv("LOAD_TEST_CONCURRENCY", "64")
+	t.Setenv("DELETE_TIMEOUT", "1s")
+	t.Setenv("LOAD_TEST_LOCK_TTL", "2h")
+	t.Setenv("LOAD_TEST_RUN_TIMEOUT", "1h")
 	loaded, err := Load()
 	if err != nil || loaded.Resident.Population != 105000 {
 		t.Fatalf("large resident config rejected: %+v err=%v", loaded.Resident, err)

@@ -108,6 +108,7 @@ func loadResidentConfig(cfg Config) (ResidentConfig, error) {
 }
 
 func validateResident(cfg Config, r ResidentConfig, now time.Time) error {
+	cfg.Resident = r
 	if cfg.Environment != "staging" || cfg.Region != "us-central1" || cfg.Target != stagingTarget || cfg.APIBaseURL != stagingAPIBaseURL || cfg.PreviewDomain != stagingPreviewDomain || cfg.Scheduled {
 		return errors.New("resident qualification is manual and restricted to the staging target")
 	}
@@ -155,6 +156,12 @@ func validateResident(cfg Config, r ResidentConfig, now time.Time) error {
 	if p.RunID != cfg.RunID || p.Target != cfg.Target || p.ExpectedHost == "" || p.Template != cfg.Template {
 		return errors.New("resident preflight does not match run, target, host and template")
 	}
+	if cfg.RunTimeout <= 0 || cfg.RunTimeout > maxRunTimeout || cfg.DeleteTimeout <= 0 || cfg.DeleteTimeout > maxDeleteTimeout {
+		return errors.New("resident runtime and per-owner deletion timeout must fit their safety bounds")
+	}
+	if err := validateExecutionConfig(cfg); err != nil {
+		return err
+	}
 	if r.Mode == "cleanup" {
 		return nil
 	}
@@ -164,7 +171,7 @@ func validateResident(cfg Config, r ResidentConfig, now time.Time) error {
 	if !p.QuotaChecked || !p.CreditsChecked || !p.DiskCapacityChecked || !p.RetentionChecked || !p.BillingWritesChecked || !p.TelemetryChecked || p.CapacityPopulation < r.Population+cfg.Concurrency || p.CapacityConcurrency < cfg.Concurrency {
 		return errors.New("resident preflight must confirm quota, credits, disk, retention, billing writes, telemetry and resident plus probe capacity")
 	}
-	if p.ReviewedAt.IsZero() || p.ReviewedAt.After(now) || now.Sub(p.ReviewedAt) > 30*time.Minute || p.ValidUntil.Before(now.Add(cfg.RunTimeout+cfg.DeleteTimeout)) {
+	if p.ReviewedAt.IsZero() || p.ReviewedAt.After(now) || now.Sub(p.ReviewedAt) > 30*time.Minute || p.ValidUntil.Before(now.Add(cfg.RunTimeout+cleanupTimeout(cfg))) {
 		return errors.New("resident capacity evidence is stale or does not cover runtime and cleanup")
 	}
 	for _, revision := range []string{p.ControlPlaneRevision, p.HostRevision, p.ComparisonRevision} {
