@@ -489,6 +489,91 @@ func TestRunConfiguredMetricsShutdownFailureFailsJob(t *testing.T) {
 	assertEventOrder(t, h.events.snapshot(), "delete", "execution_end", "lease_release", "locker_close", "metrics_shutdown", "summary_post")
 }
 
+func cliLogEntries(t *testing.T, logs string) []map[string]any {
+	t.Helper()
+	var entries []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(logs), "\n") {
+		var entry map[string]any
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatalf("invalid JSON log entry: %v", err)
+		}
+		entries = append(entries, entry)
+	}
+	return entries
+}
+
+func cliWarnings(entries []map[string]any) []map[string]any {
+	var warnings []map[string]any
+	for _, entry := range entries {
+		if entry["level"] == "warn" {
+			warnings = append(warnings, entry)
+		}
+	}
+	return warnings
+}
+
+func TestRunConfiguredSamplingPeriodRejectionDoesNotFailJob(t *testing.T) {
+	h := newCLIHarness(t)
+	h.shutdownErr = errors.New(`failed to upload metrics: 400 Bad Request {"code":400,"message":"points were written more frequently than the maximum sampling period","status":"FAILED_PRECONDITION"}`)
+	if err := runConfigured(context.Background(), h.cfg, h.deps()); err != nil {
+		t.Fatalf("sampling period rejection failed the run: %v", err)
+	}
+	h.assertTerminal(t, "success")
+	if h.shutdownCalls != 1 || h.deletes != 1 || h.locker.releases != 1 || !reflect.DeepEqual(h.metrics.deltas, []int64{1, -1}) {
+		t.Fatal("sampling period rejection skipped or duplicated finalization")
+	}
+	if !strings.Contains(h.summaries[0], "Outcome: succeeded") || !strings.Contains(h.summaries[0], "Sandboxes: 1 total, 1 started, 1 succeeded, 0 failed, 0 unstarted") {
+		t.Fatal("sampling period rejection changed the successful final summary")
+	}
+	entries := cliLogEntries(t, h.logs.String())
+	warnings := cliWarnings(entries)
+	if len(warnings) != 1 {
+		t.Fatalf("warnings=%v, want exactly one", warnings)
+	}
+	if warnings[0]["message"] != "load test metrics export skipped by sampling period" || warnings[0]["run_id"] != h.cfg.RunID || warnings[0]["exporter_status"] != float64(400) {
+		t.Fatalf("unexpected sampling period warning: %v", warnings[0])
+	}
+	for _, entry := range entries {
+		if _, ok := entry["error"]; ok {
+			t.Fatalf("sampling period rejection logged an alertable error field: %v", entry)
+		}
+	}
+	for _, raw := range []string{"failed to upload", "FAILED_PRECONDITION", "maximum sampling period"} {
+		if strings.Contains(h.logs.String(), raw) || strings.Contains(h.summaries[0], raw) {
+			t.Fatalf("sampling period rejection exposed raw exporter text %q", raw)
+		}
+	}
+	assertEventOrder(t, h.events.snapshot(), "delete", "execution_end", "lease_release", "locker_close", "metrics_shutdown", "summary_post")
+}
+
+func TestRunConfiguredMetricsShutdownFailureLogsOnlyExporterStatus(t *testing.T) {
+	h := newCLIHarness(t)
+	h.shutdownErr = errors.New("failed to upload metrics: failed to send metrics to https://collector.example/v1/metrics?token=private-collector-token: 403 Forbidden (body: permission denied)")
+	err := runConfigured(context.Background(), h.cfg, h.deps())
+	if err == nil || err.Error() != "load test metrics export failed" {
+		t.Fatalf("unexpected metrics shutdown result: %v", err)
+	}
+	h.assertTerminal(t, "failure")
+	if !strings.Contains(h.summaries[0], "Outcome: failed") {
+		t.Fatal("metrics export failure was omitted from the single final summary")
+	}
+	warnings := cliWarnings(cliLogEntries(t, h.logs.String()))
+	if len(warnings) != 1 {
+		t.Fatalf("warnings=%v, want exactly one", warnings)
+	}
+	if warnings[0]["message"] != "load test metrics export failed" || warnings[0]["run_id"] != h.cfg.RunID || warnings[0]["exporter_status"] != float64(403) {
+		t.Fatalf("unexpected metrics export warning: %v", warnings[0])
+	}
+	if _, ok := warnings[0]["error"]; ok {
+		t.Fatal("metrics export warning carried the raw exporter error")
+	}
+	for _, raw := range []string{"collector.example", "private-collector-token", "permission denied"} {
+		if strings.Contains(h.logs.String(), raw) || strings.Contains(h.summaries[0], raw) || strings.Contains(err.Error(), raw) {
+			t.Fatalf("metrics export failure exposed raw exporter text %q", raw)
+		}
+	}
+}
+
 func TestRunConfiguredInitializationFailureStillPostsUnstartedSummary(t *testing.T) {
 	for _, mode := range []string{"metrics", "locker"} {
 		t.Run(mode, func(t *testing.T) {
