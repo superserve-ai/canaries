@@ -33,11 +33,14 @@ type ResidentLatency struct {
 }
 
 type ResidentStage struct {
-	Population          int       `json:"population"`
-	StartedAt           time.Time `json:"started_at"`
-	CompletedAt         time.Time `json:"completed_at"`
-	ProbeAttempts       int64     `json:"probe_attempts"`
-	InventoryObservedAt time.Time `json:"inventory_observed_at"`
+	Population          int             `json:"population"`
+	StartedAt           time.Time       `json:"started_at"`
+	CompletedAt         time.Time       `json:"completed_at"`
+	ProbeAttempts       int64           `json:"probe_attempts"`
+	InventoryObservedAt time.Time       `json:"inventory_observed_at"`
+	Create              ResidentLatency `json:"create"`
+	Pause               ResidentLatency `json:"pause"`
+	Resume              ResidentLatency `json:"resume"`
 }
 
 type ResidentSummary struct {
@@ -68,6 +71,9 @@ type residentClient interface {
 
 func (r Runner) runResident(parent context.Context) (summary Summary, runErr error) {
 	cfg := r.Config
+	start := r.now()
+	ctx, cancel := context.WithTimeout(parent, cfg.RunTimeout)
+	defer cancel()
 	if err := validateResident(cfg, cfg.Resident, r.now()); err != nil {
 		return summary, err
 	}
@@ -78,7 +84,7 @@ func (r Runner) runResident(parent context.Context) (summary Summary, runErr err
 	if cfg.Resident.JournalPath+".owner-lock" == cfg.LockFile {
 		return summary, errors.New("resident journal and outer guard require distinct lock paths")
 	}
-	outcome, lease, err := lock.NewFileLock(cfg.Resident.JournalPath+".owner-lock").Acquire(parent, cfg.RunID, cfg.RunTimeout+cfg.DeleteTimeout)
+	outcome, lease, err := lock.NewFileLock(cfg.Resident.JournalPath+".owner-lock").Acquire(ctx, cfg.RunID, cfg.RunTimeout+cfg.DeleteTimeout)
 	if err != nil {
 		return summary, err
 	}
@@ -97,12 +103,9 @@ func (r Runner) runResident(parent context.Context) (summary Summary, runErr err
 	}
 	rs := &ResidentSummary{RunID: cfg.RunID, Host: cfg.Resident.Preflight.ExpectedHost, Mode: cfg.Resident.Mode, SharedHost: cfg.Resident.Preflight.SharedHostSmall, QualificationScope: scope, ExternalEvidenceRequired: true}
 	summary = Summary{ConfiguredOperations: int64(cfg.Operations), ConfiguredConcurrency: int64(cfg.Concurrency), FailurePhases: map[string]int64{}, Resident: rs}
-	start := r.now()
-	ctx, cancel := context.WithTimeout(parent, cfg.RunTimeout)
-	defer cancel()
 	defer func() {
 		if runErr != nil || cfg.Resident.Mode != "seed" {
-			cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(parent), cfg.DeleteTimeout)
+			cleanupCtx, cleanupCancel := residentCleanupContext(ctx, cfg.DeleteTimeout)
 			rs.CleanupFailures = r.cleanupResident(cleanupCtx, client, j)
 			cleanupCancel()
 			if rs.CleanupFailures > 0 {
@@ -186,44 +189,56 @@ func (r Runner) runResident(parent context.Context) (summary Summary, runErr err
 		if cfg.Resident.Mode == "seed" {
 			continue
 		}
-		stageResult := ResidentStage{Population: stage, StartedAt: r.now().UTC()}
-		stageEvidenceBoundary := proof.ObservedAt
-		until := r.now().Add(cfg.Resident.Hold)
-		for r.now().Before(until) {
-			if ctx.Err() != nil {
-				return summary, ctx.Err()
+		rs.Stages = append(rs.Stages, ResidentStage{Population: stage, StartedAt: r.now().UTC()})
+		stageResult := &rs.Stages[len(rs.Stages)-1]
+		stageCreate, stagePause, stageResume := summary.Create, summary.Pause, summary.Resume
+		stageErr := func() error {
+			defer func() {
+				stageResult.Create = residentLatencySince(summary.Create, stageCreate)
+				stageResult.Pause = residentLatencySince(summary.Pause, stagePause)
+				stageResult.Resume = residentLatencySince(summary.Resume, stageResume)
+			}()
+			stageEvidenceBoundary := proof.ObservedAt
+			until := r.now().Add(cfg.Resident.Hold)
+			for r.now().Before(until) {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				if nextProbe >= cfg.Operations {
+					return errors.New("resident probe budget exhausted before hold completed")
+				}
+				if _, err := r.checkResidentInventory(ctx, j, stage, stageEvidenceBoundary); err != nil {
+					return err
+				}
+				probeErr := r.probeResident(ctx, client, j, &summary, nextProbe)
+				nextProbe++
+				rs.ProbeAttempts++
+				stageResult.ProbeAttempts++
+				if probeErr != nil {
+					rs.ProbeFailures++
+					log.Warn().Err(probeErr).Str("run_id", cfg.RunID).Int("resident_population", stage).Msg("resident foreground probe failed")
+				}
+				if errors.Is(probeErr, errResidentUnsafe) || errors.Is(probeErr, errResidentLatency) {
+					return probeErr
+				}
+				if rs.ProbeFailures > int64(cfg.Resident.Preflight.MaxProbeFailures) {
+					return errors.New("resident probe failure threshold exceeded")
+				}
+				if err := r.residentWait(ctx, min(cfg.Resident.ProbeInterval, until.Sub(r.now()))); err != nil {
+					return err
+				}
 			}
-			if nextProbe >= cfg.Operations {
-				return summary, errors.New("resident probe budget exhausted before hold completed")
+			stageResult.CompletedAt = r.now().UTC()
+			proof, err := r.waitResidentInventory(ctx, j, stage, stageResult.CompletedAt)
+			if err != nil {
+				return err
 			}
-			if _, err := r.checkResidentInventory(ctx, j, stage, stageEvidenceBoundary); err != nil {
-				return summary, err
-			}
-			probeErr := r.probeResident(ctx, client, j, &summary, nextProbe)
-			nextProbe++
-			rs.ProbeAttempts++
-			stageResult.ProbeAttempts++
-			if probeErr != nil {
-				rs.ProbeFailures++
-				log.Warn().Err(probeErr).Str("run_id", cfg.RunID).Int("resident_population", stage).Msg("resident foreground probe failed")
-			}
-			if errors.Is(probeErr, errResidentUnsafe) || errors.Is(probeErr, errResidentLatency) {
-				return summary, probeErr
-			}
-			if rs.ProbeFailures > int64(cfg.Resident.Preflight.MaxProbeFailures) {
-				return summary, errors.New("resident probe failure threshold exceeded")
-			}
-			if err := r.residentWait(ctx, min(cfg.Resident.ProbeInterval, until.Sub(r.now()))); err != nil {
-				return summary, err
-			}
+			stageResult.InventoryObservedAt = proof.ObservedAt
+			return nil
+		}()
+		if stageErr != nil {
+			return summary, stageErr
 		}
-		stageResult.CompletedAt = r.now().UTC()
-		proof, err = r.waitResidentInventory(ctx, j, stage, stageResult.CompletedAt)
-		if err != nil {
-			return summary, err
-		}
-		stageResult.InventoryObservedAt = proof.ObservedAt
-		rs.Stages = append(rs.Stages, stageResult)
 	}
 	return summary, nil
 }
@@ -407,7 +422,7 @@ func (r Runner) probeResident(ctx context.Context, c residentClient, j *resident
 	var e residentEntry
 	defer func() {
 		if e.SandboxID != "" {
-			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.Config.DeleteTimeout)
+			cleanupCtx, cancel := residentCleanupContext(ctx, r.Config.DeleteTimeout)
 			defer cancel()
 			if err := r.deleteResident(cleanupCtx, c, j, e); err != nil {
 				probeErr = errors.Join(probeErr, errResidentUnsafe, err)
@@ -421,9 +436,9 @@ func (r Runner) probeResident(ctx context.Context, c residentClient, j *resident
 		duration := r.now().Sub(start)
 		if err == nil {
 			dst.Durations = append(dst.Durations, duration)
-			if duration > time.Duration(r.Config.Resident.Preflight.MaxPhaseLatencyMillis)*time.Millisecond {
-				err = fmt.Errorf("%w: %s", errResidentLatency, name)
-			}
+		}
+		if duration > time.Duration(r.Config.Resident.Preflight.MaxPhaseLatencyMillis)*time.Millisecond {
+			err = errors.Join(err, fmt.Errorf("%w: %s", errResidentLatency, name))
 		}
 		if err != nil {
 			dst.Failures++
@@ -560,6 +575,24 @@ func (r Runner) cleanupResident(ctx context.Context, c residentClient, j *reside
 	close(jobs)
 	wg.Wait()
 	return failures
+}
+
+// Probe and final fleet cleanup share the run's latest cleanup deadline. A
+// failed probe near timeout must not consume a second lease-sized grace period.
+func residentCleanupContext(runCtx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	deadline := time.Now().Add(timeout)
+	if runDeadline, ok := runCtx.Deadline(); ok && runDeadline.Add(timeout).Before(deadline) {
+		deadline = runDeadline.Add(timeout)
+	}
+	return context.WithDeadline(context.WithoutCancel(runCtx), deadline)
+}
+
+func residentLatencySince(current, before PhaseSummary) ResidentLatency {
+	return residentLatency(PhaseSummary{
+		Attempts:  current.Attempts - before.Attempts,
+		Failures:  current.Failures - before.Failures,
+		Durations: current.Durations[len(before.Durations):],
+	})
 }
 
 func residentLatency(p PhaseSummary) ResidentLatency {

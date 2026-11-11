@@ -1,4 +1,5 @@
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -39,6 +40,7 @@ class InventoryEvidenceTest(unittest.TestCase):
             evidence = inventory.observe(self.preflight, "worker", 105_000)
         args, kwargs = execute.call_args
         self.assertNotIn("shell", kwargs)
+        self.assertEqual(kwargs["timeout"], 15)
         self.assertIn("BEGIN READ ONLY", kwargs["input"])
         self.assertIn("statement_timeout = '10s'", kwargs["input"])
         self.assertIn("team_id = :'team_id'::uuid", kwargs["input"])
@@ -61,6 +63,29 @@ class InventoryEvidenceTest(unittest.TestCase):
             inventory.write_evidence(path, {"population": 2})
             self.assertEqual(json.loads(path.read_text()), {"population": 2})
             self.assertEqual(list(Path(directory).iterdir()), [path])
+
+    def test_observer_interval_reserves_freshness_headroom_for_query_time(self):
+        with tempfile.TemporaryDirectory() as directory:
+            preflight_path = Path(directory) / "preflight.json"
+            output_path = Path(directory) / "inventory.json"
+            preflight_path.write_text(json.dumps(self.preflight))
+            command = ["resident_inventory.py", "--preflight", str(preflight_path),
+                       "--population", "1", "--output", str(output_path),
+                       "--worker", "worker-0", "--once"]
+            for interval in ("15.01", "60"):
+                with self.subTest(interval=interval), patch("sys.argv", command + ["--interval", interval]), \
+                        patch("sys.stderr", new_callable=io.StringIO) as stderr, \
+                        patch.object(inventory, "observe") as observe:
+                    with self.assertRaises(SystemExit) as raised:
+                        inventory.main()
+                    self.assertEqual(raised.exception.code, 2)
+                    self.assertIn("interval 1..15 seconds", stderr.getvalue())
+                    observe.assert_not_called()
+            with patch("sys.argv", command + ["--interval", "15"]), \
+                    patch.object(inventory, "observe", return_value={"population": 1}) as observe:
+                inventory.main()
+            observe.assert_called_once_with(self.preflight, "worker-0", 1)
+            self.assertEqual(json.loads(output_path.read_text()), {"population": 1})
 
 
 if __name__ == "__main__":

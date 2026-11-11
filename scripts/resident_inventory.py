@@ -107,11 +107,14 @@ def main():
     parser.add_argument("--population", required=True, type=int)
     parser.add_argument("--output", required=True)
     parser.add_argument("--worker", default=os.environ.get("LOAD_TEST_WORKER_ID", "worker-0"))
-    parser.add_argument("--interval", type=float, default=10)
+    parser.add_argument("--interval", type=float, default=10,
+                        help="seconds between queries (1..15; default: 10)")
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
-    if not 1 <= args.population <= 210_000 or not 1 <= args.interval <= 60:
-        parser.error("population must be 1..210000 and interval 1..60 seconds")
+    # Evidence is stamped at query start. Leave room for both queries' bounded
+    # runtimes and publishing overhead within the runner's one-minute limit.
+    if not 1 <= args.population <= 210_000 or not 1 <= args.interval <= 15:
+        parser.error("population must be 1..210000 and interval 1..15 seconds")
     if Path(args.preflight).resolve() == Path(args.output).resolve():
         parser.error("evidence output must differ from the preflight file")
     with open(args.preflight, encoding="utf-8") as stream:

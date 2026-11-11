@@ -49,6 +49,7 @@ type residentFake struct {
 	unknownCreate  bool
 	lookupFailure  bool
 	resumeDuration time.Duration
+	stageDurations map[int]time.Duration
 	resumeHost     string
 	badOrphanLimit bool
 }
@@ -104,7 +105,17 @@ func (f *residentFake) ResumeSandbox(_ context.Context, id string) (canaryapi.Re
 	sb := f.items[id]
 	sb.Status = "active"
 	f.items[id] = sb
-	_ = f.clock.wait(context.Background(), f.resumeDuration)
+	duration := f.resumeDuration
+	if f.stageDurations != nil {
+		population := 0
+		for _, item := range f.items {
+			if item.Status == "paused" {
+				population++
+			}
+		}
+		duration = f.stageDurations[population]
+	}
+	_ = f.clock.wait(context.Background(), duration)
 	if f.resumeHost != "" {
 		f.host = f.resumeHost
 	}
@@ -394,6 +405,93 @@ func TestResidentLatencyThresholdAbortsDespiteAllowedProbeFailures(t *testing.T)
 	}
 }
 
+func TestResidentSlowFailedPhaseAbortsDespiteAllowedProbeFailures(t *testing.T) {
+	cfg, clock, f := residentTestConfig(t)
+	cfg.Resident.Preflight.MaxPhaseLatencyMillis = 1
+	cfg.Resident.Preflight.MaxProbeFailures = 10
+	f.resumeDuration = 2 * time.Millisecond
+	f.probeError = errors.New("resume response failed")
+	summary, err := residentTestRunner(cfg, clock, f).Run(context.Background())
+	if !errors.Is(err, errResidentLatency) || !errors.Is(err, f.probeError) || summary.Resident.ProbeAttempts != 1 || summary.Resident.Resume.Failures != 1 || len(f.items) != 0 {
+		t.Fatalf("slow failed phase tolerated or original error lost: err=%v summary=%+v", err, summary.Resident)
+	}
+	stages := summary.Resident.Stages
+	if len(stages) != 1 || stages[0].Resume.Attempts != 1 || stages[0].Resume.Failures != 1 || !stages[0].CompletedAt.IsZero() {
+		t.Fatalf("failed stage observations lost: %+v", stages)
+	}
+}
+
+func TestResidentStageLatenciesRemainSeparatedInFinalReport(t *testing.T) {
+	cfg, clock, f := residentTestConfig(t)
+	cfg.Resident.Hold = 10 * time.Millisecond
+	cfg.Operations = 30
+	f.stageDurations = map[int]time.Duration{2: time.Millisecond, 4: 3 * time.Millisecond}
+	summary, err := residentTestRunner(cfg, clock, f).Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var attempts int64
+	for i, stage := range summary.Resident.Stages {
+		wantMillis := float64(1 + 2*i)
+		if stage.Resume.P50Millis != wantMillis || stage.Resume.P95Millis != wantMillis || stage.Resume.P99Millis != wantMillis || stage.Resume.Attempts != stage.ProbeAttempts || stage.Create.Attempts != stage.ProbeAttempts || stage.Pause.Attempts != stage.ProbeAttempts {
+			t.Fatalf("population %d stage statistics mixed: %+v", stage.Population, stage)
+		}
+		attempts += stage.Resume.Attempts
+	}
+	if len(summary.Resident.Stages) != 2 || summary.Resident.Resume.Attempts != attempts {
+		t.Fatalf("stage or overall totals lost: %+v", summary.Resident)
+	}
+	report := summary.Report(cfg, nil)
+	var decoded ResidentSummary
+	if err := json.Unmarshal([]byte(report[strings.Index(report, "{"):]), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded.Stages) != 2 || decoded.Stages[0].Resume.P99Millis != 1 || decoded.Stages[1].Resume.P99Millis != 3 || decoded.Resume.Attempts != attempts {
+		t.Fatalf("final JSON report lost per-stage results: %s", report)
+	}
+}
+
+type deadlineResidentClient struct {
+	*residentFake
+	mu             sync.Mutex
+	runDeadline    time.Time
+	deleteDeadline time.Time
+	deletes        int
+}
+
+func (f *deadlineResidentClient) ResumeSandbox(ctx context.Context, _ string) (canaryapi.ResumeResponse, error) {
+	f.runDeadline, _ = ctx.Deadline()
+	<-ctx.Done()
+	return canaryapi.ResumeResponse{}, ctx.Err()
+}
+
+func (f *deadlineResidentClient) DeleteSandbox(ctx context.Context, _ string) error {
+	f.mu.Lock()
+	f.deletes++
+	f.deleteDeadline, _ = ctx.Deadline()
+	f.mu.Unlock()
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func TestResidentProbeAndFleetCleanupShareLatestDeadline(t *testing.T) {
+	cfg, clock, f := residentTestConfig(t)
+	cfg.RunTimeout = time.Second
+	cfg.DeleteTimeout = 20 * time.Millisecond
+	client := &deadlineResidentClient{residentFake: f}
+	runner := residentTestRunner(cfg, clock, f)
+	runner.Ops.Client = client
+	summary, err := runner.Run(context.Background())
+	if err == nil || !errors.Is(err, context.DeadlineExceeded) || summary.Resident.CleanupFailures == 0 {
+		t.Fatalf("expected unresolved timed-out cleanup: err=%v summary=%+v", err, summary.Resident)
+	}
+	// The probe consumes the shared grace. Final cleanup must see its expired
+	// deadline instead of receiving another full DeleteTimeout and issuing work.
+	if client.deletes != 1 || client.runDeadline.IsZero() || !client.deleteDeadline.Equal(client.runDeadline.Add(cfg.DeleteTimeout)) {
+		t.Fatalf("cleanup escaped protected runtime: deletes=%d run=%v cleanup=%v", client.deletes, client.runDeadline, client.deleteDeadline)
+	}
+}
+
 func TestResidentResumePlacementMismatchAbortsDespiteFailureBudget(t *testing.T) {
 	cfg, clock, f := residentTestConfig(t)
 	cfg.Resident.Preflight.MaxProbeFailures = 10
@@ -440,8 +538,13 @@ func TestResidentAuthoritativeInventoryFailuresPreventQualification(t *testing.T
 				return e, err
 			}
 			summary, err := runner.Run(context.Background())
-			if err == nil || len(summary.Resident.Stages) != 0 || len(f.items) != 0 {
+			if err == nil || len(f.items) != 0 {
 				t.Fatalf("false fleet qualification: err=%v summary=%+v remaining=%d", err, summary.Resident, len(f.items))
+			}
+			for _, stage := range summary.Resident.Stages {
+				if !stage.InventoryObservedAt.IsZero() {
+					t.Fatalf("failed inventory was reported as a completed stage: %+v", stage)
+				}
 			}
 			if kind == "missing" && f.creates != 0 {
 				t.Fatal("created resources before observer was available")
