@@ -403,6 +403,7 @@ func (r Runner) probeResident(ctx context.Context, c residentClient, j *resident
 	if _, ok := j.entry(slot); ok {
 		return errors.New("resident probe slot already exists; use a fresh run after cleanup")
 	}
+	s.PeakInFlight = 1
 	var e residentEntry
 	defer func() {
 		if e.SandboxID != "" {

@@ -200,6 +200,9 @@ func TestResidentRetainsPopulationAcrossProbesThenCleansOwnedResources(t *testin
 	if summary.Resident.Resume.Attempts != 6 || summary.Resident.Create.Attempts != 6 {
 		t.Fatalf("missing probe statistics: %+v", summary.Resident)
 	}
+	if summary.PeakInFlight != 1 {
+		t.Fatalf("foreground peak = %d, want 1", summary.PeakInFlight)
+	}
 }
 
 func sharedResidentTestConfig(t *testing.T) (Config, *residentClock, *residentFake) {
@@ -353,8 +356,12 @@ func TestResidentUnresolvedIntentBlocksNewSeedAndPreservesJournal(t *testing.T) 
 func TestResidentCleanupRefusesOwnershipChangedAfterSeed(t *testing.T) {
 	cfg, clock, f := residentTestConfig(t)
 	cfg.Resident.Mode = "seed"
-	if _, err := residentTestRunner(cfg, clock, f).Run(context.Background()); err != nil {
+	seed, err := residentTestRunner(cfg, clock, f).Run(context.Background())
+	if err != nil {
 		t.Fatal(err)
+	}
+	if seed.PeakInFlight != 0 {
+		t.Fatalf("seed-only foreground peak = %d, want 0", seed.PeakInFlight)
 	}
 	for id, sb := range f.items {
 		sb.Metadata[sandboxmetadata.KeyRunID] = "unrelated-run"
@@ -491,6 +498,9 @@ func TestResidentCleanupWorksAfterOriginalEvidenceAndRetentionExpire(t *testing.
 	summary, err := residentTestRunner(cfg, clock, f).Run(context.Background())
 	if err != nil || summary.Resident.Remaining != 0 || len(f.items) != 0 {
 		t.Fatalf("expired cleanup prevented: err=%v summary=%+v", err, summary.Resident)
+	}
+	if summary.PeakInFlight != 0 {
+		t.Fatalf("cleanup-only foreground peak = %d, want 0", summary.PeakInFlight)
 	}
 }
 
