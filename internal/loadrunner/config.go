@@ -68,6 +68,7 @@ type Config struct {
 	BenchmarkGuard         bool
 	GlobalLock             bool
 	ExternalBenchmarkGuard bool
+	Resident               ResidentConfig
 }
 
 type routingConfig struct {
@@ -155,8 +156,8 @@ func Load() (Config, error) {
 	if cfg.Environment == "production" && !cfg.ProductionOptIn {
 		return Config{}, errors.New("production load tests require LOAD_TEST_PRODUCTION_OPT_IN=true")
 	}
-	if cfg.Scenario != "create" && cfg.Scenario != "lifecycle" {
-		return Config{}, errors.New("LOAD_TEST_SCENARIO must be create or lifecycle")
+	if cfg.Scenario != "create" && cfg.Scenario != "lifecycle" && cfg.Scenario != "resident" {
+		return Config{}, errors.New("LOAD_TEST_SCENARIO must be create, lifecycle, or resident")
 	}
 	if cfg.Operations <= 0 || cfg.Operations > MaxOperations {
 		return Config{}, fmt.Errorf("LOAD_TEST_OPERATIONS must be between 1 and %d", MaxOperations)
@@ -176,10 +177,30 @@ func Load() (Config, error) {
 		cfg.DeleteTimeout <= 0 || cfg.DeleteTimeout > maxDeleteTimeout {
 		return Config{}, errors.New("load runner durations must be positive and within their safety bounds")
 	}
+	if cfg.Scenario == "resident" {
+		cfg.Resident, err = loadResidentConfig(cfg)
+		if err != nil {
+			return Config{}, err
+		}
+	}
 	if err := validateExecutionConfig(cfg); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+// cleanupTimeout reserves one bounded owner-deletion wave per worker batch.
+// Resident runs include one unresolved probe in the fleet and reserve its
+// preceding deletion attempt separately.
+func cleanupTimeout(cfg Config) time.Duration {
+	if cfg.Scenario != "resident" {
+		return cfg.DeleteTimeout
+	}
+	if cfg.Resident.Population < 1 || cfg.Resident.Population > MaxResidentPopulation || cfg.Concurrency < 1 || cfg.Concurrency > 64 || cfg.DeleteTimeout <= 0 || cfg.DeleteTimeout > maxDeleteTimeout {
+		return 0
+	}
+	waves := (cfg.Resident.Population+1+cfg.Concurrency-1)/cfg.Concurrency + 1
+	return time.Duration(waves) * cfg.DeleteTimeout
 }
 
 func validateExecutionConfig(cfg Config) error {
@@ -197,10 +218,10 @@ func validateExecutionConfig(cfg Config) error {
 	if (cfg.BenchmarkGuard || cfg.GlobalLock) && cfg.LockBackend != "gcs" {
 		return errors.New("benchmark and global coordination require GCS locking")
 	}
-	if cfg.LockBackend != "none" && (cfg.LockTTL < cfg.RunTimeout+cfg.DeleteTimeout+time.Minute || cfg.LockTTL > 2*time.Hour) {
+	if cfg.LockBackend != "none" && (cfg.LockTTL < cfg.RunTimeout+cleanupTimeout(cfg)+time.Minute || cfg.LockTTL > 2*time.Hour) {
 		return errors.New("LOAD_TEST_LOCK_TTL must cover runtime, cleanup and 1m reporting, and be at most 2h")
 	}
-	if cfg.ResourceTTL < cfg.RunTimeout+cfg.DeleteTimeout+time.Minute {
+	if cfg.ResourceTTL < cfg.RunTimeout+cleanupTimeout(cfg)+time.Minute {
 		return errors.New("LOAD_TEST_RESOURCE_TTL must cover runtime, cleanup and 1m reporting")
 	}
 	if cfg.SlackWebhookURL != "" {
@@ -218,7 +239,7 @@ func validateExecutionConfig(cfg Config) error {
 		}
 		start, startErr := time.Parse("15:04", cfg.DailyWindowStart)
 		end, endErr := time.Parse("15:04", cfg.DailyWindowEnd)
-		if startErr != nil || endErr != nil || len(cfg.DailyWindowStart) != 5 || len(cfg.DailyWindowEnd) != 5 || !end.After(start) || end.Sub(start) < cfg.RunTimeout+cfg.DeleteTimeout+time.Minute {
+		if startErr != nil || endErr != nil || len(cfg.DailyWindowStart) != 5 || len(cfg.DailyWindowEnd) != 5 || !end.After(start) || end.Sub(start) < cfg.RunTimeout+cleanupTimeout(cfg)+time.Minute {
 			return errors.New("daily load window must be same-day HH:MM values covering runtime, cleanup and 1m reporting")
 		}
 	}

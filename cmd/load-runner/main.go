@@ -61,6 +61,9 @@ func runConfigured(ctx context.Context, cfg loadrunner.Config, deps runDependenc
 	if deps.Now == nil {
 		deps.Now = time.Now
 	}
+	if err := loadrunner.ValidateResidentAdmission(cfg, deps.Now()); err != nil {
+		return err
+	}
 	if deps.HTTP == nil {
 		deps.HTTP = &http.Client{Timeout: cfg.HTTPTimeout}
 	}
@@ -73,6 +76,8 @@ func runConfigured(ctx context.Context, cfg loadrunner.Config, deps runDependenc
 	scenario := "loadtest-create"
 	if cfg.Scenario == "lifecycle" {
 		scenario = "loadtest-lifecycle"
+	} else if cfg.Scenario == "resident" {
+		scenario = "loadtest-resident"
 	}
 	summary := loadrunner.Summary{
 		ConfiguredOperations: int64(cfg.Operations), ConfiguredConcurrency: int64(cfg.Concurrency), Unstarted: int64(cfg.Operations),

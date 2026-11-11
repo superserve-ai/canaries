@@ -324,7 +324,91 @@ go build -o ./bin/load-runner ./cmd/load-runner
 ./bin/load-runner
 ```
 
-The load runner creates real sandboxes, waits for them to become active, verifies command execution, and deletes them after each operation.
+The create and lifecycle scenarios delete each sandbox after its operation.
+
+### Resident paused-fleet qualification
+
+The manual `resident` scenario retains a paused background population while a small foreground workload creates, pauses, resumes, executes, and deletes sandboxes. It is staging-only, even with production opt-in enabled. It supports up to 210,000 resident owners without increasing the ordinary 10,000-operation limit: `LOAD_TEST_OPERATIONS` remains the foreground probe budget.
+
+For large qualification, use a dedicated staging host and test team with approved quota, credit, disk and retention capacity. The existing small shared staging hosts are not qualified for a 105,000-owner run. A separate `shared_host_small` admission permits at most 100 residents and two workers on an existing staging host. Before running, create a local JSON preflight file with the following fields:
+
+```json
+{
+  "run_id": "resident-qualification-unique-id",
+  "team_id": "<isolated staging team UUID>",
+  "target": "staging-us-central1",
+  "expected_host": "isolated-staging-host",
+  "template": "superserve/python-3.11",
+  "reviewed_at": "2026-01-01T00:00:00Z",
+  "valid_until": "2026-01-01T03:00:00Z",
+  "capacity_population": 105064,
+  "capacity_concurrency": 64,
+  "isolated_host": true,
+  "shared_host_small": false,
+  "quota_checked": true,
+  "credits_checked": true,
+  "disk_capacity_checked": true,
+  "retention_checked": true,
+  "billing_writes_checked": true,
+  "telemetry_checked": true,
+  "control_plane_revision": "<exact 40-character revision>",
+  "host_revision": "<exact 40-character revision>",
+  "comparison_revision": "<exact 40-character baseline revision>",
+  "max_phase_latency_ms": 1000,
+  "max_probe_failures": 0
+}
+```
+
+These fields attest operator checks unavailable through the public API; setting them is not a substitute for checking actual capacity. Replace the example dates, revisions and abort thresholds with reviewed values. Evidence must be at most 30 minutes old and cover the runtime plus cleanup. `capacity_population` is usable additional capacity after accounting for existing active and paused owners and a reserve for routine canaries; it must cover this run's residents plus foreground concurrency. Check both the team's owner quota and the host's disk, memory and CPU headroom. The runner verifies each owner's host from a fresh routing hint returned by the authenticated API and aborts if placement is missing or differs from `expected_host`. The test does not force placement; arrange the isolated host pool before large seeding. Use a key permitted to receive routing hints.
+
+Alongside the staging routing and API-key settings above, configure:
+
+```bash
+export LOAD_TEST_SCENARIO=resident LOAD_TEST_RESIDENT_OPT_IN=true
+export LOAD_TEST_RUN_ID=resident-qualification-unique-id
+export LOAD_TEST_RESIDENT_PREFLIGHT=/absolute/path/preflight.json
+export LOAD_TEST_RESIDENT_JOURNAL=/absolute/path/resident-run.jsonl
+export LOAD_TEST_RESIDENT_INVENTORY_EVIDENCE=/absolute/path/resident-inventory.json
+export CANARY_LOCK_BACKEND=file CANARY_LOCK_FILE=/absolute/path/resident-guard.lock
+export LOAD_TEST_RESIDENT_POPULATION=105000
+export LOAD_TEST_RESIDENT_STAGES=1000,10000,105000
+export LOAD_TEST_RESIDENT_HOLD=15m LOAD_TEST_RESIDENT_PROBE_INTERVAL=30s
+export LOAD_TEST_OPERATIONS=100 LOAD_TEST_CONCURRENCY=64 DELETE_TIMEOUT=1s
+export LOAD_TEST_RUN_TIMEOUT=1h LOAD_TEST_LOCK_TTL=2h LOAD_TEST_RESOURCE_TTL=24h
+go run ./cmd/load-runner
+```
+
+`DELETE_TIMEOUT` limits each owner's API discovery, deletion and confirmation; completion is persisted durably in the journal. Resident cleanup reserves `(ceil((population + 1) / concurrency) + 1) × DELETE_TIMEOUT` for the full fleet, a possible unresolved probe, and its preceding deletion attempt. The example reserves 27 minutes 22 seconds for cleanup; its one-second per-owner limit and 64-worker capacity are illustrative operator choices, not measured or approved defaults. Establish that those limits are suitable before attempting the large run. The usual 45-second delete timeout with ten workers cannot fit a 105,000-owner cleanup within the two-hour lease limit and is rejected before seeding. Runtime, the full cleanup reserve, and one minute of reporting must all fit the configured lease and resource retention; reviewed evidence and an existing journal's original retention must also cover runtime plus cleanup.
+
+For a small shared-host run, set `isolated_host: false` and `shared_host_small: true` in the reviewed preflight, bind `expected_host` to the actual shared staging host, and use capacity values established from its current headroom. Keep the same journal and observer settings, and replace the large-run settings above with:
+
+```bash
+export CANARY_LOCK_BACKEND=gcs LOCK_BUCKET=rayai-dev-api-canary-locks
+unset CANARY_LOCK_FILE
+export LOAD_TEST_BENCHMARK_GUARD=true LOAD_TEST_GLOBAL_LOCK=true
+export LOAD_TEST_RESIDENT_POPULATION=25 LOAD_TEST_RESIDENT_STAGES=1,5,25
+export LOAD_TEST_OPERATIONS=100 LOAD_TEST_CONCURRENCY=1 DELETE_TIMEOUT=5s
+export LOAD_TEST_RUN_TIMEOUT=1h LOAD_TEST_LOCK_TTL=90m LOAD_TEST_RESOURCE_TTL=2h
+go run ./cmd/load-runner
+```
+
+This example holds each of the three stages for 15 minutes (45 minutes total) and needs at least 26 additional owner slots after the routine reserve. Use a smaller population when fresh quota or host headroom requires it. The exact deployed staging GCS bucket and existing load/global/benchmark guards are mandatory in shared mode; the independent local journal lock still prevents concurrent journal writers. The guards reject overlap with existing heavy jobs and known benchmark windows. Do not pause deployed jobs or bypass these guards to obtain a test window. Routine canaries may continue, so results explicitly record `shared_host: true` and `qualification_scope: shared-host-small`; they provide scaled staging evidence and do not qualify 105,000-owner capacity. Created owners keep their 60-second active and idle orphan limits in both modes.
+
+Each hold covers at least three five-minute storage sampling cycles. The runtime must cover all holds plus actual setup time; the existing one-hour runtime cap still applies. Isolated runs may use `LOAD_TEST_RESIDENT_MODE=seed` to retain a successfully seeded population, and `qualify` (the default) to reuse its journal and run the hold/probes. Shared mode permits only `qualify` and `cleanup`: successful standalone seeding would retain residents after releasing shared guards. Recovery never blindly replaces an uncertain create: it discovers the unique run/worker/slot owner first, and stops if the outcome remains ambiguous. A larger recovered population is not reported as a smaller ramp stage. Refresh the capacity evidence before a resumed run; ownership and retention deadlines remain bound to the original journal.
+
+Start the read-only inventory observer before the runner and leave it running through cleanup. Configure `PGSERVICE` (or `PGHOST`, `PGDATABASE`, `PGUSER` and a protected `PGPASSFILE`) explicitly for the staging database, using a role permitted to read only the required sandbox inventory. Credentials are not stored in evidence or passed as process arguments. Pass the same population as the runner (25 for the shared-host example):
+
+```bash
+python3 scripts/resident_inventory.py \
+  --preflight /absolute/path/preflight.json --population 105000 \
+  --output /absolute/path/resident-inventory.json
+```
+
+The producer executes one bounded `READ ONLY` query with a ten-second statement timeout, scoped by the indexed team ID and ownership metadata. By default it waits ten seconds between queries; `--interval` accepts 1–15 seconds to leave room for query time within the evidence freshness limit. It atomically replaces a small JSON file with the actual live owner IDs, paused count and wrong-host count; it does not echo a desired population. IDs are normalized to bare UUIDs before hashing, matching regional public API IDs. The runner checks fresh evidence before seeding, verifies the first seeded owner before bulk admission, and requires exact population/paused counts and ID hashes at each stage, throughout hold probes, and after the final hold boundary. Missing, stale (over one minute), moved, resumed, deleted or unexpected owners prevent qualification. An observer query failure leaves old evidence to age out and abort the run. The preflight file, inventory file, journal and local lock files must resolve to distinct paths; existing symlink/hardlink aliases are rejected before file-lock acquisition. The journal binds shared versus isolated scope so recovery cannot relabel earlier measurements.
+
+Qualification completion, cancellation and failures attempt bounded concurrent cleanup of metadata-verified run owners. Probe and fleet cleanup share a hard deadline at the run deadline plus the population-derived reserve; each owner also keeps its individual `DELETE_TIMEOUT`. `LOAD_TEST_RESIDENT_MODE=cleanup` retries cleanup using the same journal and ownership configuration, including after evidence or original retention expires, but still requires leases and configured retention sized for the population cleanup budget. Never reuse a completed journal for a new run. The journal and metadata expiry preserve recovery/normal janitor ownership after a process crash; unresolved cleanup is reported as failure.
+
+Structured stage timestamps, probe error counts and p50/p95/p99 create/pause/resume latencies support comparison across recorded revisions. Collect host CPU/I/O, sampler duration, report bytes, processing lag, spool occupancy and database/lock measurements externally over these same windows. Functional tests use small fake populations; this tooling alone does not establish a real 105,000-owner operating envelope or authorize production load.
 
 ## Debug Retention
 

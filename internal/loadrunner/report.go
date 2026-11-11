@@ -2,6 +2,7 @@ package loadrunner
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -11,6 +12,13 @@ import (
 
 // Report summarizes the observations retained by Run without making API calls.
 func (s Summary) Report(cfg Config, runErr error) string {
+	if s.Resident != nil {
+		data, _ := json.Marshal(s.Resident)
+		if s.Resident.SharedHost {
+			return "Shared-host staging resident result (does not qualify 105000-owner scale; external host/database evidence required): " + string(data)
+		}
+		return "Resident paused-fleet scenario result (external host/database evidence required): " + string(data)
+	}
 	var out strings.Builder
 	fmt.Fprintln(&out, "*Load Testing Results*")
 	fmt.Fprintf(&out, "Environment: %s | Region: %s | Target: %s\n", cfg.Environment, cfg.Region, cfg.Target)
