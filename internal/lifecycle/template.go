@@ -149,7 +149,7 @@ func (o Operations) waitForBuild(ctx context.Context, templateID, buildID string
 		interval = 2 * time.Second
 	}
 	for {
-		build, err := o.Client.GetTemplateBuild(ctx, templateID, buildID)
+		build, err := o.getTemplateBuildWithRetry(ctx, templateID, buildID)
 		if err != nil {
 			return build, fmt.Errorf("fetching build status: %w", err)
 		}
@@ -165,6 +165,30 @@ func (o Operations) waitForBuild(ctx context.Context, templateID, buildID string
 		case <-time.After(interval):
 		}
 	}
+}
+
+// getTemplateBuildWithRetry reads the build row, retrying transport failures
+// and gateway errors so one dropped poll does not fail the run and delete a
+// template whose build is still progressing. The GET is safe to repeat, and
+// every attempt and backoff shares ctx, so retries never outlast the run.
+func (o Operations) getTemplateBuildWithRetry(ctx context.Context, templateID, buildID string) (canaryapi.TemplateBuild, error) {
+	var build canaryapi.TemplateBuild
+	attempt := 0
+	err := retryTransient(ctx, func() error {
+		attempt++
+		var attemptErr error
+		build, attemptErr = o.Client.GetTemplateBuild(ctx, templateID, buildID)
+		if attemptErr != nil && ctx.Err() == nil && isTransientError(attemptErr) {
+			log.Warn().
+				Err(attemptErr).
+				Str("template_id", templateID).
+				Str("build_id", buildID).
+				Int("attempt", attempt).
+				Msg("template build status poll failed with a transient error")
+		}
+		return attemptErr
+	})
+	return build, err
 }
 
 func (o Operations) DeleteTemplateBestEffort(ctx context.Context, templateID string, opts DeleteSandboxOptions) error {
