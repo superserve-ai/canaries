@@ -6,6 +6,8 @@ queue_rules:
   - name: main
     queue_conditions:
       - base = main
+      # Fork CI intentionally skips credentialed plans; this queue accepts same-repository PRs only.
+      - -from-fork
       - "#approved-reviews-by >= 1"
       - check-success = @github-actions/test
       - check-success = @github-actions/terraform-plan (staging, staging, infra/envs/staging/us-central1)
