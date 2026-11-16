@@ -7,7 +7,9 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest moved to Ubuntu 26.04, which Playwright 1.57.0
+    # cannot install Chromium dependencies for.
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
