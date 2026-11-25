@@ -75,6 +75,48 @@ func TestScheduledWindowBudgetAndDST(t *testing.T) {
 	}
 }
 
+func TestProductionEveningWindowBudgetAndDST(t *testing.T) {
+	for _, slot := range []struct {
+		name, start, end, summer, winter string
+	}{
+		{"east", "22:00", "22:27", "2026-07-10T05:00:00Z", "2026-01-09T06:00:00Z"},
+		{"west", "22:30", "22:57", "2026-07-10T05:30:00Z", "2026-01-09T06:30:00Z"},
+	} {
+		for _, season := range []struct{ name, opening string }{
+			{"summer", slot.summer},
+			{"winter", slot.winter},
+		} {
+			for _, edge := range []struct {
+				name    string
+				delay   time.Duration
+				blocked bool
+			}{
+				{"opening", 0, false},
+				{"last complete budget", 4 * time.Minute, false},
+				{"one nanosecond late", 4*time.Minute + time.Nanosecond, true},
+				{"before opening", -time.Nanosecond, true},
+				{"at end", 27 * time.Minute, true},
+			} {
+				t.Run(slot.name+"/"+season.name+"/"+edge.name, func(t *testing.T) {
+					cfg := guardTestConfig()
+					cfg.DailyWindowStart, cfg.DailyWindowEnd = slot.start, slot.end
+					opening := guardTestTime(t, season.opening)
+					end, err := scheduledWindow(cfg, opening.Add(edge.delay))
+					if edge.blocked {
+						if err == nil {
+							t.Fatal("late or early production start was admitted")
+						}
+						return
+					}
+					if err != nil || !end.Equal(opening.Add(27*time.Minute)) {
+						t.Fatalf("end=%s err=%v, want %s", end, err, opening.Add(27*time.Minute))
+					}
+				})
+			}
+		}
+	}
+}
+
 func TestScheduledWindowRejectsInvalidOrUnsafeConfiguration(t *testing.T) {
 	for _, tt := range []struct {
 		name   string
@@ -107,8 +149,10 @@ func TestKnownHeavyWindowBoundaries(t *testing.T) {
 		name, start, end string
 		blocked          bool
 	}{
-		{"before UTC Lindy", "2026-07-09T10:00:00Z", "2026-07-09T10:30:00Z", false},
-		{"enter UTC Lindy", "2026-07-09T10:29:59Z", "2026-07-09T10:30:01Z", true},
+		{"before daily benchmark buffer", "2026-07-09T08:15:00Z", "2026-07-09T08:45:00Z", false},
+		{"enter daily benchmark buffer", "2026-07-09T08:44:59Z", "2026-07-09T08:45:01Z", true},
+		{"daily benchmark running", "2026-07-09T09:00:00Z", "2026-07-09T09:30:00Z", true},
+		{"UTC Lindy still protected", "2026-07-09T10:30:00Z", "2026-07-09T11:00:00Z", true},
 		{"leave UTC Lindy", "2026-07-09T12:29:59Z", "2026-07-09T12:30:01Z", true},
 		{"after UTC Lindy", "2026-07-09T12:30:00Z", "2026-07-09T12:45:00Z", false},
 		{"before midnight buffer", "2026-07-09T23:15:00Z", "2026-07-09T23:45:00Z", false},
@@ -376,11 +420,12 @@ func TestAcquireGuardManualLockModes(t *testing.T) {
 func TestGuardedManualRunAvoidsCurrentAndUpcomingHeavyWindows(t *testing.T) {
 	for _, tt := range []struct{ name, now string }{
 		{"UTC Lindy running", "2026-07-09T11:00:00Z"},
+		{"daily benchmark running", "2026-07-09T09:00:00Z"},
 		{"Pacific Lindy running", "2026-07-09T16:00:00Z"},
 		{"SDK midnight running", "2026-07-09T00:30:00Z"},
 		{"SDK 17 UTC running", "2026-07-09T18:00:00Z"},
 		{"Friday public running", "2026-07-10T13:00:00Z"},
-		{"future UTC Lindy", "2026-07-09T10:15:00Z"},
+		{"future daily benchmark buffer", "2026-07-09T08:30:00Z"},
 		{"future midnight buffer", "2026-07-09T23:30:00Z"},
 		{"future Friday public buffer", "2026-07-10T12:35:00Z"},
 		{"future Pacific and UTC 17 buffer", "2026-01-08T16:30:00Z"},
@@ -438,8 +483,8 @@ func TestGuardedManualRunRechecksFutureHeavyBoundaryAfterPreflight(t *testing.T)
 	for _, phase := range []string{"external", "leases"} {
 		t.Run(phase, func(t *testing.T) {
 			cfg := guardTestConfig()
-			current := guardTestTime(t, "2026-07-09T10:06:00Z")
-			late := guardTestTime(t, "2026-07-09T10:08:00Z")
+			current := guardTestTime(t, "2026-07-09T08:21:00Z")
+			late := guardTestTime(t, "2026-07-09T08:23:00Z")
 			locker := &guardTestLocker{}
 			var client *http.Client
 			if phase == "external" {
@@ -637,6 +682,10 @@ func TestExternalBenchmarkGuardFixtures(t *testing.T) {
 		{name: "empty", first: guardEmptyRuns, second: guardEmptyRuns, calls: 2},
 		{name: "queued heavy", first: guardTestResponse(`{"name":"Sandbox TTI","path":".github/workflows/sandbox-tti.yml"}`), blocked: true, calls: 1},
 		{name: "active heavy", first: guardEmptyRuns, second: guardTestResponse(`{"name":"Sandbox DAX","path":".github/workflows/sandbox-dax.yml"}`), blocked: true, calls: 2},
+		{name: "queued daily benchmarks", first: guardTestResponse(`{"name":"Daily Benchmarks","path":".github/workflows/daily-benchmarks.yml"}`), blocked: true, calls: 1},
+		{name: "renamed daily benchmarks", first: guardEmptyRuns, second: guardTestResponse(`{"name":"Provider performance","path":".github/workflows/daily-benchmarks.yml"}`), blocked: true, calls: 2},
+		{name: "daily benchmark name identifies heavy", first: guardTestResponse(`{"name":" DAILY BENCHMARKS ","path":".github/workflows/custom.yml"}`), blocked: true, calls: 1},
+		{name: "daily benchmark path with case and ref", first: guardTestResponse(`{"name":"Provider performance","path":".GITHUB/WORKFLOWS/DAILY-BENCHMARKS.YAML@master"}`), blocked: true, calls: 1},
 		{name: "unknown sandbox", first: guardTestResponse(`{"name":"Sandbox New Benchmark","path":".github/workflows/custom.yml"}`), blocked: true, calls: 1},
 		{name: "path identifies heavy", first: guardTestResponse(`{"name":"New load","path":".github/workflows/sandbox-new.yml"}`), blocked: true, calls: 1},
 		{name: "reliability", first: guardTestResponse(`{"name":"Sandbox Reliability","path":".github/workflows/sandbox-reliability.yml"}`), second: guardEmptyRuns, calls: 2},

@@ -161,9 +161,9 @@ module "daily_load" {
   otlp_metrics_endpoint     = local.otlp_endpoint
   slack_webhook_secret_name = local.benchmark_slack_webhook_secret_name
   scheduler_enabled         = var.daily_load_scheduler_enabled
-  scheduler_cron            = "45 7 * * *"
-  daily_window_start        = "07:45"
-  daily_window_end          = "08:12"
+  scheduler_cron            = "0 22 * * *"
+  daily_window_start        = "22:00"
+  daily_window_end          = "22:27"
   notification_channel_ids  = var.oncall_notification_channel_ids
   create_alerts             = var.create_alerts
   labels                    = local.labels
