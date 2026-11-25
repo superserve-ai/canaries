@@ -232,9 +232,9 @@ module "daily_load" {
   otlp_metrics_endpoint     = each.value.otlp_endpoint
   slack_webhook_secret_name = google_secret_manager_secret.benchmark_slack_webhook.secret_id
   scheduler_enabled         = var.daily_load_scheduler_enabled
-  scheduler_cron            = "15 8 * * *"
-  daily_window_start        = "08:15"
-  daily_window_end          = "08:42"
+  scheduler_cron            = "30 22 * * *"
+  daily_window_start        = "22:30"
+  daily_window_end          = "22:57"
   notification_channel_ids  = var.oncall_notification_channel_ids
   create_alerts             = var.create_alerts
   labels                    = merge(local.labels, { region = each.value.target_region })

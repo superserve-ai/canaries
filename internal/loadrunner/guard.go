@@ -231,7 +231,7 @@ func overlapsKnownHeavyWindow(start, end time.Time) bool {
 			var intervals [][2]time.Time
 			if location == time.UTC {
 				intervals = append(intervals,
-					[2]time.Time{day.Add(10*time.Hour + 30*time.Minute), day.Add(12*time.Hour + 30*time.Minute)},
+					[2]time.Time{day.Add(8*time.Hour + 45*time.Minute), day.Add(12*time.Hour + 30*time.Minute)},
 					[2]time.Time{day.Add(-15 * time.Minute), day.Add(2*time.Hour + 15*time.Minute)},
 					[2]time.Time{day.Add(16*time.Hour + 45*time.Minute), day.Add(18*time.Hour + 15*time.Minute)},
 				)
@@ -323,7 +323,8 @@ func checkExternalBenchmarkStatus(ctx context.Context, client *http.Client, stat
 func isHeavySandboxWorkflow(name, path string) bool {
 	name, path = strings.ToLower(name), strings.ToLower(path)
 	path = strings.SplitN(path, "@", 2)[0]
-	heavy := strings.HasPrefix(name, "sandbox") || strings.HasPrefix(path, ".github/workflows/sandbox-") || path == ".github/workflows/sandbox.yml" || path == ".github/workflows/sandbox.yaml"
+	heavy := name == "daily benchmarks" || path == ".github/workflows/daily-benchmarks.yml" || path == ".github/workflows/daily-benchmarks.yaml" ||
+		strings.HasPrefix(name, "sandbox") || strings.HasPrefix(path, ".github/workflows/sandbox-") || path == ".github/workflows/sandbox.yml" || path == ".github/workflows/sandbox.yaml"
 	if !heavy {
 		return false
 	}
