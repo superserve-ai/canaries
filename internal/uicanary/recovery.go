@@ -34,8 +34,21 @@ func (r Runner) sandboxSafetyTimeout() time.Duration {
 	return timeout + 5*time.Minute
 }
 
+// createSandboxDialog finds the console Create Sandbox dialog by its accessible
+// name, which comes from the dialog title. Placeholder and prefilled values in
+// the form are copy that changes; the title is the dialog's identity.
+func createSandboxDialog(page playwright.Page) playwright.Locator {
+	return page.GetByRole(*playwright.AriaRoleDialog, playwright.PageGetByRoleOptions{Name: "Create Sandbox", Exact: playwright.Bool(true)})
+}
+
+// sandboxNameInput finds the name textbox by its "Sandbox name" field label.
+// The label also holds a required marker, so the match is not exact.
+func sandboxNameInput(dialog playwright.Locator) playwright.Locator {
+	return dialog.GetByRole(*playwright.AriaRoleTextbox, playwright.LocatorGetByRoleOptions{Name: "Sandbox name"}).First()
+}
+
 func (r Runner) configureCreationSafety(page playwright.Page, metadata map[string]string) error {
-	dialog := page.Locator("div[role='dialog'], .dialog-popup").Filter(playwright.LocatorFilterOptions{Has: page.Locator("input[placeholder='my-sandbox']")}).First()
+	dialog := createSandboxDialog(page)
 	if err := dialog.GetByRole(*playwright.AriaRoleButton, playwright.LocatorGetByRoleOptions{Name: "Advanced Options", Exact: playwright.Bool(true)}).Click(); err != nil {
 		return fmt.Errorf("open sandbox safety settings: %w", err)
 	}

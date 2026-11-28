@@ -159,8 +159,10 @@ func setupMockConsoleServer(opts ...*mockServerState) *httptest.Server {
   <button id="create-btn" onclick="document.getElementById('dialog').style.display='block'">Create sandbox</button>
   <table id="sandboxes-table"><thead><tr><th>Name</th><th>Status</th></tr></thead><tbody><tr><td><input type="checkbox" aria-label="Select other-sandbox" />other-sandbox</td><td>Active</td></tr></tbody></table>
 
-  <div id="dialog" role="dialog" style="display:none;">
-    <input type="text" placeholder="my-sandbox" id="name-input" />
+  <div id="dialog" role="dialog" aria-labelledby="create-title" style="display:none;">
+    <h2 id="create-title">Create Sandbox</h2>
+    <label for="name-input">Sandbox name<span>*</span></label>
+    <input type="text" id="name-input" value="sandbox-prefilled-1" />
     <div id="create-err-alert" role="alert" class="text-destructive" style="display:none;">Account quota exceeded. Upgrade required.</div>
     <button type="button" onclick="document.getElementById('advanced').style.display='block'">Advanced Options</button>
     <div id="advanced" style="display:none">
