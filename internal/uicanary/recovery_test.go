@@ -44,6 +44,9 @@ func TestMissingBrowserIDRecoversCreatedSandbox(t *testing.T) {
 			if payload == nil {
 				t.Fatal("UI never submitted the create request")
 			}
+			if name, _ := payload["name"].(string); !strings.HasPrefix(name, "ui-canary-") {
+				t.Fatalf("create request kept the prefilled name instead of the run name: %v", payload["name"])
+			}
 			if payload["timeout_seconds"] != float64(330) || payload["auto_delete_seconds"] != float64(300) {
 				t.Fatalf("create request lacks safety settings: %v", payload)
 			}

@@ -603,7 +603,7 @@ func (r Runner) createSandboxInUI(ctx context.Context, page playwright.Page, san
 
 	// Fill Sandbox Name in dialog (scope to dialog to avoid background search bar)
 	log.Info().Msg("waiting for create sandbox dialog name input")
-	nameInput := page.Locator("input[placeholder='my-sandbox'], div[role='dialog'] input, .dialog-popup input, div[data-state='open'] input").First()
+	nameInput := sandboxNameInput(createSandboxDialog(page))
 	if err := nameInput.WaitFor(playwright.LocatorWaitForOptions{
 		State:   playwright.WaitForSelectorStateVisible,
 		Timeout: playwright.Float(timeoutMs),
